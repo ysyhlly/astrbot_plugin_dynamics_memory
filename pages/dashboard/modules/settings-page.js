@@ -1,0 +1,636 @@
+/**
+ * Settings Page - advanced plugin configuration moved out of the host page.
+ * Sections render as collapsed groups; a search box finds fields by label,
+ * hint or config path. Field metadata and localized labels come from the
+ * backend schema endpoint, so this page stays in sync without hand-written
+ * forms for every option.
+ */
+
+import { esc, showToast, confirmAction, canDiscardChanges } from "./utils.js";
+
+const QUICK_PATHS = [
+  "graph_memory.enabled",
+  "memory_dedup.enabled",
+  "memory_dedup.similarity_threshold",
+  "memory_consolidation.enabled",
+  "recall_engine.top_k",
+  "reflection_engine.summary_trigger_rounds",
+  "filtering_settings.memory_scope_mode",
+  "agent_tools.enable_recall_tool",
+];
+
+const CATEGORIES = [
+  {
+    key: "memory",
+    titleKey: "settings.catMemory",
+    sections: [
+      "reflection_engine",
+      "importance_decay",
+      "memory_dedup",
+      "memory_consolidation",
+      "forgetting_agent",
+    ],
+  },
+  {
+    key: "recall",
+    titleKey: "settings.catRecall",
+    sections: ["recall_engine", "fusion_strategy", "agent_tools"],
+  },
+  { key: "graph", titleKey: "settings.catGraph", sections: ["graph_memory"] },
+  {
+    key: "scope",
+    titleKey: "settings.catScope",
+    sections: ["access_control", "filtering_settings", "session_manager"],
+  },
+  {
+    key: "system",
+    titleKey: "settings.catSystem",
+    sections: [
+      "backup_settings",
+      "migration_settings",
+      "index_rebuild_settings",
+    ],
+  },
+];
+
+/* 保存这些值会带来不可逆或大范围影响，提交前需要一次明确的二次确认。 */
+const DANGEROUS_RULES = [
+  {
+    path: "memory_consolidation.keep_original",
+    when: (next) => next === "delete",
+    messageKey: "settings.dangerKeepOriginal",
+  },
+  {
+    path: "forgetting_agent.auto_cleanup_enabled",
+    when: (next, previous) => next === true && previous !== true,
+    messageKey: "settings.dangerAutoCleanup",
+  },
+  {
+    path: "graph_memory.enabled",
+    when: (next, previous) => next === false && previous !== false,
+    messageKey: "settings.dangerGraphOff",
+  },
+];
+
+/* schema 文案里明确提到需要重载插件的字段，在字段旁给出徽标。 */
+const RELOAD_HINT_RE = /(重载|reload|restart|重启)/i;
+
+export class SettingsPage {
+  constructor(state, apiClient) {
+    this.state = state;
+    this.api = apiClient;
+    this.sections = [];
+    this.adapterOwnership = [];
+    this._open = new Set();
+    this._query = "";
+    this._busy = false;
+    this._bound = false;
+    /* 编辑中的值在搜索/展开重渲染后仍需保留，避免输入被丢掉。 */
+    this._formValues = {};
+    /* 服务端加载值（脏检查基线）；null 表示尚未加载完成。 */
+    this._baseline = null;
+    this._fetchGeneration = 0;
+    this._suppressCapture = false;
+  }
+
+  currentLang() {
+    if (typeof window.getLanguage === "function") return window.getLanguage();
+    return "zh";
+  }
+
+  async fetch({ preserveDraft = false } = {}) {
+    const container = document.getElementById("settings-container");
+    if (!container) return;
+    if (preserveDraft && (this._busy || this.hasUnsavedChanges())) return;
+    const generation = ++this._fetchGeneration;
+    if (!this._bound) this.bindEvents();
+    if (!this.sections.length) {
+      container.innerHTML =
+        '<p class="text-tertiary">' + esc(window.t("settings.loading")) + "</p>";
+    }
+    try {
+      const data = await this.api.get("config", { lang: this.currentLang() });
+      if (generation !== this._fetchGeneration || (preserveDraft && (this._busy || this.hasUnsavedChanges()))) return;
+      this.sections = Array.isArray(data.sections) ? data.sections : [];
+      this.adapterOwnership = data.adapter_ownership || [];
+      this._formValues = {};
+      this.renderFeedback("");
+      this._suppressCapture = true;
+      try {
+        this.render();
+      } finally {
+        this._suppressCapture = false;
+      }
+      const baseline = {};
+      for (const section of this.sections) {
+        for (const field of section.fields || []) {
+          const value = field.value;
+          baseline[field.path] = field.type === "adapter-list" ? value ?? null
+            : field.type === "bool" ? Boolean(value)
+            : field.type === "list" ? value ?? field.default ?? []
+            : field.type === "int" || field.type === "float" ? value ?? "" : String(value ?? "");
+        }
+      }
+      this._baseline = JSON.stringify(baseline);
+      this._baseline = this._snapshotValues() || this._baseline;
+    } catch (error) {
+      if (generation !== this._fetchGeneration || (preserveDraft && (this._busy || this.hasUnsavedChanges()))) return;
+      this.renderFeedback(error.message || window.t("settings.loadFailed"), true);
+      container.innerHTML =
+        '<p class="text-tertiary">' + esc(window.t("settings.loadFailed")) + "</p>";
+    }
+  }
+
+  renderFeedback(message, isError = false) {
+    const bar = document.getElementById("settings-feedback");
+    const label = document.getElementById("settings-feedback-message");
+    if (!bar || !label) return;
+    bar.hidden = !message;
+    bar.classList.toggle("is-error", Boolean(message) && Boolean(isError));
+    label.textContent = message || "";
+  }
+
+  /* 过滤/展开重渲染前先收走当前 DOM 值，避免只渲染子集时误判脏状态。 */
+  _captureVisibleValues() {
+    if (this._suppressCapture || typeof document.querySelectorAll !== "function") return;
+    try {
+      Object.assign(this._formValues, this.collectValues());
+    } catch (_error) {
+      /* 非法输入留到保存时再提示；此处不应打断渲染。 */
+    }
+  }
+
+  _snapshotValues() {
+    if (this._baseline === null) return null;
+    let current;
+    try {
+      current = { ...JSON.parse(this._baseline) };
+    } catch (_error) {
+      return null;
+    }
+    Object.assign(current, this._formValues);
+    try {
+      Object.assign(current, this.collectValues());
+    } catch (_error) {
+      return null;
+    }
+    return JSON.stringify(current);
+  }
+
+  hasUnsavedChanges() {
+    if (this._baseline === null) return false;
+    const current = this._snapshotValues();
+    return current === null || current !== this._baseline;
+  }
+
+  canLeave() {
+    return canDiscardChanges(this._busy, this.hasUnsavedChanges());
+  }
+
+  matches(field, query) {
+    if (!query) return true;
+    const haystack = [field.label, field.hint, field.path].join(" ").toLowerCase();
+    return haystack.includes(query);
+  }
+
+  _fieldValue(field) {
+    if (Object.prototype.hasOwnProperty.call(this._formValues, field.path)) {
+      return this._formValues[field.path];
+    }
+    return field.value;
+  }
+
+  _formatDefault(field) {
+    const value = field.default;
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (value && typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  _hasDefault(field) {
+    return (
+      field.type !== "adapter-list" &&
+      Object.prototype.hasOwnProperty.call(field, "default") &&
+      field.default !== undefined &&
+      field.default !== null
+    );
+  }
+
+  render() {
+    const container = document.getElementById("settings-container");
+    if (!container) return;
+    this._captureVisibleValues();
+    if (!this.sections.length) {
+      container.innerHTML =
+        '<p class="text-tertiary">' + esc(window.t("settings.empty")) + "</p>";
+      return;
+    }
+
+    const query = this._query.trim().toLowerCase();
+    const bySection = new Map();
+    this.sections.forEach((section) => bySection.set(section.key, section));
+    const quickSet = new Set(QUICK_PATHS);
+    const quickFields = [];
+    bySection.forEach((section) => {
+      (section.fields || []).forEach((field) => {
+        if (quickSet.has(field.path) && this.matches(field, query)) {
+          quickFields.push(field);
+        }
+      });
+    });
+
+    let html = "";
+    if (quickFields.length) {
+      html +=
+        '<section class="settings-quick">' +
+        '<div class="settings-quick-title">' +
+        esc(window.t("settings.quickTitle")) +
+        "</div>" +
+        '<div class="settings-fields">' +
+        quickFields.map((field) => this.renderField(field)).join("") +
+        "</div>" +
+        "</section>";
+    }
+
+    const categoryHtml = CATEGORIES.map((category) => {
+      const groups = category.sections
+        .map((key) => bySection.get(key))
+        .filter(Boolean)
+        .map((section) => {
+          const fields = (section.fields || []).filter(
+            (field) => !quickSet.has(field.path) && this.matches(field, query)
+          );
+          if (!fields.length) return "";
+          return (
+            '<div class="settings-subgroup">' +
+            '<div class="settings-subgroup-title">' +
+            esc(section.title) +
+            "</div>" +
+            '<div class="settings-fields">' +
+            fields.map((field) => this.renderField(field)).join("") +
+            "</div>" +
+            "</div>"
+          );
+        })
+        .filter(Boolean)
+        .join("");
+      if (!groups) return "";
+      const open = this._open.has(category.key) || Boolean(query);
+      return (
+        '<details class="settings-group settings-category" data-category="' +
+        esc(category.key) +
+        '"' +
+        (open ? " open" : "") +
+        ">" +
+        "<summary>" +
+        '<span class="settings-group-title">' +
+        esc(window.t(category.titleKey)) +
+        "</span>" +
+        "</summary>" +
+        groups +
+        "</details>"
+      );
+    }).join("");
+
+    html +=
+      '<div class="settings-categories-title">' +
+      esc(window.t("settings.advancedTitle")) +
+      "</div>" +
+      categoryHtml;
+
+    const ownership = this.adapterOwnership;
+    const adapterField = this.sections.flatMap(section => section.fields || [])
+      .find(field => field.type === "adapter-list");
+    if ((!query || window.t("settings.adapterOwnership").toLowerCase().includes(query)) && ownership.length && adapterField?.options?.length) {
+      const options = adapterField.options.map((id, i) => '<option value="' + esc(id) + '">' +
+        esc(adapterField.option_labels[i]) + '</option>').join("");
+      html += '<details class="settings-group"' + (query ? ' open' : '') + '><summary>' +
+        esc(window.t("settings.adapterOwnership")) + '</summary>' + ownership.map((row, i) =>
+        '<div class="adapter-ownership-row"><span>' + (row.adapter_id ? '' : esc(window.t("settings.adapterUnassigned")) + ' · ') + esc(row.adapter_id || row.session_id || window.t("settings.adapterUnknown")) +
+        ' · ' + esc(window.t('settings.adapterCount', row.count)) + '</span><select class="input" data-adapter-target="' + i + '">' +
+        options.replace('value="' + esc(row.adapter_id) + '"', 'value="' + esc(row.adapter_id) + '" selected') + '</select><button class="btn btn-secondary" data-adapter-assign="' + i + '"' + (row.adapter_id && adapterField.options.includes(row.adapter_id) ? ' disabled' : '') + '>' +
+        esc(window.t("settings.adapterAssign")) + '</button></div>'
+      ).join("") + '</details>';
+    }
+    container.innerHTML =
+      html ||
+      '<p class="text-tertiary">' + esc(window.t("settings.noMatches")) + "</p>";
+  }
+
+  renderField(field) {
+    const path = esc(field.path);
+    const common =
+      'data-setting-path="' + path + '" data-type="' + esc(field.type) + '"';
+    const value = this._fieldValue(field);
+    let control = "";
+    if (field.type === "adapter-list") {
+      const selected = value ?? field.options;
+      control = '<fieldset class="adapter-options" aria-label="' + esc(field.label) + '" ' + common +
+        ' data-original="' + (value === null ? "null" : "set") + '">' + field.options.map((id, i) =>
+        '<label><input type="checkbox" value="' + esc(id) + '"' +
+        (selected.includes(id) ? ' checked' : '') + '> ' + esc(field.option_labels[i]) + '</label>'
+      ).join("") + '</fieldset>';
+    } else if (field.type === "bool") {
+      control =
+        '<input type="checkbox" ' + common + (value ? " checked" : "") + ">";
+    } else if (Array.isArray(field.options)) {
+      const labels = Array.isArray(field.option_labels)
+        ? field.option_labels
+        : field.options;
+      const options = field.options
+        .map((option, index) => {
+          const label = labels[index] || option;
+          const selected = String(value) === String(option) ? " selected" : "";
+          return (
+            '<option value="' +
+            esc(option) +
+            '"' +
+            selected +
+            ">" +
+            esc(label) +
+            "</option>"
+          );
+        })
+        .join("");
+      control = '<select class="input" ' + common + ">" + options + "</select>";
+    } else if (field.type === "int" || field.type === "float") {
+      const attrs = [];
+      if (field.min !== undefined) attrs.push('min="' + esc(field.min) + '"');
+      if (field.max !== undefined) attrs.push('max="' + esc(field.max) + '"');
+      if (field.step !== undefined) attrs.push('step="' + esc(field.step) + '"');
+      control =
+        '<input class="input" type="number" ' +
+        common +
+        attrs.join(" ") +
+        ' value="' +
+        esc(value ?? "") +
+        '">';
+    } else if (field.type === "list") {
+      /* _formValues 里可能保存着用户正在编辑的原始字符串，避免重复编码。 */
+      const listText =
+        typeof value === "string"
+          ? value
+          : JSON.stringify(value ?? field.default ?? [], null, 2);
+      control =
+        '<textarea class="input textarea" rows="4" ' +
+        common +
+        ">" +
+        esc(listText) +
+        "</textarea>";
+    } else if (field.type === "text") {
+      /* 白名单/别名/隔离会话等长文本按 schema type 渲染为多行输入。 */
+      control =
+        '<textarea class="input textarea" rows="4" ' +
+        common +
+        ">" +
+        esc(value ?? "") +
+        "</textarea>";
+    } else {
+      control =
+        '<input class="input" type="text" ' +
+        common +
+        ' value="' +
+        esc(value ?? "") +
+        '">';
+    }
+
+    const labelHtml =
+      '<label class="settings-label">' +
+      esc(field.label) +
+      (RELOAD_HINT_RE.test(field.hint || "")
+        ? '<span class="settings-reload-badge">' + esc(window.t("settings.reloadRequired")) + "</span>"
+        : "") +
+      "</label>";
+    const defaultHtml = this._hasDefault(field)
+      ? '<div class="settings-default">' +
+        '<span class="settings-default-label">' + esc(window.t("settings.defaultValue")) + ":</span>" +
+        '<code class="settings-default-value">' + esc(this._formatDefault(field)) + "</code>" +
+        '<button type="button" class="btn btn-sm btn-ghost settings-reset-btn" data-reset-path="' + path +
+        '" data-reset-type="' + esc(field.type) +
+        '" data-default="' + esc(JSON.stringify(field.default)) + '">' +
+        esc(window.t("settings.restoreDefault")) +
+        "</button></div>"
+      : "";
+    return (
+      '<div class="settings-field">' +
+      
+      labelHtml +
+      control +
+      defaultHtml +
+      (field.hint ? '<div class="settings-hint">' + esc(field.hint) + "</div>" : "") +
+      "</div>"
+    );
+  }
+
+  _rememberValue(control) {
+    const path = control.dataset.settingPath;
+    const type = control.dataset.type;
+    if (!path) return;
+    if (type === "adapter-list") {
+      this._formValues[path] = Array.from(
+        control.querySelectorAll("input:checked"),
+        (input) => input.value
+      );
+      control.dataset.edited = "1";
+      return;
+    }
+    if (type === "bool") {
+      this._formValues[path] = Boolean(control.checked);
+      return;
+    }
+    if (type === "list") {
+      try {
+        this._formValues[path] = JSON.parse(control.value);
+      } catch (_error) {
+        this._formValues[path] = control.value;
+      }
+      return;
+    }
+    const parseNumber = type === "int" ? Number.parseInt : type === "float" ? Number.parseFloat : null;
+    const parsed = parseNumber?.(control.value, 10);
+    this._formValues[path] = Number.isFinite(parsed) ? parsed : control.value;
+  }
+
+  _applyDefault(control, type, defaultValue) {
+    if (type === "bool") {
+      control.checked = Boolean(defaultValue);
+    } else if (type === "list") {
+      control.value = JSON.stringify(defaultValue ?? [], null, 2);
+    } else {
+      control.value = defaultValue ?? "";
+    }
+  }
+
+  async _confirmDangerousChanges(values) {
+    const previous = this._baseline ? JSON.parse(this._baseline) : {};
+    const messages = DANGEROUS_RULES.filter((rule) =>
+      rule.when(values[rule.path], previous[rule.path])
+    ).map((rule) => window.t(rule.messageKey));
+    if (!messages.length) return true;
+    return confirmAction({
+      title: window.t("settings.dangerTitle"),
+      message: messages.join("\n\n"),
+      confirmLabel: window.t("common.confirm"),
+      destructive: true,
+    });
+  }
+
+  bindEvents() {
+    const save = document.getElementById("settings-save-btn");
+    if (save && !save.dataset.bound) {
+      save.dataset.bound = "1";
+      save.addEventListener("click", () => this.save());
+    }
+    const expand = document.getElementById("settings-expand-all");
+    if (expand && !expand.dataset.bound) {
+      expand.dataset.bound = "1";
+      expand.addEventListener("click", () => {
+        CATEGORIES.forEach((category) => this._open.add(category.key));
+        this.render();
+      });
+    }
+    const collapse = document.getElementById("settings-collapse-all");
+    if (collapse && !collapse.dataset.bound) {
+      collapse.dataset.bound = "1";
+      collapse.addEventListener("click", () => {
+        this._open.clear();
+        this._query = "";
+        const search = document.getElementById("settings-search");
+        if (search) search.value = "";
+        this.render();
+      });
+    }
+    const search = document.getElementById("settings-search");
+    if (search && !search.dataset.bound) {
+      search.dataset.bound = "1";
+      search.addEventListener("input", () => {
+        this._query = search.value;
+        this.render();
+      });
+    }
+    const container = document.getElementById("settings-container");
+    if (container && !container.dataset.bound) {
+      container.dataset.bound = "1";
+      container.addEventListener("input", event => {
+        const control = event.target.closest?.("[data-setting-path]");
+        if (control) this._rememberValue(control);
+      });
+      container.addEventListener("change", event => {
+        const group = event.target.closest?.('[data-type="adapter-list"]');
+        const control = event.target.closest?.("[data-setting-path]");
+        if (control) this._rememberValue(control);
+        if (group) group.dataset.edited = "1";
+        if (event.target.dataset.adapterTarget !== undefined) {
+          const index = event.target.dataset.adapterTarget;
+          container.querySelector('[data-adapter-assign="' + index + '"]').disabled =
+            event.target.value === this.adapterOwnership[Number(index)].adapter_id;
+        }
+      });
+      container.addEventListener("click", async event => {
+        const resetButton = event.target.closest("[data-reset-path]");
+        if (resetButton) {
+          const path = resetButton.dataset.resetPath;
+          const control = container.querySelector('[data-setting-path="' + path + '"]');
+          if (control) {
+            const defaultValue = JSON.parse(resetButton.dataset.default);
+            this._applyDefault(control, resetButton.dataset.resetType, defaultValue);
+            this._rememberValue(control);
+          }
+          return;
+        }
+        const button = event.target.closest("[data-adapter-assign]");
+        if (!button || button.disabled) return;
+        const index = Number(button.dataset.adapterAssign);
+        const row = this.adapterOwnership[index];
+        const target = container.querySelector('[data-adapter-target="' + index + '"]');
+        button.disabled = true;
+        try {
+          await this.api.post("adapters/assign", {adapter_id: target.value, source_adapter_id: row.adapter_id, session_id: row.session_id});
+          await this.fetch();
+        } catch (error) {
+          this.renderFeedback(error.message, true);
+          button.disabled = false;
+        }
+      });
+      container.addEventListener(
+        "toggle",
+        (event) => {
+          const details = event.target;
+          const key = details?.dataset?.category;
+          if (!key) return;
+          if (details.open) this._open.add(key);
+          else this._open.delete(key);
+        },
+        true
+      );
+    }
+    this._bound = true;
+  }
+
+  collectValues() {
+    const values = {};
+    document.querySelectorAll("[data-setting-path]").forEach((element) => {
+      const path = element.dataset.settingPath;
+      const type = element.dataset.type;
+      if (type === "adapter-list") {
+        values[path] = element.dataset.original === "null" && !element.dataset.edited
+          ? null : Array.from(element.querySelectorAll('input:checked'), input => input.value);
+      } else if (type === "bool") {
+        values[path] = Boolean(element.checked);
+      } else if (type === "int") {
+        const parsed = Number.parseInt(element.value, 10);
+        if (Number.isNaN(parsed)) throw new Error(path);
+        values[path] = parsed;
+      } else if (type === "float") {
+        const parsed = Number.parseFloat(element.value);
+        if (Number.isNaN(parsed)) throw new Error(path);
+        values[path] = parsed;
+      } else if (type === "list") {
+        let parsed;
+        try {
+          parsed = JSON.parse(element.value);
+        } catch {
+          throw new Error(path);
+        }
+        if (!Array.isArray(parsed)) throw new Error(path);
+        values[path] = parsed;
+      } else {
+        values[path] = element.value;
+      }
+    });
+    return values;
+  }
+
+  async save() {
+    if (this._busy) return;
+    const button = document.getElementById("settings-save-btn");
+    let values;
+    try {
+      values = this.collectValues();
+    } catch (error) {
+      const message = window.t("settings.invalidValue", error.message);
+      this.renderFeedback(message, true);
+      showToast(message, true);
+      return;
+    }
+    if (!await this._confirmDangerousChanges(values)) {
+      this.renderFeedback(window.t("settings.saveCancelled"));
+      return;
+    }
+    this._busy = true;
+    if (button) button.disabled = true;
+    try {
+      await this.api.post("config/update", { values });
+      this.renderFeedback(window.t("settings.saved"));
+      showToast(window.t("settings.saved"));
+      await this.fetch();
+    } catch (error) {
+      const message = error.message || window.t("settings.saveFailed");
+      this.renderFeedback(message, true);
+      showToast(message, true);
+    } finally {
+      this._busy = false;
+      if (button) button.disabled = false;
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "private": true,
+  "type": "module",
+  "name": "astrbot-plugin-dynamics-memory",
+  "scripts": {
+    "check:dashboard": "node scripts/build_dashboard.mjs --check",
+    "docs:dev": "vitepress dev docs",
+    "test:frontend": "node --test \"tests/frontend/**/*.test.js\"",
+    "build:dashboard": "node scripts/build_dashboard.mjs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "overrides": {
+    "source-map-js": "^1.2.2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "vite": "^6.4.2",
+    "vue": "^3.5.42"
+  },
+  "devDependencies": {
+    "d3-force-3d": "^3.0.6",
+    "vitepress-plugin-mermaid": "^2.0.17",
+    "vitepress": "^1.6.4",
+    "three": "^0.186.1",
+    "esbuild": "^0.25.12",
+    "mermaid": "^11.17.2"
+  },
+  "version": "0.2.0-rc.1"
+}
