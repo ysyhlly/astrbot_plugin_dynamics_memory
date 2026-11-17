@@ -286,9 +286,7 @@ async def test_verified_group_scope_uses_platform_id_and_adapter_name_separately
 def test_private_policy_is_disabled_by_default_and_without_persona():
     private = "test-instance:FriendMessage:user-a"
     group = "test-instance:GroupMessage:group-b"
-    config = _config(
-        filtering_settings={"private_shared_group_sources": [group]}
-    )
+    config = _config(filtering_settings={"private_shared_group_sources": [group]})
     disabled = resolve_memory_access_policy(
         config,
         _Event(session_id=private, platform="aiocqhttp", platform_id="test-instance"),

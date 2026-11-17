@@ -2,7 +2,7 @@
   <a href="README.md">中文</a> · <a href="README_en.md">English</a> · <strong>Русский</strong>
 </p>
 
-![LivingMemory: долговременная память, связывающая предпочтения, людей, планы и контекст](docs/public/images/livingmemory-cover.svg)
+![Dynamics Memory: долговременная память, связывающая предпочтения, людей, планы и контекст](docs/public/images/livingmemory-cover.svg)
 
 <p align="center">
   <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/"><strong>Документация · EN</strong></a> ·
@@ -19,7 +19,7 @@
 
 ## Сохранить важное из разговора
 
-LivingMemory хранит для AstrBot предпочтения, отношения, ход проектов и прежние договорённости. Плагин создаёт сводки диалогов, находит нужный контекст с помощью ключевых слов, векторов и графа, а также управляет памятью через архивирование, затухание и усиление при обращении.
+Dynamics Memory хранит для AstrBot предпочтения, отношения, ход проектов и прежние договорённости. Плагин создаёт сводки диалогов, находит нужный контекст с помощью ключевых слов, векторов и графа, а также управляет памятью через архивирование, затухание и усиление при обращении.
 
 > **Последняя стабильная версия: 2.10.0**<br>
 > Исправляет шум при поиске и политику хранения, снижает затраты на суммаризацию и инъекцию, добавляет диагностику и регрессионные проверки качества.<br>
@@ -28,7 +28,7 @@ LivingMemory хранит для AstrBot предпочтения, отноше�
 ## От сохранения к воспоминанию
 
 - **Автоматическая запись** — Сводки создаются после заданного числа реплик. Важные записи могут сохранять исходные сообщения для проверки и повторного обобщения.
-- **Поиск с учётом контекста** — Документы и граф поддерживают поиск по ключевым словам и векторам, объединение рейтингов, фильтрацию области и проверку жизненного цикла.
+- **Поиск с учётом контекста** — Документы и граф поддерживают поиск по ключевым словам и векторов, объединение рейтингов, фильтрацию области и проверку жизненного цикла.
 - **Инструменты агента** — `recall_long_term_memory` и `memorize_long_term_memory` позволяют читать и записывать долговременную память по мере необходимости.
 - **Управление через Views** — Просмотр графов 2D/3D, приближение к узлам и связанным воспоминаниям, редактирование памяти, тестирование поиска, настройка промптов и состояние системы.
 
@@ -44,9 +44,9 @@ LivingMemory хранит для AstrBot предпочтения, отноше�
 
 ## Начало работы
 
-1. Установите плагин из каталога AstrBot или поместите выбранную версию в `data/plugins/astrbot_plugin_livingmemory`.
-2. Сначала создайте и включите провайдер Embedding в разделе AstrBot «Model Providers → Embedding» (настройка бесплатной `BAAI/bge-m3` описана [здесь · EN](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model)), затем перезагрузите AstrBot и укажите ID этого провайдера и LLM-провайдера в настройках LivingMemory. Пустое поле Embedding лишь выбирает первый доступный провайдер, что может привести к неверной модели или сбою инициализации индексов.
-3. Откройте `Plugins → LivingMemory → Views → dashboard` (в старых версиях AstrBot раздел называется `Pages`). Для представлений плагина требуется **AstrBot 4.24.2 или новее**.
+1. Установите плагин из каталога AstrBot или поместите выбранную версию в `data/plugins/astrbot_plugin_dynamics_memory`.
+2. Сначала создайте и включите провайдер Embedding в разделе AstrBot «Model Providers → Embedding» (настройка бесплатной `BAAI/bge-m3` описана [здесь · EN](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model)), затем перезагрузите AstrBot и укажите ID этого провайдера и LLM-провайдера в настройках Dynamics Memory. Пустое поле Embedding лишь выбирает первый доступный провайдер, что может привести к неверной модели или сбою инициализации индексов.
+3. Откройте `Plugins → Dynamics Memory → Views → dashboard` (в старых версиях AstrBot раздел называется `Pages`). Для представлений плагина требуется **AstrBot 4.24.2 или новее**.
 
 Для тестирования скачайте указанный выше тег и следуйте [инструкции по установке и откату · EN](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/releases). Перед обновлением сохраните резервную копию данных и конфигурации плагина.
 
@@ -54,7 +54,7 @@ LivingMemory хранит для AstrBot предпочтения, отноше�
 
 ## Бесплатная модель Embedding
 
-Семантический поиск LivingMemory зависит от Embedding Provider. Рекомендуется бесплатная модель `BAAI/bge-m3` от SiliconFlow (1024 измерения). В разделе AstrBot «Model Providers → Embedding → Add Model Provider → OpenAI Embedding» укажите:
+Семантический поиск Dynamics Memory зависит от Embedding Provider. Рекомендуется бесплатная модель `BAAI/bge-m3` от SiliconFlow (1024 измерения). В разделе AstrBot «Model Providers → Embedding → Add Model Provider → OpenAI Embedding» укажите:
 
 - Provider ID: оставьте значение, созданное AstrBot, например `openai_embedding`
 - API Base URL: `https://api.siliconflow.cn/v1`
@@ -62,7 +62,7 @@ LivingMemory хранит для AstrBot предпочтения, отноше�
 - Embedding Model: `BAAI/bge-m3`
 - Embedding Dimensions: `1024`
 
-Сохраните и протестируйте провайдер, затем укажите его Provider ID в `provider_settings.embedding_provider_id` настроек LivingMemory. ID модели и ID провайдера различаются; полная инструкция доступна [здесь · EN](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model).
+Сохраните и протестируйте провайдер, затем укажите его Provider ID в `provider_settings.embedding_provider_id` настроек Dynamics Memory. ID модели и ID провайдера различаются; полная инструкция доступна [здесь · EN](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/guide/embedding-model).
 
 ## Подробнее
 

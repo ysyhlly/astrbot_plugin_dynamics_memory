@@ -14,7 +14,9 @@ from astrbot_plugin_dynamics_memory.core.event_handler_modules.memory_reflection
 from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
 from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorResult
 from astrbot_plugin_dynamics_memory.storage.conversation_store import ConversationStore
-from astrbot_plugin_dynamics_memory.core.managers.conversation_manager import ConversationManager
+from astrbot_plugin_dynamics_memory.core.managers.conversation_manager import (
+    ConversationManager,
+)
 
 
 def _vector_result(doc_id: int, score: float) -> VectorResult:
@@ -234,7 +236,9 @@ class _CountingEmbeddingProvider:
         return self.dimension
 
 
-async def _make_real_engine(tmp_path: Path, provider: _CountingEmbeddingProvider, *, shared_db=False):
+async def _make_real_engine(
+    tmp_path: Path, provider: _CountingEmbeddingProvider, *, shared_db=False
+):
     faiss_db = FaissVecDB(
         doc_store_path=str(tmp_path / "dedup-documents.db"),
         index_store_path=str(tmp_path / "dedup.index"),
@@ -242,7 +246,9 @@ async def _make_real_engine(tmp_path: Path, provider: _CountingEmbeddingProvider
     )
     await faiss_db.initialize()
     engine = MemoryEngine(
-        db_path=str(tmp_path / ("dedup-documents.db" if shared_db else "dedup-memory.db")),
+        db_path=str(
+            tmp_path / ("dedup-documents.db" if shared_db else "dedup-memory.db")
+        ),
         faiss_db=faiss_db,
         graph_vector_db=None,
         config={},
@@ -268,7 +274,9 @@ def _reflection_with_real_engine(engine, *, dedup_enabled: bool = True):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalidate", [None, "source", "target"])
-async def test_guarded_dedup_validates_source_and_target_at_publication(tmp_path, invalidate):
+async def test_guarded_dedup_validates_source_and_target_at_publication(
+    tmp_path, invalidate
+):
     provider = _CountingEmbeddingProvider()
     engine, faiss_db = await _make_real_engine(tmp_path, provider, shared_db=True)
     store = ConversationStore(str(tmp_path / "guarded-conversations.db"))
@@ -276,16 +284,23 @@ async def test_guarded_dedup_validates_source_and_target_at_publication(tmp_path
     manager = ConversationManager(store=store)
     session = "qq:FriendMessage:member"
     message = await manager.add_message(
-        session_id=session, role="user", content="synthetic source", sender_id="member",
+        session_id=session,
+        role="user",
+        content="synthetic source",
+        sender_id="member",
     )
     first_window = {"start_index": 0, "end_index": 2, "snapshot_fingerprint": "first"}
     second_window = {"start_index": 2, "end_index": 4, "snapshot_fingerprint": "second"}
     base = {"memory_visibility": "private", "source_session_id": session}
     old_id = await engine.add_memory(
-        "A longer synthetic summary.", session_id=session, persona_id="p",
+        "A longer synthetic summary.",
+        session_id=session,
+        persona_id="p",
         metadata={**base, "source_window": first_window},
     )
-    engine.find_similar_memory = AsyncMock(return_value=({"id": old_id, "similarity": 0.97}, None))
+    engine.find_similar_memory = AsyncMock(
+        return_value=({"id": old_id, "similarity": 0.97}, None)
+    )
     publication_count = 0
 
     async def source_current():
@@ -298,28 +313,53 @@ async def test_guarded_dedup_validates_source_and_target_at_publication(tmp_path
         if publication_count == 1 and invalidate == "source":
             await manager.clear_session(session)
         if publication_count == 1 and invalidate == "target":
-            assert await engine.update_memory(old_id, {"metadata": {"review_revision": 1}})
-        async with manager.source_publication_lease(source_current, session_id=session) as current:
+            assert await engine.update_memory(
+                old_id, {"metadata": {"review_revision": 1}}
+            )
+        async with manager.source_publication_lease(
+            source_current, session_id=session
+        ) as current:
             yield current
 
     async def persist():
         return await _reflection_with_real_engine(engine)._persist_summary_memory(
-            session_id=session, memory_scope=session, persona_id="p",
-            content="A longer synthetic summary.", importance=0.7,
-            metadata={**base, "source_window": second_window}, atoms=[], source_messages=None,
-            source_validator=source_current, source_publish_lease=publication_lease,
+            session_id=session,
+            memory_scope=session,
+            persona_id="p",
+            content="A longer synthetic summary.",
+            importance=0.7,
+            metadata={**base, "source_window": second_window},
+            atoms=[],
+            source_messages=None,
+            source_validator=source_current,
+            source_publish_lease=publication_lease,
         )
 
     try:
         if invalidate == "source":
             with pytest.raises(ValueError, match="source_snapshot_changed"):
                 await persist()
-            assert await engine.stored_summary_window(session, 2, 4, snapshot_fingerprint="second") is None
-            assert json.loads((await engine.get_memory_record(old_id))["metadata"])["status"] == "active"
+            assert (
+                await engine.stored_summary_window(
+                    session, 2, 4, snapshot_fingerprint="second"
+                )
+                is None
+            )
+            assert (
+                json.loads((await engine.get_memory_record(old_id))["metadata"])[
+                    "status"
+                ]
+                == "active"
+            )
         else:
             memory_id, created, similarity = await persist()
             assert memory_id != old_id
-            assert await engine.stored_summary_window(session, 2, 4, snapshot_fingerprint="second") == memory_id
+            assert (
+                await engine.stored_summary_window(
+                    session, 2, 4, snapshot_fingerprint="second"
+                )
+                == memory_id
+            )
             old = json.loads((await engine.get_memory_record(old_id))["metadata"])
             if invalidate == "target":
                 assert created and similarity is None
@@ -327,11 +367,28 @@ async def test_guarded_dedup_validates_source_and_target_at_publication(tmp_path
             else:
                 assert not created and similarity == pytest.approx(0.97)
                 assert old["status"] == "archived" and old["superseded_by"] == memory_id
-                assert await engine.stored_summary_window(session, 0, 2, snapshot_fingerprint="first") == memory_id
-                assert not await engine.rollback_guarded_summary_merge(memory_id, "wrong")
+                assert (
+                    await engine.stored_summary_window(
+                        session, 0, 2, snapshot_fingerprint="first"
+                    )
+                    == memory_id
+                )
+                assert not await engine.rollback_guarded_summary_merge(
+                    memory_id, "wrong"
+                )
                 assert await engine.rollback_guarded_summary_merge(memory_id, "second")
-                assert await engine.stored_summary_window(session, 0, 2, snapshot_fingerprint="first") == old_id
-                assert await engine.stored_summary_window(session, 2, 4, snapshot_fingerprint="second") is None
+                assert (
+                    await engine.stored_summary_window(
+                        session, 0, 2, snapshot_fingerprint="first"
+                    )
+                    == old_id
+                )
+                assert (
+                    await engine.stored_summary_window(
+                        session, 2, 4, snapshot_fingerprint="second"
+                    )
+                    is None
+                )
     finally:
         await store.close()
         await engine.close()
@@ -452,6 +509,8 @@ async def test_precomputed_embedding_insert_matches_host_fallback(tmp_path):
     finally:
         await engine.close()
         await faiss_db.close()
+
+
 # ── Merge body rebuild (R2-a): text union + index rebuild path ──────────────
 
 

@@ -1,6 +1,8 @@
 """Weighted community metadata used by the 3D dashboard."""
 
-from astrbot_plugin_dynamics_memory.core.page_api_modules.graph_handler import GraphHandler
+from astrbot_plugin_dynamics_memory.core.page_api_modules.graph_handler import (
+    GraphHandler,
+)
 
 
 def test_weighted_communities_follow_dense_groups_without_losing_relations():

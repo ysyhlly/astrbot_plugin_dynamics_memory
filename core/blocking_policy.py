@@ -11,7 +11,11 @@ PLUGIN_NAME = "astrbot_plugin_autonomous_blocking"
 
 
 def _value(item: Any, name: str, default=None):
-    return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+    return (
+        item.get(name, default)
+        if isinstance(item, dict)
+        else getattr(item, name, default)
+    )
 
 
 def _matches_name(value: Any) -> bool:
@@ -39,16 +43,28 @@ class BlockingPolicyGate:
             return "unavailable", None
         try:
             entries = catalog()
-            entries = entries.items() if isinstance(entries, dict) else (("", item) for item in entries or ())
+            entries = (
+                entries.items()
+                if isinstance(entries, dict)
+                else (("", item) for item in entries or ())
+            )
             for key, item in entries:
                 if not _value(item, "activated", True):
                     continue
-                names = (key, _value(item, "name"), _value(item, "root_dir_name"),
-                         _value(item, "module_path"))
+                names = (
+                    key,
+                    _value(item, "name"),
+                    _value(item, "root_dir_name"),
+                    _value(item, "module_path"),
+                )
                 if not any(_matches_name(value) for value in names):
                     continue
-                service = (_value(item, "star_cls") or _value(item, "star") or
-                           _value(item, "plugin") or item)
+                service = (
+                    _value(item, "star_cls")
+                    or _value(item, "star")
+                    or _value(item, "plugin")
+                    or item
+                )
                 if service is not None and not isinstance(service, type):
                     return "found", service
             return "absent", None
@@ -60,7 +76,9 @@ class BlockingPolicyGate:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         if isinstance(value, dict):
-            return {str(key): BlockingPolicyGate._plain(item) for key, item in value.items()}
+            return {
+                str(key): BlockingPolicyGate._plain(item) for key, item in value.items()
+            }
         if isinstance(value, (list, tuple)):
             return [BlockingPolicyGate._plain(item) for item in value]
         raise TypeError("blocking owner context is not plain data")
@@ -85,7 +103,10 @@ class BlockingPolicyGate:
             if not str(_value(meta, "name", "")):
                 return None
             status = _value(platform, "status")
-            if status is not None and str(_value(status, "value", status)).lower() != "running":
+            if (
+                status is not None
+                and str(_value(status, "value", status)).lower() != "running"
+            ):
                 return None
             return platform
         except Exception:
@@ -99,9 +120,13 @@ class BlockingPolicyGate:
             return None
         return platform_id, umo
 
-    def _drop_platform_contexts(self, platform_id: str, owner_id: str | None = None) -> None:
+    def _drop_platform_contexts(
+        self, platform_id: str, owner_id: str | None = None
+    ) -> None:
         for cached_key, cached_value in list(self._owner_contexts.items()):
-            if cached_key[0] == platform_id and (owner_id is None or cached_value.get("owner_id") != owner_id):
+            if cached_key[0] == platform_id and (
+                owner_id is None or cached_value.get("owner_id") != owner_id
+            ):
                 self._owner_contexts.pop(cached_key, None)
 
     async def observe_trusted_event(self, event: Any, scope: dict) -> bool | None:
@@ -124,8 +149,12 @@ class BlockingPolicyGate:
         except Exception:
             return None
         event_umo = str(getattr(event, "unified_msg_origin", "") or "")
-        if (not platform_id or not self_id or platform_id != key[0] or
-                event_umo != key[1]):
+        if (
+            not platform_id
+            or not self_id
+            or platform_id != key[0]
+            or event_umo != key[1]
+        ):
             return None
         self._drop_platform_contexts(platform_id, self_id)
         if getattr(service, "enabled", True) is False:
@@ -151,9 +180,14 @@ class BlockingPolicyGate:
             owner = context.get("owner")
             owner_id = _value(owner, "self_id", "")
             owner_platform_id = _value(owner, "platform_instance_id", "")
-            if (not isinstance(owner_id, str) or not owner_id.strip() or owner_id.strip() != self_id or
-                    str(owner_platform_id or "") != platform_id or
-                    str(context.get("umo", "")) != event_umo or event_umo != key[1]):
+            if (
+                not isinstance(owner_id, str)
+                or not owner_id.strip()
+                or owner_id.strip() != self_id
+                or str(owner_platform_id or "") != platform_id
+                or str(context.get("umo", "")) != event_umo
+                or event_umo != key[1]
+            ):
                 self._owner_contexts.pop(key, None)
                 return None
             context = self._plain(context)
@@ -161,11 +195,17 @@ class BlockingPolicyGate:
             self._owner_contexts.pop(key, None)
             return None
         self._owner_contexts[key] = {
-            "context": context, "owner_id": self_id, "service_id": id(service),
-            "platform_object_id": id(platform), "captured_at": time.monotonic(),
+            "context": context,
+            "owner_id": self_id,
+            "service_id": id(service),
+            "platform_object_id": id(platform),
+            "captured_at": time.monotonic(),
         }
         if len(self._owner_contexts) > self.max_owner_contexts:
-            oldest = min(self._owner_contexts, key=lambda item: self._owner_contexts[item]["captured_at"])
+            oldest = min(
+                self._owner_contexts,
+                key=lambda item: self._owner_contexts[item]["captured_at"],
+            )
             self._owner_contexts.pop(oldest, None)
         if callable(self.wakeup):
             try:
@@ -188,7 +228,10 @@ class BlockingPolicyGate:
         platform_id = umo.split(":", 1)[0] if isinstance(umo, str) else ""
         key = (platform_id, umo) if platform_id else None
         cached = self._owner_contexts.get(key) if key else None
-        if not cached or time.monotonic() - cached["captured_at"] > self.owner_ttl_seconds:
+        if (
+            not cached
+            or time.monotonic() - cached["captured_at"] > self.owner_ttl_seconds
+        ):
             if key:
                 self._owner_contexts.pop(key, None)
             return None
@@ -197,12 +240,16 @@ class BlockingPolicyGate:
             return None
         context = cached["context"]
         owner = context.get("owner") if isinstance(context, dict) else None
-        if (str(context.get("umo", "")) != umo or
-                str(_value(owner, "self_id", "")) != cached["owner_id"] or
-                str(_value(owner, "platform_instance_id", "")) != platform_id):
+        if (
+            str(context.get("umo", "")) != umo
+            or str(_value(owner, "self_id", "")) != cached["owner_id"]
+            or str(_value(owner, "platform_instance_id", "")) != platform_id
+        ):
             self._owner_contexts.pop(key, None)
             return None
-        platform = self._platform(platform_id, {"platform": context.get("scope", {}).get("platform", "")})
+        platform = self._platform(
+            platform_id, {"platform": context.get("scope", {}).get("platform", "")}
+        )
         if inspect.isawaitable(platform):
             platform = await platform
             platform = self._validate_platform(platform, platform_id, {})
@@ -235,15 +282,22 @@ class BlockingPolicyGate:
         try:
             key = self._scope_key(scope)
             cached = self._owner_contexts.get(key) if key else None
-            if not cached or time.monotonic() - cached["captured_at"] > self.owner_ttl_seconds:
+            if (
+                not cached
+                or time.monotonic() - cached["captured_at"] > self.owner_ttl_seconds
+            ):
                 return None
             if cached["service_id"] != id(service):
                 return None
             context = cached["context"]
             owner_id = _value(context.get("owner"), "self_id", "")
             owner_platform_id = _value(context.get("owner"), "platform_instance_id", "")
-            if (not owner_id or str(owner_id) != cached["owner_id"] or
-                    str(owner_platform_id or "") != key[0] or str(context.get("umo", "")) != key[1]):
+            if (
+                not owner_id
+                or str(owner_id) != cached["owner_id"]
+                or str(owner_platform_id or "") != key[0]
+                or str(context.get("umo", "")) != key[1]
+            ):
                 return None
             platform_id, _ = key
             platform = self._platform(platform_id, scope)
@@ -257,14 +311,19 @@ class BlockingPolicyGate:
             snapshot = snapshot_fn(context)
             if inspect.isawaitable(snapshot):
                 snapshot = await snapshot
-            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("rules"), list):
+            if not isinstance(snapshot, dict) or not isinstance(
+                snapshot.get("rules"), list
+            ):
                 return None
 
             actor_id = material.get("actor_id")
-            exact_event = (descriptor.get("material_kind") == "source_event" and
-                           material.get("source_status") == "exact_event" and
-                           isinstance(material.get("source_event_id"), str) and
-                           isinstance(actor_id, str) and bool(actor_id.strip()))
+            exact_event = (
+                descriptor.get("material_kind") == "source_event"
+                and material.get("source_status") == "exact_event"
+                and isinstance(material.get("source_event_id"), str)
+                and isinstance(actor_id, str)
+                and bool(actor_id.strip())
+            )
             source_ids = {actor_id.strip()} if exact_event else set()
             frame = {
                 "frame_id": str(descriptor.get("material_id", "")),
@@ -278,7 +337,9 @@ class BlockingPolicyGate:
             for rule in snapshot["rules"]:
                 if not isinstance(rule, dict):
                     return None
-                if str(rule.get("mode", "")).lower() == "shield" and rule.get("active", True):
+                if str(rule.get("mode", "")).lower() == "shield" and rule.get(
+                    "active", True
+                ):
                     target = str(rule.get("target_uid") or "").strip()
                     if not target:
                         return None
@@ -287,11 +348,17 @@ class BlockingPolicyGate:
             filtered = filter_fn(context, bundle, "role_input")
             if inspect.isawaitable(filtered):
                 filtered = await filtered
-            if not isinstance(filtered, dict) or not isinstance(filtered.get("context_items"), list):
+            if not isinstance(filtered, dict) or not isinstance(
+                filtered.get("context_items"), list
+            ):
                 return None
-            if active_shields and (not exact_event or source_ids.intersection(active_shields)):
+            if active_shields and (
+                not exact_event or source_ids.intersection(active_shields)
+            ):
                 return False
-            return any(isinstance(row, dict) and row.get("frame_id") == frame["frame_id"]
-                       for row in filtered["context_items"])
+            return any(
+                isinstance(row, dict) and row.get("frame_id") == frame["frame_id"]
+                for row in filtered["context_items"]
+            )
         except Exception:
             return None

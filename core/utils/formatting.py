@@ -85,16 +85,35 @@ def _memory_metadata_rows(metadata: dict, markers: tuple[str, ...]) -> list[str]
 
     # 稳定身份优先：participants 是模型写的昵称，同名/改名后无法区分；
     # participant_identities 记录各发送者的平台账号，用它补上可区分的后缀。
-    if metadata.get("memory_visibility") == "group" or metadata.get("interaction_type") == "group_chat":
-        rows.append("Source: shared group conversation; do not attribute this statement to the current private-chat user")
+    if (
+        metadata.get("memory_visibility") == "group"
+        or metadata.get("interaction_type") == "group_chat"
+    ):
+        rows.append(
+            "Source: shared group conversation; do not attribute this statement to the current private-chat user"
+        )
         source_session_id = metadata.get("source_session_id")
         if isinstance(source_session_id, str):
             source_parts = source_session_id.split(":")
             if len(source_parts) >= 3 and "group" in source_parts[1].casefold():
-                rows.append("Source group: " + _compact_injection_text(source_parts[-1], markers))
-    source_start, source_end = metadata.get("source_time_start"), metadata.get("source_time_end")
+                rows.append(
+                    "Source group: "
+                    + _compact_injection_text(source_parts[-1], markers)
+                )
+    source_start, source_end = (
+        metadata.get("source_time_start"),
+        metadata.get("source_time_end"),
+    )
     if source_start or source_end:
-        rows.append("Source time range: " + _compact_injection_text(str(source_start or source_end) + " - " + str(source_end or source_start), markers))
+        rows.append(
+            "Source time range: "
+            + _compact_injection_text(
+                str(source_start or source_end)
+                + " - "
+                + str(source_end or source_start),
+                markers,
+            )
+        )
     identities = metadata.get("participant_identities")
     if isinstance(identities, list) and identities:
         participants_str = "、".join(

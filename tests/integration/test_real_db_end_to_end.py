@@ -22,8 +22,12 @@ from astrbot_plugin_dynamics_memory.core.managers.graph_memory_manager import (
 from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
 from astrbot_plugin_dynamics_memory.core.narrative_api import scope_key
 from astrbot_plugin_dynamics_memory.core.plugin_helpers_mixin import PluginHelpersMixin
-from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import GraphExtractor
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
+    GraphExtractor,
+)
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.graph_vector_retriever import (
     GraphVectorRetriever,
 )
@@ -275,6 +279,7 @@ async def test_graph_memory_full_rebuild_saves_real_faiss_once(
     ]
 
     try:
+
         async def _batches():
             yield memories
 
@@ -522,7 +527,10 @@ class _TestEvent(AstrMessageEvent):
         message_obj.message_id = f"message-{checkpoint or message}"
         message_obj.message = [Plain(message)]
         super().__init__(
-            message, message_obj, PlatformMetadata("test", "test", adapter_id), session_id
+            message,
+            message_obj,
+            PlatformMetadata("test", "test", adapter_id),
+            session_id,
         )
         if checkpoint is not None:
             self.set_extra("llm_checkpoint_id", checkpoint)
@@ -532,7 +540,9 @@ class _TestEvent(AstrMessageEvent):
 
 
 class _GuardPlugin(PluginHelpersMixin):
-    def __init__(self, context, config_manager, memory_engine, conversation_manager, sidecar):
+    def __init__(
+        self, context, config_manager, memory_engine, conversation_manager, sidecar
+    ):
         self.context = context
         self.config_manager = config_manager
         self.initializer = SimpleNamespace(
@@ -559,12 +569,16 @@ async def test_background_derivation_preserves_provider_refusal():
     )
 
     with pytest.raises(RuntimeError) as failure:
-        await plugin._derive_evidence_materials([{
-            "material_id": "material-1",
-            "source_status": "verified",
-            "role": "user",
-            "text": "I went running yesterday.",
-        }])
+        await plugin._derive_evidence_materials(
+            [
+                {
+                    "material_id": "material-1",
+                    "source_status": "verified",
+                    "role": "user",
+                    "text": "I went running yesterday.",
+                }
+            ]
+        )
     assert failure.value is error
     provider.text_chat.assert_awaited_once()
 
@@ -631,7 +645,9 @@ async def real_db_stack(tmp_path: Path):
 
     sidecar = EvidenceSidecar(tmp_path / "evidence.db")
     await sidecar.initialize()
-    plugin = _GuardPlugin(context, config_manager, memory_engine, conversation_manager, sidecar)
+    plugin = _GuardPlugin(
+        context, config_manager, memory_engine, conversation_manager, sidecar
+    )
     event_handler = EventHandler(
         context=context,
         config_manager=config_manager,
@@ -691,7 +707,7 @@ async def test_command_handlers_with_real_database(real_db_stack):
 
     status_output = [msg async for msg in command_handler.handle_status(event)]
     assert len(status_output) == 1
-    assert "LivingMemory" in status_output[0]
+    assert "Dynamics Memory" in status_output[0]
     assert "总记忆数: 1" in status_output[0]
 
     await conversation_manager.add_message(

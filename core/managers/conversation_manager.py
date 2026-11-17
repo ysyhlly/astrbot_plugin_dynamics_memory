@@ -11,7 +11,6 @@
 """
 
 from contextlib import asynccontextmanager, nullcontext
-import json
 
 
 import asyncio
@@ -755,52 +754,92 @@ class ConversationManager:
                     limit = min(1000, end - start)
                     if limit <= 0:
                         return start, []
-            rows = await self.store.get_messages_range(session_id, offset=start, limit=limit)
+            rows = await self.store.get_messages_range(
+                session_id, offset=start, limit=limit
+            )
             return start, rows
 
     async def write_native_pending_summary(
-        self, session_id: str, messages: list[Message], pending: dict[str, Any],
+        self,
+        session_id: str,
+        messages: list[Message],
+        pending: dict[str, Any],
         expected_revision: int | None,
     ) -> bool:
         async with self._session_lock(session_id):
-            if expected_revision is not None and self._session_revisions.get(session_id, 0) != expected_revision:
+            if (
+                expected_revision is not None
+                and self._session_revisions.get(session_id, 0) != expected_revision
+            ):
                 return False
-            return await self.store.write_native_pending_summary(session_id, messages, pending)
+            return await self.store.write_native_pending_summary(
+                session_id, messages, pending
+            )
 
     async def write_managed_summary_progress(
-        self, session_id: str, messages: list[Message], pending: dict | None,
-        expected_revision: int | None, *, retry_refused: bool = False,
+        self,
+        session_id: str,
+        messages: list[Message],
+        pending: dict | None,
+        expected_revision: int | None,
+        *,
+        retry_refused: bool = False,
     ) -> bool:
         async with self._session_lock(session_id):
-            if expected_revision is not None and self._session_revisions.get(session_id, 0) != expected_revision:
+            if (
+                expected_revision is not None
+                and self._session_revisions.get(session_id, 0) != expected_revision
+            ):
                 return False
             return await self.store.write_managed_summary_progress(
-                session_id, messages, pending, retry_refused=retry_refused,
+                session_id,
+                messages,
+                pending,
+                retry_refused=retry_refused,
             )
 
     async def commit_summary_cursor(
-        self, session_id: str, last_message: Message, expected_revision: int | None, *,
+        self,
+        session_id: str,
+        last_message: Message,
+        expected_revision: int | None,
+        *,
         window_messages: list[Message] | None = None,
     ) -> bool:
         """Commit a still-current summary window under the session lock."""
-        if (getattr(last_message, "session_id", None) != session_id
-                or type(getattr(last_message, "id", None)) is not int or last_message.id <= 0):
+        if (
+            getattr(last_message, "session_id", None) != session_id
+            or type(getattr(last_message, "id", None)) is not int
+            or last_message.id <= 0
+        ):
             return False
         async with self._session_lock(session_id):
-            if expected_revision is not None and self._session_revisions.get(session_id, 0) != expected_revision:
+            if (
+                expected_revision is not None
+                and self._session_revisions.get(session_id, 0) != expected_revision
+            ):
                 return False
             committed = await self.store.commit_summary_cursor(
-                session_id, last_message.timestamp, last_message.id, window_messages=window_messages,
+                session_id,
+                last_message.timestamp,
+                last_message.id,
+                window_messages=window_messages,
             )
             if committed:
                 try:
                     await self.invalidate_cache(session_id)
                 except asyncio.CancelledError as exc:
-                    exc.summary_cursor_committed = (session_id, last_message.id, last_message.timestamp)
+                    exc.summary_cursor_committed = (
+                        session_id,
+                        last_message.id,
+                        last_message.timestamp,
+                    )
                     raise
             return committed
 
-    async def trim_session_messages(self, session_id: str, delete_count: int, *, delete_unsummarized: bool = False) -> int:
+    async def trim_session_messages(
+        self, session_id: str, delete_count: int, *, delete_unsummarized: bool = False
+    ) -> int:
         """清理已总结的旧消息（滑动窗口），并在锁内钳制总结游标。
 
         滑动窗口只删除已总结消息，不推进会话修订号。在途任务按最后一条消息的
@@ -1199,9 +1238,11 @@ class ConversationManager:
         if not isinstance(session_id, str) or not session_id.strip():
             return False
         try:
-            return bool(await self.store.ingest_owned_private_original_event(
-                event, source_platform=source_platform
-            ))
+            return bool(
+                await self.store.ingest_owned_private_original_event(
+                    event, source_platform=source_platform
+                )
+            )
         finally:
             # The shielded SQLite commit may finish before cancellation is
             # re-raised; invalidate on both success and cancellation/rollback.
@@ -1209,7 +1250,9 @@ class ConversationManager:
                 self._cache.pop(session_id, None)
 
     @asynccontextmanager
-    async def source_publication_lease(self, validator, *, session_id: str | None = None):
+    async def source_publication_lease(
+        self, validator, *, session_id: str | None = None
+    ):
         """Serialize exact source revalidation with UMO row edits/trimming.
 
         The callback must only perform exact readonly row SELECTs; it runs while
@@ -1220,7 +1263,10 @@ class ConversationManager:
         if lock is None or not callable(validator):
             yield False
             return
-        async with (self._session_lock(session_id) if session_id else nullcontext()), lock:
+        async with (
+            self._session_lock(session_id) if session_id else nullcontext(),
+            lock,
+        ):
             valid = validator()
             if asyncio.iscoroutine(valid) or hasattr(valid, "__await__"):
                 valid = await valid

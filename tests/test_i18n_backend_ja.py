@@ -36,7 +36,7 @@ def test_backend_ja_translations_load() -> None:
             last_update="now",
             db_size=1.5,
         )
-        assert "LivingMemory ステータスレポート" in report
+        assert "Dynamics Memory ステータスレポート" in report
         assert "3" in report
     finally:
         i18n_backend.init("zh")

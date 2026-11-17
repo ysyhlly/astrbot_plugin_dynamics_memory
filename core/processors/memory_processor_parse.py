@@ -355,9 +355,7 @@ def check_summary_quality(structured_data: dict[str, Any]) -> SummaryQualityChec
     key_facts = structured_data.get("key_facts", [])
     fact_count = len(ensure_list(key_facts))
     importance = structured_data.get("importance", 0.5)
-    importance_valid = (
-        isinstance(importance, (int, float)) and 0.0 <= importance <= 1.0
-    )
+    importance_valid = isinstance(importance, (int, float)) and 0.0 <= importance <= 1.0
     matched_generic_terms = tuple(
         term for term in _SUMMARY_GENERIC_TERMS if term in summary
     )

@@ -101,7 +101,7 @@ def handler(config_manager, memory_engine, conversation_manager, index_validator
 async def test_handle_status_returns_report(handler, mock_event):
     messages = [msg async for msg in handler.handle_status(mock_event)]
     assert len(messages) == 1
-    assert "LivingMemory" in messages[0]
+    assert "Dynamics Memory" in messages[0]
     assert "总记忆数" in messages[0]
 
 

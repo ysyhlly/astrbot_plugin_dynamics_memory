@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 import astrbot_plugin_dynamics_memory.storage.atom_store as atom_store_mod
-from astrbot_plugin_dynamics_memory.core.models.memory_atom import AtomStatus, MemoryAtom
+from astrbot_plugin_dynamics_memory.core.models.memory_atom import (
+    AtomStatus,
+    MemoryAtom,
+)
 from astrbot_plugin_dynamics_memory.core.processors.text_processor import TextProcessor
 from astrbot_plugin_dynamics_memory.storage.atom_store import AtomStore
 

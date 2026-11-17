@@ -24,11 +24,12 @@ from astrbot_plugin_dynamics_memory.core.passive_group_capture import (
     get_active_plugin,
     set_active_plugin,
 )
-from astrbot_plugin_dynamics_memory.core.tools.memory_search_tool import MemorySearchTool
+from astrbot_plugin_dynamics_memory.core.tools.memory_search_tool import (
+    MemorySearchTool,
+)
 from tests.integration.test_real_db_end_to_end import (
     _DeterministicEmbeddingProvider,
     _TestEvent,
-    real_db_stack,  # noqa: F401
 )
 
 
@@ -278,7 +279,8 @@ async def test_vector_adapter_candidates_are_selected_before_the_global_expansio
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_persona_filtering", [True, False])
 async def test_search_tool_preserves_private_origin_with_shared_adapters(
-    real_db_stack, use_persona_filtering,  # noqa: F811
+    real_db_stack,
+    use_persona_filtering,  # noqa: F811
 ):
     engine = real_db_stack["memory_engine"]
     plugin = real_db_stack["plugin"]
@@ -293,7 +295,9 @@ async def test_search_tool_preserves_private_origin_with_shared_adapters(
     ]:
         ids.append(
             await engine.add_memory(
-                "coffee preference", session_id=scope, persona_id=persona,
+                "coffee preference",
+                session_id=scope,
+                persona_id=persona,
                 metadata={"adapter_id": owner},
             )
         )
@@ -327,7 +331,8 @@ async def test_search_tool_preserves_private_origin_with_shared_adapters(
         expected = set(ids[:1] if use_persona_filtering else ids[:2])
         assert {row["id"] for row in output["results"]} == expected
         assert output["applied_filters"] == {
-            "persona_filtered": use_persona_filtering, "session_filtered": True,
+            "persona_filtered": use_persona_filtering,
+            "session_filtered": True,
         }
         assert len(validators) == 1
         assert await validators[0]() is True
@@ -362,7 +367,9 @@ async def test_search_tool_preserves_private_origin_with_shared_adapters(
 
 
 @pytest.mark.asyncio
-async def test_search_tool_accepts_verified_group_only_while_sharing_is_enabled(real_db_stack):  # noqa: F811
+async def test_search_tool_accepts_verified_group_only_while_sharing_is_enabled(
+    real_db_stack,
+):  # noqa: F811
     engine = real_db_stack["memory_engine"]
     plugin = real_db_stack["plugin"]
     manager = real_db_stack["conversation_manager"]
@@ -372,27 +379,44 @@ async def test_search_tool_accepts_verified_group_only_while_sharing_is_enabled(
     other_adapter = "wechat-a:GroupMessage:captured"
     for group in (own_group, wrong_persona, other_adapter):
         await manager.add_message(
-            group, "user", "coffee group message", sender_id="user-2",
-            group_id="captured", platform="test",
+            group,
+            "user",
+            "coffee group message",
+            sender_id="user-2",
+            group_id="captured",
+            platform="test",
         )
     ids = []
     for group in (own_group, wrong_persona, uncaptured, other_adapter):
-        ids.append(await engine.add_memory(
-            "coffee group memory", session_id=group,
-            persona_id="different-persona" if group == wrong_persona else "persona-real",
-        ))
+        ids.append(
+            await engine.add_memory(
+                "coffee group memory",
+                session_id=group,
+                persona_id="different-persona"
+                if group == wrong_persona
+                else "persona-real",
+            )
+        )
 
-    config = ConfigManager({"filtering_settings": {
-        "enable_group_to_private_recall": True,
-        "private_shared_group_instance_id": "persona-real",
-        "private_shared_group_sources": "\n".join((own_group, wrong_persona, uncaptured, other_adapter)),
-        "shared_adapter_ids": ["qq-a", "wechat-a"],
-        "use_persona_filtering": False,
-    }})
+    config = ConfigManager(
+        {
+            "filtering_settings": {
+                "enable_group_to_private_recall": True,
+                "private_shared_group_instance_id": "persona-real",
+                "private_shared_group_sources": "\n".join(
+                    (own_group, wrong_persona, uncaptured, other_adapter)
+                ),
+                "shared_adapter_ids": ["qq-a", "wechat-a"],
+                "use_persona_filtering": False,
+            }
+        }
+    )
     plugin.config_manager = config
     event = _TestEvent("qq-a:FriendMessage:share", "coffee")
     tool = MemorySearchTool(
-        context=plugin.context, config_manager=config, memory_engine=engine,
+        context=plugin.context,
+        config_manager=config,
+        memory_engine=engine,
         conversation_manager=manager,
     )
     validators = []
@@ -423,7 +447,9 @@ async def test_search_tool_accepts_verified_group_only_while_sharing_is_enabled(
                 config.filtering_settings["enable_group_to_private_recall"] = False
             return rows
 
-        with patch.object(type(engine), "get_summary_source_snapshots", revoke_during_final_read):
+        with patch.object(
+            type(engine), "get_summary_source_snapshots", revoke_during_final_read
+        ):
             assert await validators[0]() is False
         assert calls == 2
         assert await validators[0]() is False
@@ -433,16 +459,30 @@ async def test_search_tool_accepts_verified_group_only_while_sharing_is_enabled(
 
 
 @pytest.mark.asyncio
-async def test_search_tool_validates_active_atom_projection_at_effect_boundary(real_db_stack):  # noqa: F811
+async def test_search_tool_validates_active_atom_projection_at_effect_boundary(
+    real_db_stack,
+):  # noqa: F811
     engine = real_db_stack["memory_engine"]
     plugin = real_db_stack["plugin"]
     session_id = "qq-a:FriendMessage:atoms"
     content = "coffee active fact\ncoffee expired fact"
     memory_id = await engine.add_memory(
-        content, session_id=session_id, persona_id="persona-real",
+        content,
+        session_id=session_id,
+        persona_id="persona-real",
         atoms=[
-            MemoryAtom(0, content="coffee active fact", importance=0.9, expires_at=time.time() + 3600),
-            MemoryAtom(0, content="coffee expired fact", importance=0.9, expires_at=time.time() + 3600),
+            MemoryAtom(
+                0,
+                content="coffee active fact",
+                importance=0.9,
+                expires_at=time.time() + 3600,
+            ),
+            MemoryAtom(
+                0,
+                content="coffee expired fact",
+                importance=0.9,
+                expires_at=time.time() + 3600,
+            ),
         ],
     )
     event = _TestEvent(session_id, "coffee")
@@ -454,7 +494,9 @@ async def test_search_tool_validates_active_atom_projection_at_effect_boundary(r
         await db.commit()
 
         tool = MemorySearchTool(
-            context=plugin.context, config_manager=plugin.config_manager, memory_engine=engine,
+            context=plugin.context,
+            config_manager=plugin.config_manager,
+            memory_engine=engine,
         )
         context = SimpleNamespace(context=SimpleNamespace(event=event))
         validators = []
@@ -476,11 +518,21 @@ async def test_search_tool_validates_active_atom_projection_at_effect_boundary(r
             assert await validators[0]() is True
 
             for sql, value, unchanged in [
-                ("UPDATE documents SET text = ? WHERE id = ?", "changed parent", content),
-                ("UPDATE memory_atoms SET content = ? WHERE parent_memory_id = ? AND expires_at > 0",
-                 "changed fact", "coffee active fact"),
-                ("UPDATE memory_atoms SET status = ? WHERE parent_memory_id = ? AND expires_at > 0",
-                 "forgotten", "active"),
+                (
+                    "UPDATE documents SET text = ? WHERE id = ?",
+                    "changed parent",
+                    content,
+                ),
+                (
+                    "UPDATE memory_atoms SET content = ? WHERE parent_memory_id = ? AND expires_at > 0",
+                    "changed fact",
+                    "coffee active fact",
+                ),
+                (
+                    "UPDATE memory_atoms SET status = ? WHERE parent_memory_id = ? AND expires_at > 0",
+                    "forgotten",
+                    "active",
+                ),
             ]:
                 await db.execute(sql, (value, memory_id))
                 await db.commit()
@@ -494,8 +546,20 @@ async def test_search_tool_validates_active_atom_projection_at_effect_boundary(r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["card", "instance", "event-receipt", "adapter-during-read", "owner", "target-allowlist"])
-async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_stack, change):  # noqa: F811
+@pytest.mark.parametrize(
+    "change",
+    [
+        "card",
+        "instance",
+        "event-receipt",
+        "adapter-during-read",
+        "owner",
+        "target-allowlist",
+    ],
+)
+async def test_search_tool_revalidates_owned_request_at_effect_boundary(
+    real_db_stack, change
+):  # noqa: F811
     engine = real_db_stack["memory_engine"]
     plugin = real_db_stack["plugin"]
     umo = "qq-a:FriendMessage:owned"
@@ -506,12 +570,21 @@ async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_
     receipt = {
         "schema_version": 1,
         "provider": "astrbot_plugin_chat_dynamics",
-        "status": "skipped", "reason": "cd_owned_request", "purpose": "reply",
+        "status": "skipped",
+        "reason": "cd_owned_request",
+        "purpose": "reply",
         "card_version": "card-1",
-        "scope": {"umo": umo, "platform": "qq-a", "persona_id": "worldbook", "instance_id": "instance-1"},
+        "scope": {
+            "umo": umo,
+            "platform": "qq-a",
+            "persona_id": "worldbook",
+            "instance_id": "instance-1",
+        },
     }
 
-    async def prepare_memory_request(current_event, current_req, materials=None, purpose="reply"):
+    async def prepare_memory_request(
+        current_event, current_req, materials=None, purpose="reply"
+    ):
         assert current_event is event and current_req is req
         assert materials is None and purpose == "reply"
         return {**receipt, "scope": dict(receipt["scope"])}
@@ -520,13 +593,20 @@ async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_
         "star_cls": SimpleNamespace(prepare_memory_request=prepare_memory_request),
     }
     assert await plugin._prepare_native_memory_projection(event, req) == receipt
-    plugin.config_manager.filtering_settings["shared_adapter_ids"] = ["qq-a", "wechat-a"]
+    plugin.config_manager.filtering_settings["shared_adapter_ids"] = [
+        "qq-a",
+        "wechat-a",
+    ]
     await engine.add_memory(
-        "coffee preference", session_id=umo, persona_id="persona-real",
+        "coffee preference",
+        session_id=umo,
+        persona_id="persona-real",
         metadata={"adapter_id": "wechat-a"},
     )
     tool = MemorySearchTool(
-        context=plugin.context, config_manager=plugin.config_manager, memory_engine=engine,
+        context=plugin.context,
+        config_manager=plugin.config_manager,
+        memory_engine=engine,
     )
     validators = []
 
@@ -541,19 +621,22 @@ async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_
         context = SimpleNamespace(context=SimpleNamespace(event=event))
         output = json.loads(await tool.call(context, query="coffee"))
         assert output["status"] == "ok", output
-        guard, = validators
+        (guard,) = validators
         assert await guard() is True
         if change == "card":
             receipt["card_version"] = "card-2"
         elif change == "instance":
             receipt["scope"]["instance_id"] = "instance-2"
         elif change == "event-receipt":
-            event.set_extra("_cd_memory_feedback_v1", {**receipt, "card_version": "card-2"})
+            event.set_extra(
+                "_cd_memory_feedback_v1", {**receipt, "card_version": "card-2"}
+            )
         elif change == "owner":
             set_active_plugin(None)
         elif change == "target-allowlist":
             plugin.config_manager.get_section("access_control").update(
-                whitelist_enabled=True, allowed_ids="some-other-user",
+                whitelist_enabled=True,
+                allowed_ids="some-other-user",
             )
         else:
             original_read = engine.get_summary_source_snapshots
@@ -567,7 +650,9 @@ async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_
                     plugin.config_manager.filtering_settings["shared_adapter_ids"] = []
                 return rows
 
-            with patch.object(type(engine), "get_summary_source_snapshots", revoke_during_final_read):
+            with patch.object(
+                type(engine), "get_summary_source_snapshots", revoke_during_final_read
+            ):
                 assert await guard() is False
             assert calls == 2
             return
@@ -575,3 +660,37 @@ async def test_search_tool_revalidates_owned_request_at_effect_boundary(real_db_
     finally:
         set_active_plugin(previous_plugin)
         await tool.recall_runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_vector_search_preserves_hits_with_adapter_access_and_platform_filters(
+    adapter_engine,
+):
+    """P0 regression: adapter access + platform/group filters must pass storage_filters to retrieve_documents."""
+    engine = adapter_engine
+    group_scope = "qq:GroupMessage:room-1"
+    target_id = await engine.add_memory(
+        "coffee",
+        session_id=group_scope,
+        metadata={"adapter_id": "qq-a"},
+    )
+    await engine.add_memory(
+        "coffee",
+        session_id="qq:FriendMessage:user-1",
+        metadata={"adapter_id": "qq-a"},
+    )
+    await engine.add_memory(
+        "coffee",
+        session_id=group_scope,
+        metadata={"adapter_id": "telegram-a"},
+    )
+
+    with adapter_access({"filtering_settings": {"shared_adapter_ids": []}}, "qq-a"):
+        hits = await engine.vector_retriever.search(
+            "coffee",
+            5,
+            session_id=group_scope,
+            interaction_type="group_chat",
+            source_platform="qq",
+        )
+    assert [hit.doc_id for hit in hits] == [target_id]

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from .sqlite_pool import SQLiteConnectionPool
-
-
+import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
@@ -54,6 +52,13 @@ class AtomStore:
         # 写入与查询共用同一分词器，中文整句才能命中分词后的原子内容。
         self._text_processor = text_processor
         self._read_conn: aiosqlite.Connection | None = None
+        self._read_lock: asyncio.Lock | None = None
+        self._has_parent_documents: bool | None = None
+
+    def _get_read_lock(self) -> asyncio.Lock:
+        if self._read_lock is None:
+            self._read_lock = asyncio.Lock()
+        return self._read_lock
 
     @asynccontextmanager
     async def _connect(self, *, discard: bool = False):
@@ -65,20 +70,25 @@ class AtomStore:
 
     @asynccontextmanager
     async def _read_connect(self):
-        """复用长期只读连接；未开启缓存时退回按操作建连。"""
+        """复用长期只读连接并加锁串行化；未开启缓存时按操作建连。"""
         if not self._cache_reads:
             async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
                 yield db
             return
-        if self._read_conn is None:
-            self._read_conn = await open_connection(self.db_path)
-        yield self._read_conn
+        async with self._get_read_lock():
+            if self._read_conn is None:
+                self._read_conn = await open_connection(self.db_path)
+                self._read_conn.row_factory = aiosqlite.Row
+            yield self._read_conn
 
     async def close(self) -> None:
         """关闭复用的只读连接（插件卸载 / 重新初始化前调用，幂等）。"""
-        if self._read_conn is not None:
-            await self._read_conn.close()
-            self._read_conn = None
+        async with self._get_read_lock():
+            if self._read_conn is not None:
+                await self._read_conn.close()
+                self._read_conn = None
+            self._has_parent_documents = None
 
     def _fts_format(self) -> str:
         return (
@@ -384,11 +394,13 @@ class AtomStore:
         escaped = [token.replace('"', '""') for token in tokens]
         fts_query = " OR ".join(f'"{token}"' for token in escaped)
 
-        async with self._read_connect() as check_db:
-            cursor = await check_db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
-            )
-            has_parent_documents = await cursor.fetchone() is not None
+        if self._has_parent_documents is None:
+            async with self._read_connect() as check_db:
+                cursor = await check_db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
+                )
+                self._has_parent_documents = await cursor.fetchone() is not None
+        has_parent_documents = self._has_parent_documents
         parent_metadata = (
             "CASE WHEN json_valid(d.metadata) THEN d.metadata ELSE '{}' END"
             if has_parent_documents
@@ -413,9 +425,7 @@ class AtomStore:
             filters.append("ma.persona_id = ?")
             params.append(persona_id)
         if interaction_type is not None:
-            filters.append(
-                f"json_extract({parent_metadata}, '$.interaction_type') = ?"
-            )
+            filters.append(f"json_extract({parent_metadata}, '$.interaction_type') = ?")
             params.append(interaction_type)
             if interaction_type in {"group_chat", "unknown"}:
                 filters.append(
@@ -509,9 +519,7 @@ class AtomStore:
                     )
                 like_params_full.extend(ownership_params)
                 metadata_filter = (
-                    "AND " + " AND ".join(metadata_filters)
-                    if metadata_filters
-                    else ""
+                    "AND " + " AND ".join(metadata_filters) if metadata_filters else ""
                 )
                 cursor = await db.execute(
                     f"""
@@ -629,77 +637,89 @@ class AtomStore:
             await db.commit()
             return cursor.rowcount
 
-    async def cleanup_forgotten(self, older_than_days: float = 7.0) -> int:
-        """Remove FORGOTTEN atoms older than the threshold from FTS. Returns count."""
-        cutoff = time.time() - older_than_days * 86400.0
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT id FROM memory_atoms WHERE status = 'forgotten' AND expires_at < ?",
-                (cutoff,),
+    async def _delete_atom_ids_chunked(
+        self, db: aiosqlite.Connection, atom_ids: list[int], *, hard_delete: bool
+    ) -> None:
+        for index in range(0, len(atom_ids), self._SQLITE_BATCH_SIZE):
+            batch = atom_ids[index : index + self._SQLITE_BATCH_SIZE]
+            placeholders = ",".join("?" * len(batch))
+            await db.execute(
+                f"DELETE FROM memory_atoms_fts WHERE atom_id IN ({placeholders})",
+                batch,
             )
-            rows = await cursor.fetchall()
-            atom_ids = [int(row[0]) for row in rows]
-            if atom_ids:
-                placeholders = ",".join("?" * len(atom_ids))
-                await db.execute(
-                    f"DELETE FROM memory_atoms_fts WHERE atom_id IN ({placeholders})",
-                    atom_ids,
-                )
+            if hard_delete:
                 await db.execute(
                     f"DELETE FROM memory_atoms WHERE id IN ({placeholders})",
-                    atom_ids,
+                    batch,
                 )
-                await db.commit()
-            return len(atom_ids)
-
-    async def forget_expired_atoms(self, older_than_days: float = 7.0) -> int:
-        """Soft-delete old expired atoms and remove them from the FTS index."""
-        cutoff = time.time() - older_than_days * 86400.0
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT id FROM memory_atoms WHERE status = 'expired' AND expires_at < ?",
-                (cutoff,),
-            )
-            rows = await cursor.fetchall()
-            atom_ids = [int(row[0]) for row in rows]
-            if atom_ids:
-                placeholders = ",".join("?" * len(atom_ids))
-                await db.execute(
-                    f"DELETE FROM memory_atoms_fts WHERE atom_id IN ({placeholders})",
-                    atom_ids,
-                )
+            else:
                 await db.execute(
                     f"""
                     UPDATE memory_atoms
                     SET status = ?
                     WHERE id IN ({placeholders})
                     """,
-                    (AtomStatus.FORGOTTEN.value, *atom_ids),
+                    (AtomStatus.FORGOTTEN.value, *batch),
                 )
+
+    async def cleanup_forgotten(self, older_than_days: float = 7.0) -> int:
+        """Remove FORGOTTEN atoms older than the threshold from FTS. Returns count."""
+        cutoff = time.time() - older_than_days * 86400.0
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM memory_atoms WHERE status = 'forgotten' AND expires_at < ?",
+                    (cutoff,),
+                )
+                rows = await cursor.fetchall()
+                atom_ids = [int(row[0]) for row in rows]
+                if atom_ids:
+                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
                 await db.commit()
-            return len(atom_ids)
+                return len(atom_ids)
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def forget_expired_atoms(self, older_than_days: float = 7.0) -> int:
+        """Soft-delete old expired atoms and remove them from the FTS index."""
+        cutoff = time.time() - older_than_days * 86400.0
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM memory_atoms WHERE status = 'expired' AND expires_at < ?",
+                    (cutoff,),
+                )
+                rows = await cursor.fetchall()
+                atom_ids = [int(row[0]) for row in rows]
+                if atom_ids:
+                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=False)
+                await db.commit()
+                return len(atom_ids)
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def delete_by_parent(self, parent_memory_id: int) -> int:
         """Delete all atoms belonging to a parent memory. Returns count."""
         async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT id FROM memory_atoms WHERE parent_memory_id = ?",
-                (parent_memory_id,),
-            )
-            rows = await cursor.fetchall()
-            atom_ids = [int(row[0]) for row in rows]
-            if atom_ids:
-                placeholders = ",".join("?" * len(atom_ids))
-                await db.execute(
-                    f"DELETE FROM memory_atoms_fts WHERE atom_id IN ({placeholders})",
-                    atom_ids,
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM memory_atoms WHERE parent_memory_id = ?",
+                    (parent_memory_id,),
                 )
-                await db.execute(
-                    f"DELETE FROM memory_atoms WHERE id IN ({placeholders})",
-                    atom_ids,
-                )
+                rows = await cursor.fetchall()
+                atom_ids = [int(row[0]) for row in rows]
+                if atom_ids:
+                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
                 await db.commit()
-            return len(atom_ids)
+                return len(atom_ids)
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def batch_delete_by_parent(self, parent_memory_ids: list[int]) -> int:
         """Delete atoms for multiple parent memories in bulk."""

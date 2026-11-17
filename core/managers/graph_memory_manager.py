@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from ..maintenance.graph_index_repair import GraphIndexDocument, RepairPlan, content_digest, plan_graph_index_repair
+from ..maintenance.graph_index_repair import (
+    GraphIndexDocument,
+    RepairPlan,
+    content_digest,
+    plan_graph_index_repair,
+)
 from ..maintenance.source_state_guard import SourceStateGuard
 
 
@@ -31,7 +36,8 @@ class GraphMemoryManager:
         graph_store: GraphStore,
         graph_vector_retriever: GraphVectorRetriever,
         graph_extractor: GraphExtractor,
-        source_validity_checker: Callable[[Sequence[int]], Awaitable[set[int]]] | None = None,
+        source_validity_checker: Callable[[Sequence[int]], Awaitable[set[int]]]
+        | None = None,
         source_state_guard: SourceStateGuard | None = None,
     ):
         self.graph_store = graph_store
@@ -368,11 +374,16 @@ class GraphMemoryManager:
         async with self.source_state_guard.hold():
             async with self._rebuild_gate:
                 if self._rebuild_active:
-                    raise RuntimeError("graph index rebuild is active; retry dry-run later")
+                    raise RuntimeError(
+                        "graph index rebuild is active; retry dry-run later"
+                    )
             if self.source_validity_checker is None:
                 raise RuntimeError("graph source validity checker is unavailable")
 
-            rows, indexed_ids = await self.graph_vector_retriever.get_index_document_inventory()
+            (
+                rows,
+                indexed_ids,
+            ) = await self.graph_vector_retriever.get_index_document_inventory()
             decoded: list[tuple[int, int, str, str]] = []
             source_ids: set[int] = set()
             for row in rows:
@@ -398,7 +409,9 @@ class GraphMemoryManager:
                 if source_memory_id >= 0:
                     source_ids.add(source_memory_id)
 
-            active_source_ids = await self.source_validity_checker(tuple(sorted(source_ids)))
+            active_source_ids = await self.source_validity_checker(
+                tuple(sorted(source_ids))
+            )
             documents = [
                 GraphIndexDocument(
                     document_id=document_id,
@@ -415,7 +428,11 @@ class GraphMemoryManager:
                 expected_model_id=None,
                 index_dimension=int(
                     getattr(
-                        getattr(self.graph_vector_retriever.faiss_db, "embedding_storage", None),
+                        getattr(
+                            self.graph_vector_retriever.faiss_db,
+                            "embedding_storage",
+                            None,
+                        ),
                         "dimension",
                         0,
                     )
@@ -428,7 +445,9 @@ class GraphMemoryManager:
         async with self.source_state_guard.hold():
             async with self._rebuild_gate:
                 if self._rebuild_active:
-                    raise RuntimeError("graph index rebuild is active; retry prune later")
+                    raise RuntimeError(
+                        "graph index rebuild is active; retry prune later"
+                    )
                 return await self._apply_stale_vector_prune_locked(plan)
 
     async def source_graph_index_complete(self, source_memory_id: int) -> bool:
@@ -465,7 +484,9 @@ class GraphMemoryManager:
             for document_id, source_id, digest in plan.prune_bindings
         }
         if set(expected) != set(stale_ids):
-            raise ValueError("stale-vector plan bindings do not match its exact ID scope")
+            raise ValueError(
+                "stale-vector plan bindings do not match its exact ID scope"
+            )
         current_source_ids: set[int] = set()
         for document_id in stale_ids:
             row = by_id.get(document_id)
@@ -482,14 +503,18 @@ class GraphMemoryManager:
             source_memory_id = int(metadata.get("source_memory_id", -1))
             digest = content_digest(str(row.get("text") or ""))
             if expected[document_id] != (source_memory_id, digest):
-                raise ValueError("stale graph document source binding changed after planning")
+                raise ValueError(
+                    "stale graph document source binding changed after planning"
+                )
             current_source_ids.add(source_memory_id)
 
         active_source_ids = await self.source_validity_checker(
             tuple(sorted(current_source_ids))
         )
         if current_source_ids & active_source_ids:
-            raise ValueError("a planned stale source became active; create a fresh plan")
+            raise ValueError(
+                "a planned stale source became active; create a fresh plan"
+            )
         return await self.graph_vector_retriever.delete_vector_ids_atomically(
             list(stale_ids)
         )

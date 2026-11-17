@@ -4,8 +4,12 @@ import re
 from pathlib import Path
 
 from astrbot_plugin_dynamics_memory.core.models.memory_atom import MemoryAtom
-from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import GraphExtractor
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
+    GraphExtractor,
+)
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,9 +97,7 @@ def test_participant_identity_keeps_alias_history_and_latest_display_name() -> N
 
 
 def test_dashboard_prefers_persona_summary_for_display() -> None:
-    memory_page = (DASHBOARD / "modules" / "memory-page.js").read_text(
-        encoding="utf-8"
-    )
+    memory_page = (DASHBOARD / "modules" / "memory-page.js").read_text(encoding="utf-8")
     utils = (DASHBOARD / "modules" / "utils.js").read_text(encoding="utf-8")
 
     assert "item.metadata.persona_summary" in memory_page

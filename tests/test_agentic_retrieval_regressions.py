@@ -135,7 +135,9 @@ async def test_storage_read_error_is_not_not_found(engine):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["session_id", "persona_id"])
 async def test_stale_graph_candidate_cannot_cross_parent_memory_scope(engine, boundary):
-    from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import GraphResult
+    from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import (
+        GraphResult,
+    )
 
     allowed = {"session_id": SCOPE, "persona_id": "allowed"}
     actual = {**allowed, boundary: "other"}

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..models.memory_atom import MemoryAtom
-
 
 from dataclasses import dataclass
 from typing import Any

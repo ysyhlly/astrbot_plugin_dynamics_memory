@@ -10,14 +10,19 @@ from unittest.mock import AsyncMock
 import pytest
 
 from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
-from astrbot_plugin_dynamics_memory.core.models.memory_atom import AtomStatus, MemoryAtom
+from astrbot_plugin_dynamics_memory.core.models.memory_atom import (
+    AtomStatus,
+    MemoryAtom,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.bm25_retriever import BM25Retriever
 from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import (
     HybridResult,
     HybridRetriever,
 )
 from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import RRFFusion
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
+    VectorRetriever,
+)
 from tests.test_memory_engine import _FakeFaissDB
 from tests.test_retrieval_components import _DummyBM25, _DummyVector
 

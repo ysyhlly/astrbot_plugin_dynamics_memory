@@ -8,27 +8,30 @@ from unittest.mock import AsyncMock
 import pytest
 
 from astrbot_plugin_dynamics_memory.core.memory_scope import current_adapter_access
-from astrbot_plugin_dynamics_memory.core.recall_runtime import BoundedRecallTaskPool, RecallDeadline
+from astrbot_plugin_dynamics_memory.core.recall_runtime import (
+    BoundedRecallTaskPool,
+    RecallDeadline,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.bm25_retriever import BM25Result
-from astrbot_plugin_dynamics_memory.core.retrieval.dual_route_retriever import DualRouteRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.dual_route_retriever import (
+    DualRouteRetriever,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import GraphRetriever
-from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import HybridRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import (
+    HybridRetriever,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import RRFFusion
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_search import QueryEmbeddingCache
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_search import (
+    QueryEmbeddingCache,
+)
 
 from .test_private_summary_projection import _PERSONA, _SESSION, _recall
-from .test_private_summary_projection import (  # noqa: F401
-    conversation_manager,
-    handler,
-    memory_engine,
-    memory_processor,
-    private_hook,
-    source_db,
-)
 
 
 @pytest.mark.asyncio
-async def test_slow_vector_and_optional_recent_preserve_live_atoms(private_hook, source_db):  # noqa: F811
+async def test_slow_vector_and_optional_recent_preserve_live_atoms(
+    private_hook, source_db
+):
     recall = private_hook.handler._memory_recall
     recall.recall_runtime = BoundedRecallTaskPool()
     engine = source_db.engine
@@ -53,9 +56,13 @@ async def test_slow_vector_and_optional_recent_preserve_live_atoms(private_hook,
 
     engine._get_recent_memory_results = slow_recent
     hybrid = HybridRetriever(
-        SimpleNamespace(search=AsyncMock(return_value=[
-            BM25Result(parent.doc_id, 1.0, parent.content, parent.metadata),
-        ])),
+        SimpleNamespace(
+            search=AsyncMock(
+                return_value=[
+                    BM25Result(parent.doc_id, 1.0, parent.content, parent.metadata),
+                ]
+            )
+        ),
         SimpleNamespace(search=delayed_vector),
         RRFFusion(),
     )
@@ -69,7 +76,9 @@ async def test_slow_vector_and_optional_recent_preserve_live_atoms(private_hook,
     recall.memory_engine = engine
     deadline = RecallDeadline.start(0.85, 0.35)
     try:
-        await private_hook.handler.handle_memory_recall(private_hook.event, private_hook.req, budget=deadline)
+        await private_hook.handler.handle_memory_recall(
+            private_hook.event, private_hook.req, budget=deadline
+        )
         req = private_hook.req
         assert time.monotonic() < deadline.deadline
         assert req._lm_private_hook_outcome_v1 == "partial"
@@ -88,19 +97,23 @@ async def test_slow_vector_and_optional_recent_preserve_live_atoms(private_hook,
 
 
 @pytest.mark.asyncio
-async def test_slow_shared_scope_keeps_completed_self_scope_and_reserves_validation(private_hook, source_db):  # noqa: F811
+async def test_slow_shared_scope_keeps_completed_self_scope_and_reserves_validation(
+    private_hook, source_db
+):
     recall = private_hook.handler._memory_recall
     recall.recall_runtime = BoundedRecallTaskPool()
     engine = source_db.engine
     original_search = engine.search_memories
     groups = tuple(f"test:GroupMessage:{index}" for index in range(1, 6))
     filtering = recall.config_manager._config["filtering_settings"]
-    filtering.update({
-        "enable_group_to_private_recall": True,
-        "private_shared_group_sources": list(groups),
-        "private_shared_group_instance_id": _PERSONA,
-        "shared_adapter_ids": ["test"],
-    })
+    filtering.update(
+        {
+            "enable_group_to_private_recall": True,
+            "private_shared_group_sources": list(groups),
+            "private_shared_group_instance_id": _PERSONA,
+            "shared_adapter_ids": ["test"],
+        }
+    )
     recall._verified_shared_group_sessions = AsyncMock(return_value=groups)
     cancel_started = asyncio.Event()
     cleanup = asyncio.Event()

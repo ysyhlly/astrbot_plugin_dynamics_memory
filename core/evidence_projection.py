@@ -14,7 +14,9 @@ MAX_TEXT_CHARS = 10000
 
 
 def stable_id(prefix: str, parts: list[Any] | tuple[Any, ...]) -> str:
-    value = json.dumps(list(parts), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value = json.dumps(
+        list(parts), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
     return prefix + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -22,19 +24,45 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
-def history_material_id(scope_key: str, conversation_id: str, snapshot_fingerprint: str,
-                        position: int, text: str) -> str:
-    return stable_id("mat1:", [scope_key, conversation_id, snapshot_fingerprint,
-                               int(position), content_hash(text)])
+def history_material_id(
+    scope_key: str,
+    conversation_id: str,
+    snapshot_fingerprint: str,
+    position: int,
+    text: str,
+) -> str:
+    return stable_id(
+        "mat1:",
+        [
+            scope_key,
+            conversation_id,
+            snapshot_fingerprint,
+            int(position),
+            content_hash(text),
+        ],
+    )
 
 
-def history_material_family_id(scope_key: str, conversation_id: str, position: int, text: str,
-                               source_prefix_anchor: str) -> str:
+def history_material_family_id(
+    scope_key: str,
+    conversation_id: str,
+    position: int,
+    text: str,
+    source_prefix_anchor: str,
+) -> str:
     """Cross-snapshot identity only when the host supplies a trusted full-prefix anchor."""
     if not isinstance(source_prefix_anchor, str) or not source_prefix_anchor.strip():
         return ""
-    return stable_id("fam1:", [scope_key, conversation_id, source_prefix_anchor.strip(),
-                               int(position), content_hash(text)])
+    return stable_id(
+        "fam1:",
+        [
+            scope_key,
+            conversation_id,
+            source_prefix_anchor.strip(),
+            int(position),
+            content_hash(text),
+        ],
+    )
 
 
 def legacy_material_id(scope_key: str, document_id: str, text: str) -> str:
@@ -47,24 +75,57 @@ def event_evidence_id(scope_key: str, source_event_id: str) -> str:
 
 def conversation_row_hash(row: dict) -> str:
     """Bind a private stored row to its exact database identity and contents."""
-    return stable_id("row1:", [
-        str(row.get("session_id", "")), int(row.get("id", 0)),
-        str(row.get("role", "")), str(row.get("sender_id", "")),
-        str(row.get("platform", "")), float(row.get("timestamp", 0)),
-        str(row.get("content", "")),
-    ])
+    return stable_id(
+        "row1:",
+        [
+            str(row.get("session_id", "")),
+            int(row.get("id", 0)),
+            str(row.get("role", "")),
+            str(row.get("sender_id", "")),
+            str(row.get("platform", "")),
+            float(row.get("timestamp", 0)),
+            str(row.get("content", "")),
+        ],
+    )
 
 
-def projection_key(scope_key: str, material_id: str, text: str, correction_revision: int,
-                   card_version: str, purpose: str) -> str:
-    version_dependency = str(card_version) if purpose in {"style_compatibility", "candidate_compatibility"} else ""
-    return stable_id("pv1:", [scope_key, material_id, content_hash(text), PROJECTION_VERSION,
-                               int(correction_revision), version_dependency, purpose])
+def projection_key(
+    scope_key: str,
+    material_id: str,
+    text: str,
+    correction_revision: int,
+    card_version: str,
+    purpose: str,
+) -> str:
+    version_dependency = (
+        str(card_version)
+        if purpose in {"style_compatibility", "candidate_compatibility"}
+        else ""
+    )
+    return stable_id(
+        "pv1:",
+        [
+            scope_key,
+            material_id,
+            content_hash(text),
+            PROJECTION_VERSION,
+            int(correction_revision),
+            version_dependency,
+            purpose,
+        ],
+    )
 
 
-def normalize_host_material(scope_key: str, raw: dict, *, conversation_id: str = "",
-                            snapshot_fingerprint: str = "", card_version: str = "",
-                            correction_revision: int = 0, purpose: str = "reply") -> tuple[dict, dict] | None:
+def normalize_host_material(
+    scope_key: str,
+    raw: dict,
+    *,
+    conversation_id: str = "",
+    snapshot_fingerprint: str = "",
+    card_version: str = "",
+    correction_revision: int = 0,
+    purpose: str = "reply",
+) -> tuple[dict, dict] | None:
     """Accept a host history row only with a trusted host conversation/snapshot identity.
 
     Arbitrary sender IDs, timestamps, event IDs and delivery claims are discarded.
@@ -89,7 +150,9 @@ def normalize_host_material(scope_key: str, raw: dict, *, conversation_id: str =
     position = raw.get("position", raw.get("source_position"))
     if isinstance(position, bool) or not isinstance(position, int) or position < 0:
         return None
-    material_id = history_material_id(scope_key, conv.strip(), snapshot.strip(), position, text)
+    material_id = history_material_id(
+        scope_key, conv.strip(), snapshot.strip(), position, text
+    )
     text_hash = content_hash(text)
     anchor = raw.get("source_prefix_anchor", raw.get("message_anchor", ""))
     epoch = raw.get("history_epoch", "")
@@ -97,47 +160,91 @@ def normalize_host_material(scope_key: str, raw: dict, *, conversation_id: str =
         anchor = ""
     if not isinstance(epoch, str) or len(epoch) > 256:
         epoch = ""
-    family_anchor = stable_id("ha1:", [epoch.strip(), anchor.strip()]) if anchor.strip() and epoch.strip() else ""
-    family_id = history_material_family_id(scope_key, conv.strip(), position, text, family_anchor)
+    family_anchor = (
+        stable_id("ha1:", [epoch.strip(), anchor.strip()])
+        if anchor.strip() and epoch.strip()
+        else ""
+    )
+    family_id = history_material_family_id(
+        scope_key, conv.strip(), position, text, family_anchor
+    )
     projection_identity = family_id or material_id
     descriptor = {
-        "material_id": material_id, "scope_key": scope_key, "material_kind": "host_record_only",
-        "source_kind": "host_history", "correction_revision": int(correction_revision),
+        "material_id": material_id,
+        "scope_key": scope_key,
+        "material_kind": "host_record_only",
+        "source_kind": "host_history",
+        "correction_revision": int(correction_revision),
         "source_family_id": family_id,
         "source_prefix_anchor": anchor.strip() if family_id else "",
         "history_epoch": epoch.strip() if family_id else "",
         "source_locator": {
-            "kind": "host_history", "conversation_id": conv.strip(),
-            "snapshot_fingerprint": snapshot.strip(), "position": position,
-            "role": role, "source_prefix_anchor": anchor.strip() if family_id else "",
+            "kind": "host_history",
+            "conversation_id": conv.strip(),
+            "snapshot_fingerprint": snapshot.strip(),
+            "position": position,
+            "role": role,
+            "source_prefix_anchor": anchor.strip() if family_id else "",
             "history_epoch": epoch.strip() if family_id else "",
             "correction_revision": int(correction_revision),
-            "card_version": str(card_version)[:256], "purpose": purpose,
+            "card_version": str(card_version)[:256],
+            "purpose": purpose,
         },
-        "role": role, "conversation_id": conv.strip(), "snapshot_fingerprint": snapshot.strip(),
-        "position": position, "text_hash": text_hash,
-        "projection_key": projection_key(scope_key, projection_identity, text, correction_revision, card_version, purpose),
+        "role": role,
+        "conversation_id": conv.strip(),
+        "snapshot_fingerprint": snapshot.strip(),
+        "position": position,
+        "text_hash": text_hash,
+        "projection_key": projection_key(
+            scope_key,
+            projection_identity,
+            text,
+            correction_revision,
+            card_version,
+            purpose,
+        ),
         "card_version": str(card_version)[:256],
     }
-    material = {**descriptor, "source_kind": "host_history", "text": text, "source_status": "host_record_only",
-                "author_id": None, "occurred_at": None, "delivery_status": "unknown",
-                "source_event_id": None, "root_evidence_ids": [], "root_material_ids": [material_id]}
+    material = {
+        **descriptor,
+        "source_kind": "host_history",
+        "text": text,
+        "source_status": "host_record_only",
+        "author_id": None,
+        "occurred_at": None,
+        "delivery_status": "unknown",
+        "source_event_id": None,
+        "root_evidence_ids": [],
+        "root_material_ids": [material_id],
+    }
     return descriptor, material
 
 
-def normalize_event_material(scope_key: str, scope: dict, raw: dict, *, card_version: str = "",
-                             correction_revision: int = 0, purpose: str = "reply") -> tuple[dict, dict] | None:
+def normalize_event_material(
+    scope_key: str,
+    scope: dict,
+    raw: dict,
+    *,
+    card_version: str = "",
+    correction_revision: int = 0,
+    purpose: str = "reply",
+) -> tuple[dict, dict] | None:
     if not isinstance(raw, dict) or raw.get("source_kind") != "event":
         return None
     source_scope = raw.get("scope")
-    if not isinstance(source_scope, dict) or any(source_scope.get(k) != scope.get(k)
-                                                for k in ("platform", "umo", "persona_id", "instance_id")):
+    if not isinstance(source_scope, dict) or any(
+        source_scope.get(k) != scope.get(k)
+        for k in ("platform", "umo", "persona_id", "instance_id")
+    ):
         return None
     event_id = raw.get("event_id", raw.get("source_event_id"))
     event_type = raw.get("event_type", raw.get("type"))
-    if not isinstance(event_id, str) or not event_id.strip() or event_type not in {
-        "message.received", "delivery.success", "tool.execution_receipt"
-    }:
+    if (
+        not isinstance(event_id, str)
+        or not event_id.strip()
+        or event_type
+        not in {"message.received", "delivery.success", "tool.execution_receipt"}
+    ):
         return None
     text = raw.get("text")
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT_CHARS:
@@ -145,50 +252,84 @@ def normalize_event_material(scope_key: str, scope: dict, raw: dict, *, card_ver
     if event_type == "tool.execution_receipt":
         receipt = raw.get("receipt")
         if (
-            not isinstance(receipt, dict) or receipt.get("schema_version") != 1 or
-            receipt.get("source") != "astrbot_runtime" or receipt.get("status") != "success" or
-            not isinstance(receipt.get("operation_id"), str) or not receipt["operation_id"].strip()
+            not isinstance(receipt, dict)
+            or receipt.get("schema_version") != 1
+            or receipt.get("source") != "astrbot_runtime"
+            or receipt.get("status") != "success"
+            or not isinstance(receipt.get("operation_id"), str)
+            or not receipt["operation_id"].strip()
         ):
             return None
     evidence_id = event_evidence_id(scope_key, event_id.strip())
     descriptor = {
-        "material_id": evidence_id, "scope_key": scope_key,
-        "source_kind": "event", "correction_revision": int(correction_revision),
+        "material_id": evidence_id,
+        "scope_key": scope_key,
+        "source_kind": "event",
+        "correction_revision": int(correction_revision),
         "source_family_id": evidence_id,
-        "material_kind": "program_receipt" if event_type == "tool.execution_receipt" else "source_event",
+        "material_kind": "program_receipt"
+        if event_type == "tool.execution_receipt"
+        else "source_event",
         "role": "assistant" if event_type != "message.received" else "user",
-        "conversation_id": str(scope["umo"]), "snapshot_fingerprint": "event:" + event_id.strip(),
-        "position": int(raw.get("source_position", 0)), "text_hash": content_hash(text),
-        "projection_key": projection_key(scope_key, evidence_id, text, correction_revision, card_version, purpose),
+        "conversation_id": str(scope["umo"]),
+        "snapshot_fingerprint": "event:" + event_id.strip(),
+        "position": int(raw.get("source_position", 0)),
+        "text_hash": content_hash(text),
+        "projection_key": projection_key(
+            scope_key, evidence_id, text, correction_revision, card_version, purpose
+        ),
         "card_version": str(card_version)[:256],
         "source_locator": {
-            "kind": "event", "event_id": event_id.strip(), "event_type": event_type,
-            "scope": {key: str(source_scope.get(key, "")) for key in
-                      ("platform", "umo", "persona_id", "instance_id")},
+            "kind": "event",
+            "event_id": event_id.strip(),
+            "event_type": event_type,
+            "scope": {
+                key: str(source_scope.get(key, ""))
+                for key in ("platform", "umo", "persona_id", "instance_id")
+            },
             "correction_revision": int(correction_revision),
-            "card_version": str(card_version)[:256], "purpose": purpose,
+            "card_version": str(card_version)[:256],
+            "purpose": purpose,
         },
     }
     actor_id = str(raw.get("actor_id") or "")[:160] or None
     material = {
-        **descriptor, "source_kind": "event", "scope": dict(source_scope),
-        "text": text, "source_status": "exact_event",
+        **descriptor,
+        "source_kind": "event",
+        "scope": dict(source_scope),
+        "text": text,
+        "source_status": "exact_event",
         # Keep the trusted archive actor in its input form as well as the
         # canonical projection field so a second normalization is idempotent.
-        "actor_id": actor_id, "author_id": actor_id,
+        "actor_id": actor_id,
+        "author_id": actor_id,
         "occurred_at": raw.get("occurred_at"),
-        "delivery_status": "success" if event_type == "delivery.success" else "verified" if event_type == "tool.execution_receipt" else "received",
-        "source_event_id": event_id.strip(), "event_type": event_type,
-        "receipt": raw.get("receipt") if event_type == "tool.execution_receipt" else None,
-        "root_evidence_ids": [evidence_id], "root_material_ids": [],
+        "delivery_status": "success"
+        if event_type == "delivery.success"
+        else "verified"
+        if event_type == "tool.execution_receipt"
+        else "received",
+        "source_event_id": event_id.strip(),
+        "event_type": event_type,
+        "receipt": raw.get("receipt")
+        if event_type == "tool.execution_receipt"
+        else None,
+        "root_evidence_ids": [evidence_id],
+        "root_material_ids": [],
     }
     return descriptor, material
 
 
-def normalize_conversation_row(scope_key: str, scope: dict, raw: dict, *,
-                               source_memory_id: int, card_version: str = "",
-                               correction_revision: int = 0,
-                               purpose: str = "reply") -> tuple[dict, dict] | None:
+def normalize_conversation_row(
+    scope_key: str,
+    scope: dict,
+    raw: dict,
+    *,
+    source_memory_id: int,
+    card_version: str = "",
+    correction_revision: int = 0,
+    purpose: str = "reply",
+) -> tuple[dict, dict] | None:
     """Normalize one exact private user row anchored by a retained source snapshot.
 
     The row is material evidence, never a platform event: it receives a mat1
@@ -214,14 +355,23 @@ def normalize_conversation_row(scope_key: str, scope: dict, raw: dict, *,
     if isinstance(source_memory_id, bool) or memory_id <= 0:
         return None
     content = raw.get("content")
-    if not isinstance(content, str) or not content.strip() or len(content) > MAX_TEXT_CHARS:
+    if (
+        not isinstance(content, str)
+        or not content.strip()
+        or len(content) > MAX_TEXT_CHARS
+    ):
         return None
     sender_id = raw.get("sender_id")
     if not isinstance(sender_id, str) or not sender_id.strip():
         return None
     sender_id = sender_id.strip()
     # The session fallback and legacy placeholders do not identify a speaker.
-    if sender_id == session_id or sender_id.casefold() in {"unknown", "none", "null", "user"}:
+    if sender_id == session_id or sender_id.casefold() in {
+        "unknown",
+        "none",
+        "null",
+        "user",
+    }:
         return None
     platform = raw.get("platform")
     if not isinstance(platform, str) or not platform.strip():
@@ -230,50 +380,83 @@ def normalize_conversation_row(scope_key: str, scope: dict, raw: dict, *,
         timestamp_value = float(raw.get("timestamp"))
     except (TypeError, ValueError):
         return None
-    if not (timestamp_value == timestamp_value and abs(timestamp_value) != float("inf")):
+    if not (
+        timestamp_value == timestamp_value and abs(timestamp_value) != float("inf")
+    ):
         return None
     row = {
-        "id": row_id, "session_id": session_id, "role": "user",
-        "sender_id": sender_id, "platform": platform.strip(),
-        "timestamp": timestamp_value, "content": content,
+        "id": row_id,
+        "session_id": session_id,
+        "role": "user",
+        "sender_id": sender_id,
+        "platform": platform.strip(),
+        "timestamp": timestamp_value,
+        "content": content,
     }
     row_hash = conversation_row_hash(row)
-    material_id = stable_id("mat1:", [scope_key, "conversation_row", memory_id,
-                                      session_id, row_id, row_hash])
+    material_id = stable_id(
+        "mat1:",
+        [scope_key, "conversation_row", memory_id, session_id, row_id, row_hash],
+    )
     text_hash = content_hash(content)
     descriptor = {
-        "material_id": material_id, "scope_key": scope_key,
-        "source_kind": "conversation_row", "material_kind": "conversation_row",
-        "correction_revision": int(correction_revision), "source_family_id": "",
-        "role": "user", "conversation_id": session_id,
-        "snapshot_fingerprint": row_hash, "position": row_id,
+        "material_id": material_id,
+        "scope_key": scope_key,
+        "source_kind": "conversation_row",
+        "material_kind": "conversation_row",
+        "correction_revision": int(correction_revision),
+        "source_family_id": "",
+        "role": "user",
+        "conversation_id": session_id,
+        "snapshot_fingerprint": row_hash,
+        "position": row_id,
         "text_hash": text_hash,
-        "projection_key": projection_key(scope_key, material_id, content,
-                                         correction_revision, card_version, purpose),
+        "projection_key": projection_key(
+            scope_key, material_id, content, correction_revision, card_version, purpose
+        ),
         "card_version": str(card_version)[:256],
         "source_locator": {
             "kind": "conversation_row",
             "source_store": "livingmemory.conversations.messages",
-            "session_id": session_id, "row_id": row_id, "row_hash": row_hash,
+            "session_id": session_id,
+            "row_id": row_id,
+            "row_hash": row_hash,
             "source_memory_id": memory_id,
-            "scope": {key: str(scope[key]) for key in
-                      ("platform", "umo", "persona_id", "instance_id")},
+            "scope": {
+                key: str(scope[key])
+                for key in ("platform", "umo", "persona_id", "instance_id")
+            },
             "correction_revision": int(correction_revision),
-            "card_version": str(card_version)[:256], "purpose": purpose,
+            "card_version": str(card_version)[:256],
+            "purpose": purpose,
         },
     }
     material = {
-        **descriptor, **row, "text": content, "actor_id": sender_id, "author_id": sender_id,
-        "source_status": "conversation_row", "occurred_at": timestamp_value,
-        "delivery_status": "unknown", "source_event_id": None,
-        "root_evidence_ids": [], "root_material_ids": [material_id],
-        "source_memory_id": memory_id, "row_hash": row_hash,
+        **descriptor,
+        **row,
+        "text": content,
+        "actor_id": sender_id,
+        "author_id": sender_id,
+        "source_status": "conversation_row",
+        "occurred_at": timestamp_value,
+        "delivery_status": "unknown",
+        "source_event_id": None,
+        "root_evidence_ids": [],
+        "root_material_ids": [material_id],
+        "source_memory_id": memory_id,
+        "row_hash": row_hash,
     }
     return descriptor, material
 
 
-def normalize_legacy_summary(scope_key: str, raw: dict, *, card_version: str = "",
-                             correction_revision: int = 0, purpose: str = "reply") -> tuple[dict, dict] | None:
+def normalize_legacy_summary(
+    scope_key: str,
+    raw: dict,
+    *,
+    card_version: str = "",
+    correction_revision: int = 0,
+    purpose: str = "reply",
+) -> tuple[dict, dict] | None:
     """Wrap an old summary as an unverified legacy source, without inventing chat identity."""
     if not isinstance(raw, dict) or raw.get("source_kind") != "legacy_summary":
         return None
@@ -285,24 +468,42 @@ def normalize_legacy_summary(scope_key: str, raw: dict, *, card_version: str = "
         return None
     material_id = legacy_material_id(scope_key, str(document_id), text)
     descriptor = {
-        "material_id": material_id, "scope_key": scope_key, "material_kind": "legacy_summary",
-        "source_kind": "legacy_summary", "correction_revision": int(correction_revision),
+        "material_id": material_id,
+        "scope_key": scope_key,
+        "material_kind": "legacy_summary",
+        "source_kind": "legacy_summary",
+        "correction_revision": int(correction_revision),
         "source_family_id": "",
         "document_id": str(document_id),
-        "role": "summary", "conversation_id": "", "snapshot_fingerprint": "",
-        "position": -1, "text_hash": content_hash(text),
-        "projection_key": projection_key(scope_key, material_id, text, correction_revision, card_version, purpose),
+        "role": "summary",
+        "conversation_id": "",
+        "snapshot_fingerprint": "",
+        "position": -1,
+        "text_hash": content_hash(text),
+        "projection_key": projection_key(
+            scope_key, material_id, text, correction_revision, card_version, purpose
+        ),
         "card_version": str(card_version)[:256],
         "source_locator": {
-            "kind": "legacy_summary", "document_id": str(document_id),
+            "kind": "legacy_summary",
+            "document_id": str(document_id),
             "source_umo": str(raw.get("source_umo") or ""),
             "correction_revision": int(correction_revision),
-            "card_version": str(card_version)[:256], "purpose": purpose,
+            "card_version": str(card_version)[:256],
+            "purpose": purpose,
         },
     }
-    return descriptor, {**descriptor, "text": text, "source_status": "legacy_summary",
-                        "author_id": None, "occurred_at": None, "delivery_status": "unknown",
-                        "source_event_id": None, "root_evidence_ids": [], "root_material_ids": [material_id]}
+    return descriptor, {
+        **descriptor,
+        "text": text,
+        "source_status": "legacy_summary",
+        "author_id": None,
+        "occurred_at": None,
+        "delivery_status": "unknown",
+        "source_event_id": None,
+        "root_evidence_ids": [],
+        "root_material_ids": [material_id],
+    }
 
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;\n])\s*|(?<=[.!?])\s+(?=[^.!?])")
@@ -312,8 +513,13 @@ _CONTINUITY = re.compile(
 )
 
 
-def pending_continuity_spans(text: str, *, max_spans: int = 3, max_total_chars: int = 1200,
-                             max_span_chars: int = 500) -> list[dict]:
+def pending_continuity_spans(
+    text: str,
+    *,
+    max_spans: int = 3,
+    max_total_chars: int = 1200,
+    max_span_chars: int = 500,
+) -> list[dict]:
     """Return only complete candidate sentences; never truncate a condition or negation."""
     output = []
     offset = 0
@@ -331,19 +537,38 @@ def pending_continuity_spans(text: str, *, max_spans: int = 3, max_total_chars: 
         trim_right = len(chunk.rstrip())
         sentence_start = start + trim_left
         sentence_end = start + trim_right
-        if not sentence or len(sentence) > max_span_chars or not _CONTINUITY.search(sentence):
+        if (
+            not sentence
+            or len(sentence) > max_span_chars
+            or not _CONTINUITY.search(sentence)
+        ):
             continue
         if total + len(sentence) > max_total_chars:
             continue
-        output.append({"start": sentence_start, "end": sentence_end, "text": sentence,
-                       "kind": "pending_continuity", "claim_status": "unverified",
-                       "source_status": "host_record_only"})
+        output.append(
+            {
+                "start": sentence_start,
+                "end": sentence_end,
+                "text": sentence,
+                "kind": "pending_continuity",
+                "claim_status": "unverified",
+                "source_status": "host_record_only",
+            }
+        )
         total += len(sentence)
         if len(output) >= max_spans:
             break
     return output
 
 
-def atom_id(scope_key: str, kind: str, claim: str, roots: list[str] | tuple[str, ...], revision: int) -> str:
+def atom_id(
+    scope_key: str,
+    kind: str,
+    claim: str,
+    roots: list[str] | tuple[str, ...],
+    revision: int,
+) -> str:
     normalized = " ".join(str(claim).casefold().split())
-    return stable_id("atm1:", [scope_key, kind, normalized, sorted(set(roots)), int(revision)])
+    return stable_id(
+        "atm1:", [scope_key, kind, normalized, sorted(set(roots)), int(revision)]
+    )

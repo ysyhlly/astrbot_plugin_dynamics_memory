@@ -16,7 +16,8 @@ from .test_real_db_end_to_end import _DeterministicEmbeddingProvider
 async def open_engine(tmp_path):
     path = str(tmp_path / "memory.sqlite3")
     faiss = FaissVecDB(
-        doc_store_path=path, index_store_path=str(tmp_path / "memory.index"),
+        doc_store_path=path,
+        index_store_path=str(tmp_path / "memory.index"),
         embedding_provider=_DeterministicEmbeddingProvider(),
     )
     await faiss.initialize()
@@ -43,23 +44,36 @@ async def publication_row(engine):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("archived", [False, True])
-async def test_published_source_survives_restart_with_graph_repair_pending(tmp_path, archived):
+async def test_published_source_survives_restart_with_graph_repair_pending(
+    tmp_path, archived
+):
     async with open_engine(tmp_path) as engine:
-        engine.graph_memory_manager = SimpleNamespace(index_memory=AsyncMock(side_effect=RuntimeError("graph failed")))
+        engine.graph_memory_manager = SimpleNamespace(
+            index_memory=AsyncMock(side_effect=RuntimeError("graph failed"))
+        )
         doc_id = await engine.add_memory(
-            "completed group activity", session_id="qq:GroupMessage:1",
-            source_validator=lambda: True, source_publish_lease=source_lease,
+            "completed group activity",
+            session_id="qq:GroupMessage:1",
+            source_validator=lambda: True,
+            source_publish_lease=source_lease,
             source_messages=[{"role": "user", "content": "verified source"}],
-            metadata={"source_publication_verified_v1": {"write_op_id": 999, "memory_id": 999}},
+            metadata={
+                "source_publication_verified_v1": {"write_op_id": 999, "memory_id": 999}
+            },
         )
         op_id, memory_id, status, step = await publication_row(engine)
         assert memory_id == doc_id
         assert (status, step) == ("completed", "source_published_graph_pending")
         doc = await engine.get_memory_record(doc_id)
         metadata = safe_json_dict(doc["metadata"])
-        assert metadata["source_publication_verified_v1"] == {"write_op_id": op_id, "memory_id": doc_id}
+        assert metadata["source_publication_verified_v1"] == {
+            "write_op_id": op_id,
+            "memory_id": doc_id,
+        }
         if archived:
-            assert await engine.hybrid_retriever.update_metadata(doc_id, {"status": "archived", "superseded_by": 123})
+            assert await engine.hybrid_retriever.update_metadata(
+                doc_id, {"status": "archived", "superseded_by": 123}
+            )
         engine.graph_memory_manager = None
 
     async with open_engine(tmp_path) as resumed:
@@ -67,11 +81,23 @@ async def test_published_source_survives_restart_with_graph_repair_pending(tmp_p
         resumed.graph_memory_manager = SimpleNamespace(index_memory=rebuild)
         if not archived:
             assert await resumed._repair_incomplete_write_ops() == 0
-            assert await publication_row(resumed) == (op_id, doc_id, "completed", "source_published_graph_pending")
+            assert await publication_row(resumed) == (
+                op_id,
+                doc_id,
+                "completed",
+                "source_published_graph_pending",
+            )
         assert await resumed._repair_incomplete_write_ops() == 1
         assert rebuild.await_count == (0 if archived else 2)
-        assert await publication_row(resumed) == (op_id, doc_id, "completed", "completed")
-        assert await resumed.get_memory_source(doc_id) == [{"role": "user", "content": "verified source"}]
+        assert await publication_row(resumed) == (
+            op_id,
+            doc_id,
+            "completed",
+            "completed",
+        )
+        assert await resumed.get_memory_source(doc_id) == [
+            {"role": "user", "content": "verified source"}
+        ]
         doc = await resumed.get_memory_record(doc_id)
         saved = safe_json_dict(doc["metadata"])
         assert saved["status"] == ("archived" if archived else "active")
@@ -81,11 +107,16 @@ async def test_published_source_survives_restart_with_graph_repair_pending(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("forged_witness", [True, {"write_op_id": 9999, "memory_id": 9999}])
-async def test_unpublished_sources_cannot_be_preserved_by_unbound_witness(tmp_path, forged_witness):
+@pytest.mark.parametrize(
+    "forged_witness", [True, {"write_op_id": 9999, "memory_id": 9999}]
+)
+async def test_unpublished_sources_cannot_be_preserved_by_unbound_witness(
+    tmp_path, forged_witness
+):
     async with open_engine(tmp_path) as engine:
         doc_id = await engine.add_memory(
-            "unpublished activity", session_id="qq:GroupMessage:1",
+            "unpublished activity",
+            session_id="qq:GroupMessage:1",
             metadata={"source_publication_verified_v1": forged_witness},
         )
         op_id, *_ = await publication_row(engine)
@@ -94,33 +125,51 @@ async def test_unpublished_sources_cannot_be_preserved_by_unbound_witness(tmp_pa
         # Simulate a staged candidate/journal created by an earlier runtime,
         # with a stale or forged marker in its persisted metadata.
         assert await engine.hybrid_retriever.update_metadata(
-            doc_id, {"status": "active", "source_publication_verified_v1": forged_witness},
+            doc_id,
+            {"status": "active", "source_publication_verified_v1": forged_witness},
         )
         await engine._advance_write_op(
-            op_id, "source_pending", status="pending", memory_id=doc_id,
+            op_id,
+            "source_pending",
+            status="pending",
+            memory_id=doc_id,
             payload_patch={"source_validation_required": True},
         )
 
     async with open_engine(tmp_path) as resumed:
         assert await resumed._repair_incomplete_write_ops() == 0
         assert await resumed.get_memory_record(doc_id) is None
-        assert await publication_row(resumed) == (op_id, doc_id, "failed", "source_lease_unavailable_after_restart")
+        assert await publication_row(resumed) == (
+            op_id,
+            doc_id,
+            "failed",
+            "source_lease_unavailable_after_restart",
+        )
 
 
 @pytest.mark.asyncio
 async def test_old_pending_op_cannot_delete_document_owned_by_another_op(tmp_path):
     async with open_engine(tmp_path) as engine:
         doc_id = await engine.add_memory(
-            "published activity", session_id="qq:GroupMessage:1",
-            source_validator=lambda: True, source_publish_lease=source_lease,
+            "published activity",
+            session_id="qq:GroupMessage:1",
+            source_validator=lambda: True,
+            source_publish_lease=source_lease,
         )
         op_id, *_ = await publication_row(engine)
-        old = await engine._start_write_op("add", {"source_validation_required": True}, memory_id=doc_id)
+        old = await engine._start_write_op(
+            "add", {"source_validation_required": True}, memory_id=doc_id
+        )
         assert old != op_id
 
     async with open_engine(tmp_path) as resumed:
         assert await resumed._repair_incomplete_write_ops() == 0
-        assert await publication_row(resumed) == (old, doc_id, "failed", "source_document_operation_mismatch")
+        assert await publication_row(resumed) == (
+            old,
+            doc_id,
+            "failed",
+            "source_document_operation_mismatch",
+        )
         doc = await resumed.get_memory_record(doc_id)
         assert safe_json_dict(doc["metadata"])["status"] == "active"
 
@@ -137,10 +186,14 @@ async def test_cancel_after_publication_commit_keeps_durable_receipt(tmp_path):
         await hold_callback.wait()
 
     async with open_engine(tmp_path) as engine:
-        adding = asyncio.create_task(engine.add_memory(
-            "completed group activity", session_id="qq:GroupMessage:1",
-            source_validator=lambda: True, source_publish_lease=interrupted_lease,
-        ))
+        adding = asyncio.create_task(
+            engine.add_memory(
+                "completed group activity",
+                session_id="qq:GroupMessage:1",
+                source_validator=lambda: True,
+                source_publish_lease=interrupted_lease,
+            )
+        )
         try:
             await asyncio.wait_for(published.wait(), 5)
             op_id, doc_id, status, step = await publication_row(engine)
@@ -154,22 +207,31 @@ async def test_cancel_after_publication_commit_keeps_durable_receipt(tmp_path):
 
     async with open_engine(tmp_path) as resumed:
         assert await resumed._repair_incomplete_write_ops() == 0
-        assert await publication_row(resumed) == (op_id, doc_id, "completed", "source_published")
+        assert await publication_row(resumed) == (
+            op_id,
+            doc_id,
+            "completed",
+            "source_published",
+        )
         doc = await resumed.get_memory_record(doc_id)
         assert safe_json_dict(doc["metadata"])["status"] == "active"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry_cleanup", [False, True])
-async def test_restart_cleans_indexed_candidate_without_journal_document_id(tmp_path, retry_cleanup, monkeypatch):
+async def test_restart_cleans_indexed_candidate_without_journal_document_id(
+    tmp_path, retry_cleanup, monkeypatch
+):
     session = "qq:GroupMessage:1"
     indexed = asyncio.Event()
     keep_pending = asyncio.Event()
     staged_id = None
     async with open_engine(tmp_path) as engine:
         published_id = await engine.add_memory(
-            "published activity", session_id=session,
-            source_validator=lambda: True, source_publish_lease=source_lease,
+            "published activity",
+            session_id=session,
+            source_validator=lambda: True,
+            source_publish_lease=source_lease,
         )
         advance = engine._advance_write_op
 
@@ -182,17 +244,24 @@ async def test_restart_cleans_indexed_candidate_without_journal_document_id(tmp_
             return await advance(op_id, step, **kwargs)
 
         monkeypatch.setattr(engine, "_advance_write_op", stop_before_journal)
-        adding = asyncio.create_task(engine.add_memory(
-            "staged activity", session_id=session,
-            source_validator=lambda: True, source_publish_lease=source_lease,
-        ))
+        adding = asyncio.create_task(
+            engine.add_memory(
+                "staged activity",
+                session_id=session,
+                source_validator=lambda: True,
+                source_publish_lease=source_lease,
+            )
+        )
         try:
             await asyncio.wait_for(indexed.wait(), 5)
             assert staged_id != published_id
             op_id, memory_id, status, step = await publication_row(engine)
             assert (memory_id, status, step) == (None, "pending", "started")
             staged = await engine.get_memory_record(staged_id)
-            assert safe_json_dict(staged["metadata"])["status"] == "pending_source_validation"
+            assert (
+                safe_json_dict(staged["metadata"])["status"]
+                == "pending_source_validation"
+            )
             assert engine.faiss_db.embedding_storage.index.ntotal == 2
             adding.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -206,12 +275,22 @@ async def test_restart_cleans_indexed_candidate_without_journal_document_id(tmp_
             with monkeypatch.context() as patch:
                 patch.setattr(resumed, "delete_memory", AsyncMock(return_value=False))
                 assert await resumed._repair_incomplete_write_ops() == 0
-                assert await publication_row(resumed) == (op_id, staged_id, "needs_repair", "source_cleanup_pending")
+                assert await publication_row(resumed) == (
+                    op_id,
+                    staged_id,
+                    "needs_repair",
+                    "source_cleanup_pending",
+                )
                 assert await resumed.get_memory_record(staged_id) is not None
 
         assert await resumed._repair_incomplete_write_ops() == 0
         assert await resumed.get_memory_record(staged_id) is None
-        assert await publication_row(resumed) == (op_id, staged_id, "failed", "source_lease_unavailable_after_restart")
+        assert await publication_row(resumed) == (
+            op_id,
+            staged_id,
+            "failed",
+            "source_lease_unavailable_after_restart",
+        )
         assert resumed.faiss_db.embedding_storage.index.ntotal == 1
         saved = await resumed.get_memory_record(published_id)
         assert safe_json_dict(saved["metadata"])["status"] == "active"

@@ -1,6 +1,5 @@
 """供 Agent 主动调用的长期记忆写入工具。"""
 
-import json
 from ..memory_scope import classify_umo, resolve_memory_write_scope
 from ..narrative_api import scope_key
 
@@ -17,7 +16,7 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from ..memory_scope import adapter_access, is_event_memory_allowed, resolve_memory_scope
+from ..memory_scope import adapter_access, is_event_memory_allowed
 from ..utils import get_persona_id
 from .agentic_recall_common import json_result as _json_result
 
@@ -135,19 +134,37 @@ class MemoryMemorizeTool(FunctionTool[AstrAgentContext]):
                 if isinstance(managed, dict):
                     scope = managed.get("scope", {})
                     if scope.get("umo") != session_id or managed.get("internal"):
-                        return _json_result({"memorized": False, "error": "managed_scope_or_authorization_missing"})
+                        return _json_result(
+                            {
+                                "memorized": False,
+                                "error": "managed_scope_or_authorization_missing",
+                            }
+                        )
                     memory_scope = scope_key(scope)
                     persona_id = scope["persona_id"]
                     for source in managed.get("events", []):
-                        if all(source.get("scope", {}).get(k) == scope.get(k) for k in ("platform", "umo", "persona_id", "instance_id")) and source.get("event_id"):
-                            provenance.append({"source_id": source["event_id"], "scope": dict(scope),
-                                               "fact_kind": source.get("fact_kind", "user_claim"),
-                                               "occurred_at": source.get("occurred_at")})
+                        if all(
+                            source.get("scope", {}).get(k) == scope.get(k)
+                            for k in ("platform", "umo", "persona_id", "instance_id")
+                        ) and source.get("event_id"):
+                            provenance.append(
+                                {
+                                    "source_id": source["event_id"],
+                                    "scope": dict(scope),
+                                    "fact_kind": source.get("fact_kind", "user_claim"),
+                                    "occurred_at": source.get("occurred_at"),
+                                }
+                            )
                     if not provenance:
-                        return _json_result({"memorized": False, "error": "source_evidence_missing"})
+                        return _json_result(
+                            {"memorized": False, "error": "source_evidence_missing"}
+                        )
                     # A model-written summary is an interpretation even if it sounds
                     # factual. Saving it creates no promise, reminder or execution.
-                    cleaned_memory = "[角色主观记忆；待核实，不代表约定或执行已完成] " + cleaned_memory[:2000]
+                    cleaned_memory = (
+                        "[角色主观记忆；待核实，不代表约定或执行已完成] "
+                        + cleaned_memory[:2000]
+                    )
                 else:
                     persona_id = await get_persona_id(self.context, event)
                 is_group_chat = event.get_message_type() == MessageType.GROUP_MESSAGE
@@ -188,9 +205,14 @@ class MemoryMemorizeTool(FunctionTool[AstrAgentContext]):
                     else ""
                 )
                 if provenance:
-                    metadata.update(narrative_provenance=provenance, narrative_scope=dict(scope),
-                                    fact_kind="subjective", unknown=True, memory_origin="narrative_agent_interpretation",
-                                    narrative_turn_id=managed.get("turn_id"))
+                    metadata.update(
+                        narrative_provenance=provenance,
+                        narrative_scope=dict(scope),
+                        fact_kind="subjective",
+                        unknown=True,
+                        memory_origin="narrative_agent_interpretation",
+                        narrative_turn_id=managed.get("turn_id"),
+                    )
                 cleaned_reason = (reason or "").strip()
                 if cleaned_reason:
                     metadata["memorize_reason"] = cleaned_reason

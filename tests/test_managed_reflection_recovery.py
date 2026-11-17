@@ -20,7 +20,8 @@ BASE_TIME = 1_790_000_000
 async def add_receipts(store, *sequence):
     for index in sequence:
         event = envelope(
-            f"receipt-{index}", "delivery.success" if index % 2 else "message.received",
+            f"receipt-{index}",
+            "delivery.success" if index % 2 else "message.received",
             f"synthetic {index}",
         )
         event["occurred_at"] = BASE_TIME + index
@@ -30,7 +31,9 @@ async def add_receipts(store, *sequence):
 async def configured_handler(tmp_path):
     handler, manager, store = await _make_real_handler(tmp_path)
     handler.config_manager._config["reflection_engine"].update(
-        summary_trigger_rounds=1, max_messages_per_segment=2, max_segments_per_run=3,
+        summary_trigger_rounds=1,
+        max_messages_per_segment=2,
+        max_segments_per_run=3,
     )
     handler.memory_engine.find_similar_memory = AsyncMock(return_value=(None, None))
     _configure_processor(handler)
@@ -54,10 +57,17 @@ async def test_legacy_refusal_stays_exact_and_later_windows_are_saved(tmp_path):
     handler, manager, store = await configured_handler(tmp_path)
     try:
         await add_receipts(store, 0, 1, 2, 3)
-        await manager.update_session_metadata(SESSION, "pending_summary", {
-            "start_index": 0, "end_index": 2, "retry_count": 1,
-            "failure_stage": "provider_terminal", "error_code": "provider_content_blocked",
-        })
+        await manager.update_session_metadata(
+            SESSION,
+            "pending_summary",
+            {
+                "start_index": 0,
+                "end_index": 2,
+                "retry_count": 1,
+                "failure_stage": "provider_terminal",
+                "error_code": "provider_content_blocked",
+            },
+        )
         await run_receipt(handler)
         assert model_inputs(handler) == [["synthetic 2", "synthetic 3"]]
         assert await manager.get_session_metadata(SESSION, "last_summarized_index") == 0
@@ -95,11 +105,14 @@ async def test_provider_refusal_continues_with_later_budgeted_window(tmp_path):
         ]
         await run_receipt(handler)
         assert model_inputs(handler) == [
-            ["synthetic 0", "synthetic 1"], ["synthetic 2", "synthetic 3"],
+            ["synthetic 0", "synthetic 1"],
+            ["synthetic 2", "synthetic 3"],
         ]
         assert handler.memory_engine.add_memory.await_count == 1
         assert await manager.get_session_metadata(SESSION, "last_summarized_index") == 0
-        _, messages, refusal = await store.get_managed_summary_window(SESSION, 2, 2, retry_refused=True)
+        _, messages, refusal = await store.get_managed_summary_window(
+            SESSION, 2, 2, retry_refused=True
+        )
         assert len(messages) == 2
         assert refusal["failure_stage"] == "provider_terminal"
     finally:
@@ -108,11 +121,15 @@ async def test_provider_refusal_continues_with_later_budgeted_window(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_three_errors_cool_down_and_retry_same_window_after_restart(tmp_path, monkeypatch):
+async def test_three_errors_cool_down_and_retry_same_window_after_restart(
+    tmp_path, monkeypatch
+):
     handler, manager, store = await configured_handler(tmp_path)
     try:
         await add_receipts(store, 0, 1)
-        handler.memory_processor.process_conversation.side_effect = RuntimeError("temporary provider error")
+        handler.memory_processor.process_conversation.side_effect = RuntimeError(
+            "temporary provider error"
+        )
         for _ in range(3):
             await run_receipt(handler)
         pending = await manager.get_session_metadata(SESSION, "pending_summary")
@@ -134,25 +151,36 @@ async def test_three_errors_cool_down_and_retry_same_window_after_restart(tmp_pa
         from astrbot_plugin_dynamics_memory.main import LivingMemoryPlugin
 
         plugin = SimpleNamespace(
-            event_handler=handler, _narrative_scope_allowed=AsyncMock(return_value=False),
+            event_handler=handler,
+            _narrative_scope_allowed=AsyncMock(return_value=False),
         )
         now = pending["retry_after"] + 1
         monkeypatch.setattr(
             "astrbot_plugin_dynamics_memory.main.time",
             SimpleNamespace(time=lambda: now),
         )
-        assert await LivingMemoryPlugin._recover_managed_reflection_page(plugin, store, 0) == 0
+        assert (
+            await LivingMemoryPlugin._recover_managed_reflection_page(plugin, store, 0)
+            == 0
+        )
         plugin._narrative_scope_allowed.assert_awaited_once_with(SCOPE, "u1")
         handler.memory_processor.process_conversation.assert_not_awaited()
         monkeypatch.setattr(
             "astrbot_plugin_dynamics_memory.storage.conversation_summary_progress.time",
-            type("Clock", (), {"time": staticmethod(lambda: pending["retry_after"] + 1)}),
+            type(
+                "Clock", (), {"time": staticmethod(lambda: pending["retry_after"] + 1)}
+            ),
         )
         plugin._narrative_scope_allowed.return_value = True
-        assert await LivingMemoryPlugin._recover_managed_reflection_page(plugin, store, 0) == 0
+        assert (
+            await LivingMemoryPlugin._recover_managed_reflection_page(plugin, store, 0)
+            == 0
+        )
         await asyncio.gather(*handler._storage_tasks)
         assert model_inputs(handler) == [
-            ["synthetic 0", "synthetic 1"], ["synthetic -1"], ["synthetic 2", "synthetic 3"],
+            ["synthetic 0", "synthetic 1"],
+            ["synthetic -1"],
+            ["synthetic 2", "synthetic 3"],
         ]
         assert await manager.get_session_metadata(SESSION, "last_summarized_index") == 5
         assert await store.get_message_count(SESSION) == 5
@@ -162,7 +190,9 @@ async def test_three_errors_cool_down_and_retry_same_window_after_restart(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_delivery_during_inflight_is_coalesced_without_second_summary_of_same_window(tmp_path):
+async def test_delivery_during_inflight_is_coalesced_without_second_summary_of_same_window(
+    tmp_path,
+):
     handler, manager, store = await configured_handler(tmp_path)
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -183,7 +213,8 @@ async def test_delivery_during_inflight_is_coalesced_without_second_summary_of_s
         release.set()
         await asyncio.gather(*handler._storage_tasks)
         assert model_inputs(handler) == [
-            ["synthetic 0", "synthetic 1"], ["synthetic 2", "synthetic 3"],
+            ["synthetic 0", "synthetic 1"],
+            ["synthetic 2", "synthetic 3"],
         ]
         assert await manager.get_session_metadata(SESSION, "last_summarized_index") == 4
     finally:
@@ -194,18 +225,28 @@ async def test_delivery_during_inflight_is_coalesced_without_second_summary_of_s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("world_state", ["ready", "unavailable", "native", "not_admin"])
-async def test_admin_retry_resolves_authoritative_character_scope(monkeypatch, world_state):
+async def test_admin_retry_resolves_authoritative_character_scope(
+    monkeypatch, world_state
+):
     from astrbot_plugin_dynamics_memory import main
 
     world_scope = {**SCOPE, "persona_id": "world-card", "instance_id": "world-instance"}
     world = SimpleNamespace(
-        get_character_context=AsyncMock(return_value={"schema_version": 1, "scope": world_scope}),
+        get_character_context=AsyncMock(
+            return_value={"schema_version": 1, "scope": world_scope}
+        ),
         get_dynamics_capabilities=lambda: {
-            "schema_version": 1, "enabled": True, "ready": world_state == "ready",
+            "schema_version": 1,
+            "enabled": True,
+            "ready": world_state == "ready",
             "capabilities": {"character": 1},
         },
     )
-    stars = [{"name": "world", "star_cls": world}] if world_state in {"ready", "unavailable"} else []
+    stars = (
+        [{"name": "world", "star_cls": world}]
+        if world_state in {"ready", "unavailable"}
+        else []
+    )
     plugin = SimpleNamespace(
         context=SimpleNamespace(get_all_stars=lambda: stars),
         event_handler=SimpleNamespace(retry_refused_scope=AsyncMock(return_value=True)),
@@ -213,11 +254,15 @@ async def test_admin_retry_resolves_authoritative_character_scope(monkeypatch, w
         _narrative_scope_allowed=AsyncMock(return_value=True),
     )
     event = SimpleNamespace(
-        is_admin=lambda: world_state != "not_admin", unified_msg_origin=SCOPE["umo"],
-        get_sender_id=lambda: "admin", plain_result=lambda text: text,
+        is_admin=lambda: world_state != "not_admin",
+        unified_msg_origin=SCOPE["umo"],
+        get_sender_id=lambda: "admin",
+        plain_result=lambda text: text,
     )
     monkeypatch.setattr(main, "_get_native_persona_id", AsyncMock(return_value="host"))
-    results = [item async for item in main.LivingMemoryPlugin.summarize_retry(plugin, event)]
+    results = [
+        item async for item in main.LivingMemoryPlugin.summarize_retry(plugin, event)
+    ]
     if world_state == "ready":
         plugin.event_handler.retry_refused_scope.assert_awaited_once_with(world_scope)
     elif world_state == "native":

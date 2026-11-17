@@ -24,12 +24,8 @@ from tests.event_handler_support import (
     _make_resp,
     _recalled,
     _summary_guard,
-    conversation_manager,
-    handler,
-    memory_engine,
-    memory_processor,
 )
-from tests.integration.test_real_db_end_to_end import _TestEvent, real_db_stack
+from tests.integration.test_real_db_end_to_end import _TestEvent
 
 
 @pytest.mark.asyncio
@@ -114,7 +110,9 @@ async def test_handle_all_group_messages_and_limit_cleanup(
     await handler.handle_all_group_messages(event)
 
     conversation_manager.add_message_from_event.assert_awaited()
-    conversation_manager.trim_session_messages.assert_awaited_once_with(event.unified_msg_origin, 5)
+    conversation_manager.trim_session_messages.assert_awaited_once_with(
+        event.unified_msg_origin, 5
+    )
 
 
 @pytest.mark.asyncio
@@ -147,7 +145,9 @@ async def test_enforce_message_limit_uses_cleanup_batch_size(
     conversation_manager.trim_session_messages.assert_awaited_once_with(
         "test:private:sid-1", 20
     )
-    assert [call.args for call in conversation_manager.get_session_metadata.await_args_list] == [
+    assert [
+        call.args for call in conversation_manager.get_session_metadata.await_args_list
+    ] == [
         ("test:private:sid-1", "last_summarized_index", 0),
         ("test:private:sid-1", "last_summarized_index", 60),
     ]
@@ -192,7 +192,9 @@ async def test_shutdown_waits_for_storage_tasks(handler):
 
 
 @pytest.mark.asyncio
-async def test_handle_memory_recall_skips_when_original_text_empty(handler, memory_engine):
+async def test_handle_memory_recall_skips_when_original_text_empty(
+    handler, memory_engine
+):
     """Provider-only text is neither stored nor searched without a native Plain part."""
     event = _make_event(text="")
     req = _make_req("generated envelope")
@@ -208,8 +210,12 @@ async def test_handle_memory_recall_skips_when_original_text_empty(handler, memo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("auto_remove", [True, False])
-async def test_native_image_only_request_applies_legacy_cleanup(handler, memory_engine, auto_remove):
-    handler.config_manager._config["recall_engine"]["auto_remove_injected"] = auto_remove
+async def test_native_image_only_request_applies_legacy_cleanup(
+    handler, memory_engine, auto_remove
+):
+    handler.config_manager._config["recall_engine"]["auto_remove_injected"] = (
+        auto_remove
+    )
     event = _make_event(text="")
     event.get_messages.return_value = [Image(file="synthetic.png")]
     event.get_messages.side_effect = None
@@ -254,11 +260,15 @@ async def test_guarded_recall_with_persona_filtering_disabled(real_db_stack):
     session_id = "test:FriendMessage:current-session"
     saved_id = await engine.add_memory(
         content="synthetic running memory from this conversation",
-        session_id=session_id, persona_id="persona-real", importance=0.95,
+        session_id=session_id,
+        persona_id="persona-real",
+        importance=0.95,
     )
     other_id = await engine.add_memory(
         content="synthetic running memory from another conversation",
-        session_id="test:FriendMessage:foreign-session", persona_id="persona-real", importance=0.95,
+        session_id="test:FriendMessage:foreign-session",
+        persona_id="persona-real",
+        importance=0.95,
     )
     assert saved_id and other_id
     req = _make_req("provider envelope")
@@ -375,16 +385,28 @@ async def test_handle_memory_recall_injection_user_message_after(
 
 
 async def _seed_summary_window(manager, session_id):
-    await manager.add_message(session_id=session_id, role="user", content="hello", sender_id="u1")
-    await manager.add_message(session_id=session_id, role="assistant", content="hi", sender_id="bot")
-    return await manager.get_messages_range(session_id=session_id, start_index=0, end_index=2)
+    await manager.add_message(
+        session_id=session_id, role="user", content="hello", sender_id="u1"
+    )
+    await manager.add_message(
+        session_id=session_id, role="assistant", content="hi", sender_id="bot"
+    )
+    return await manager.get_messages_range(
+        session_id=session_id, start_index=0, end_index=2
+    )
 
 
 @pytest.mark.asyncio
-async def test_storage_task_writes_source_window(tmp_path, memory_engine, memory_processor):
+async def test_storage_task_writes_source_window(
+    tmp_path, memory_engine, memory_processor
+):
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine)
     handler._memory_reflection.memory_processor = memory_processor
-    memory_processor.process_conversation.return_value = ("summary", {"topics": ["t1"]}, 0.9)
+    memory_processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["t1"]},
+        0.9,
+    )
     session_id = "test:private:sid-1"
     scope = "livingmemory:user:test:u1"
     try:
@@ -396,12 +418,22 @@ async def test_storage_task_writes_source_window(tmp_path, memory_engine, memory
         memory_engine.add_memory.assert_awaited_once()
         stored = memory_engine.add_memory.await_args.kwargs
         assert stored["session_id"] == scope
-        assert [item["content"] for item in stored["source_messages"]] == ["hello", "hi"]
+        assert [item["content"] for item in stored["source_messages"]] == [
+            "hello",
+            "hi",
+        ]
         window = stored["metadata"]["source_window"]
         assert window["session_id"] == session_id
-        assert (window["start_index"], window["end_index"], window["message_count"]) == (0, 2, 2)
+        assert (
+            window["start_index"],
+            window["end_index"],
+            window["message_count"],
+        ) == (0, 2, 2)
         assert window["end_message_id"] == messages[-1].id
-        assert await manager.get_session_metadata(session_id, "last_summarized_index", 0) == 2
+        assert (
+            await manager.get_session_metadata(session_id, "last_summarized_index", 0)
+            == 2
+        )
     finally:
         await store.close()
 
@@ -412,11 +444,17 @@ async def test_storage_task_does_not_retain_source_below_threshold(
 ):
     handler, manager, store = await _make_real_handler(tmp_path, memory_engine)
     handler._memory_reflection.memory_processor = memory_processor
-    memory_processor.process_conversation.return_value = ("summary", {"topics": ["t1"]}, 0.79)
+    memory_processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["t1"]},
+        0.79,
+    )
     session_id = "test:private:sid-1"
     try:
         messages = await _seed_summary_window(manager, session_id)
-        await handler._memory_reflection._storage_task(session_id, messages, "p1", 0, 2, 0)
+        await handler._memory_reflection._storage_task(
+            session_id, messages, "p1", 0, 2, 0
+        )
 
         memory_engine.add_memory.assert_awaited_once()
         assert memory_engine.add_memory.await_args.kwargs["source_messages"] is None
@@ -548,19 +586,26 @@ async def test_handle_memory_reflection_pending_retry_enters_cooldown(
     try:
         await _seed_summary_window(manager, session_id)
         await manager.update_session_metadata(
-            session_id, "pending_summary", {"start_index": 0, "end_index": 2, "retry_count": 3}
+            session_id,
+            "pending_summary",
+            {"start_index": 0, "end_index": 2, "retry_count": 3},
         )
 
         await handler.handle_memory_reflection(event, _make_resp())
         await handler.shutdown()
 
-        pending = await manager.get_session_metadata(session_id, "pending_summary", None)
+        pending = await manager.get_session_metadata(
+            session_id, "pending_summary", None
+        )
         assert pending["failure_stage"] == "retry_exhausted"
         assert pending["retry_count"] == 0
         assert pending["exhausted_retry_count"] == 3
         assert pending["retry_after"] > time.time()
         assert (pending["start_index"], pending["end_index"]) == (0, 2)
-        assert await manager.get_session_metadata(session_id, "last_summarized_index", 0) == 0
+        assert (
+            await manager.get_session_metadata(session_id, "last_summarized_index", 0)
+            == 0
+        )
         memory_engine.add_memory.assert_not_awaited()
         memory_processor.process_conversation.assert_not_awaited()
     finally:

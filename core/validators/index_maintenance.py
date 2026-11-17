@@ -3,17 +3,17 @@
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
 import time
 from typing import Any, cast
 
-import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.schema import MIGRATION_STATUS_SCHEMA_STATEMENTS
+from ...storage.sqlite_connection import open_connection
 from ..faiss_async_persist import get_async_persister
 from ..utils.faiss_path_bridge import read_index_safe, write_index_safe
 
@@ -36,6 +36,14 @@ class IndexValidator:
         self.db_path = db_path
         self.faiss_db = faiss_db
         self._maintenance_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _open_db(self):
+        db = await open_connection(self.db_path)
+        try:
+            yield db
+        finally:
+            await db.close()
 
     DEFAULT_REBUILD_BATCH_SIZE = 50
     DEFAULT_EMBEDDING_BATCH_SIZE = 8
@@ -101,7 +109,7 @@ class IndexValidator:
     async def provider_fingerprint_changed(self) -> bool:
         """Adopt legacy indexes once, then detect semantic provider changes."""
         current = self.get_provider_fingerprint()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             for statement in MIGRATION_STATUS_SCHEMA_STATEMENTS:
                 await db.execute(statement)
             cursor = await db.execute(
@@ -123,7 +131,7 @@ class IndexValidator:
 
     async def record_provider_fingerprint(self) -> None:
         current = self.get_provider_fingerprint()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute(
                 """
                 INSERT OR REPLACE INTO migration_status(key, value, updated_at)
@@ -141,7 +149,7 @@ class IndexValidator:
             Tuple[bool, int]: (是否需要重建, 待处理文档数)
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._open_db() as db:
                 # 检查migration_status表
                 cursor = await db.execute("""
                     SELECT name FROM sqlite_master
@@ -188,7 +196,7 @@ class IndexValidator:
     async def _create_bm25_shadow(self, table_name: str) -> str:
         """Create a fresh FTS5 table without touching the live index."""
         shadow_table = f"{table_name}_rebuild"
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute("PRAGMA busy_timeout = 10000")
             await db.execute(f"DROP TABLE IF EXISTS {shadow_table}")
             await db.execute(
@@ -205,7 +213,7 @@ class IndexValidator:
         return shadow_table
 
     async def _drop_bm25_shadow(self, shadow_table: str) -> None:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute("PRAGMA busy_timeout = 10000")
             await db.execute(f"DROP TABLE IF EXISTS {shadow_table}")
             await db.commit()
@@ -213,7 +221,7 @@ class IndexValidator:
     async def _switch_bm25_shadow(self, live_table: str, shadow_table: str) -> None:
         """Atomically replace the live FTS table after a complete build."""
         old_table = f"{live_table}_previous"
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute("PRAGMA busy_timeout = 10000")
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -227,7 +235,7 @@ class IndexValidator:
 
         # Keep the switch transaction short. The previous generation can be
         # dropped after readers have observed the new schema.
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute("PRAGMA busy_timeout = 10000")
             await db.execute(f"DROP TABLE IF EXISTS {old_table}")
             await db.commit()
@@ -294,7 +302,7 @@ class IndexValidator:
         return errors / total
 
     async def _get_document_count(self) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             cursor = await db.execute(
                 f"SELECT COUNT(*) FROM documents WHERE {self.ACTIVE_DOCUMENT_SQL}"
             )
@@ -302,7 +310,7 @@ class IndexValidator:
             return int(row[0]) if row else 0
 
     async def _get_document_ids(self) -> set[int]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             cursor = await db.execute(
                 f"SELECT id FROM documents WHERE {self.ACTIVE_DOCUMENT_SQL}"
             )
@@ -314,7 +322,7 @@ class IndexValidator:
         document_ids: set[int] | None = None,
     ):
         # 复用单个连接遍历所有批次，避免每批重建连接带来的开销。
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute("PRAGMA busy_timeout = 10000")
 
             if document_ids is not None:
@@ -400,8 +408,7 @@ class IndexValidator:
         failed_ids: set[int] = set()
         switched = False
 
-        insert_db = await aiosqlite.connect(self.db_path)
-        await insert_db.execute("PRAGMA busy_timeout = 10000")
+        insert_db = await open_connection(self.db_path)
         try:
             async for batch in self._iter_document_batches(batch_size):
                 rows_to_insert: list[tuple[int, str]] = []
@@ -905,7 +912,7 @@ class IndexValidator:
         from datetime import datetime, timezone
 
         try:
-            async with aiosqlite.connect(self.db_path) as status_db:
+            async with self._open_db() as status_db:
                 for statement in MIGRATION_STATUS_SCHEMA_STATEMENTS:
                     await status_db.execute(statement)
                 await status_db.execute(

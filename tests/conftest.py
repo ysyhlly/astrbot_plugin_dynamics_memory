@@ -523,3 +523,26 @@ def mock_event():
             return "test"
 
     return _Event()
+
+
+from tests.event_handler_support import (  # noqa: E402
+    conversation_manager,
+    handler,
+    memory_engine,
+    memory_processor,
+)
+from tests.integration.test_real_db_end_to_end import real_db_stack  # noqa: E402
+from tests.test_private_summary_projection import (  # noqa: E402
+    private_hook,
+    source_db,
+)
+
+__all__ = [
+    "conversation_manager",
+    "handler",
+    "memory_engine",
+    "memory_processor",
+    "private_hook",
+    "real_db_stack",
+    "source_db",
+]

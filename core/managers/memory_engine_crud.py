@@ -154,7 +154,11 @@ class MemoryEngineCrudMixin:
         # Conversation scope is trusted from the caller's original UMO, never
         # from processor/model metadata. This also keeps a private summary
         # private when it cites group-source facts.
-        source_origin = source_session_id if source_validator is not None and source_session_id else session_id
+        source_origin = (
+            source_session_id
+            if source_validator is not None and source_session_id
+            else session_id
+        )
         source_kind = classify_umo(source_origin)
         full_metadata["session_id"] = session_id
         full_metadata["persona_id"] = persona_id
@@ -346,11 +350,17 @@ class MemoryEngineCrudMixin:
         if source_validator is not None:
             source_current = False
             published = False
+
             async def publish_current_source():
                 if _publish_candidate is not None:
                     return await _publish_candidate(doc_id, op_id, needs_repair)
-                async with self.source_state_guard.hold(), self._write_transaction() as db:
-                    return await self._publish_verified_summary(db, doc_id, op_id, needs_repair)
+                async with (
+                    self.source_state_guard.hold(),
+                    self._write_transaction() as db,
+                ):
+                    return await self._publish_verified_summary(
+                        db, doc_id, op_id, needs_repair
+                    )
 
             try:
                 async with source_publish_lease() as source_current:
@@ -406,23 +416,35 @@ class MemoryEngineCrudMixin:
         """Atomically publish the document and its restart-safe write receipt."""
         if type(op_id) is not int or op_id <= 0:
             return False
-        async with db.execute("SELECT metadata FROM documents WHERE id=?", (doc_id,)) as cursor:
+        async with db.execute(
+            "SELECT metadata FROM documents WHERE id=?", (doc_id,)
+        ) as cursor:
             row = await cursor.fetchone()
         if row is None:
             return False
         metadata = safe_json_dict(row[0])
-        if metadata.get("status") != "pending_source_validation" or metadata.get("write_op_id") != op_id:
+        if (
+            metadata.get("status") != "pending_source_validation"
+            or metadata.get("write_op_id") != op_id
+        ):
             return False
         step = "source_published_graph_pending" if needs_repair else "source_published"
-        receipt = await db.execute("""
+        receipt = await db.execute(
+            """
             UPDATE memory_write_ops SET status='completed', step=?, updated_at=?
             WHERE id=? AND memory_id=? AND op_type='add'
-        """, (step, time.time(), op_id, doc_id))
+        """,
+            (step, time.time(), op_id, doc_id),
+        )
         if receipt.rowcount != 1:
             return False
-        metadata.update(status="active", source_publication_verified_v1={
-            "write_op_id": op_id, "memory_id": doc_id,
-        })
+        metadata.update(
+            status="active",
+            source_publication_verified_v1={
+                "write_op_id": op_id,
+                "memory_id": doc_id,
+            },
+        )
         await db.execute(
             "UPDATE documents SET metadata=? WHERE id=?",
             (json.dumps(metadata, ensure_ascii=False), doc_id),
@@ -980,9 +1002,18 @@ class MemoryEngineCrudMixin:
         return marked
 
     async def merge_guarded_summary_memory(
-        self, memory_id: int, *, session_id: str | None, persona_id: str | None,
-        content: str, importance: float, metadata: dict, atoms: list,
-        source_messages: list[dict] | None, source_validator, source_publish_lease,
+        self,
+        memory_id: int,
+        *,
+        session_id: str | None,
+        persona_id: str | None,
+        content: str,
+        importance: float,
+        metadata: dict,
+        atoms: list,
+        source_messages: list[dict] | None,
+        source_validator,
+        source_publish_lease,
     ) -> int | None:
         """Stage merged content, then publish it with the source and target fenced."""
         if not callable(source_publish_lease):
@@ -991,28 +1022,45 @@ class MemoryEngineCrudMixin:
         if old is None:
             return None
         previous = safe_json_dict(old["metadata"])
-        if (previous.get("status", "active") != "active" or previous.get("superseded_by")
-                or previous.get("session_id") != session_id
-                or previous.get("persona_id") != persona_id
-                or previous.get("source_session_id") != metadata.get("source_session_id")
-                or previous.get("memory_visibility") != metadata.get("memory_visibility")):
+        if (
+            previous.get("status", "active") != "active"
+            or previous.get("superseded_by")
+            or previous.get("session_id") != session_id
+            or previous.get("persona_id") != persona_id
+            or previous.get("source_session_id") != metadata.get("source_session_id")
+            or previous.get("memory_visibility") != metadata.get("memory_visibility")
+        ):
             return None
         revision = memory_revision(old)
         previous_sources = await self.get_memory_source(memory_id)
-        merged = {**previous, "dedup_merge_count": int(previous.get("dedup_merge_count") or 0) + 1,
-                  "dedup_last_merged_at": time.time()}
-        for key in ("topics", "key_facts", "participants", "participant_identities",
-                    "source_row_refs_v1", "narrative_provenance"):
+        merged = {
+            **previous,
+            "dedup_merge_count": int(previous.get("dedup_merge_count") or 0) + 1,
+            "dedup_last_merged_at": time.time(),
+        }
+        for key in (
+            "topics",
+            "key_facts",
+            "participants",
+            "participant_identities",
+            "source_row_refs_v1",
+            "narrative_provenance",
+        ):
             if metadata.get(key):
-                merged[key] = self._merge_unique_values(previous.get(key), metadata[key])
+                merged[key] = self._merge_unique_values(
+                    previous.get(key), metadata[key]
+                )
         if isinstance(metadata.get("source_window"), dict):
             merged["source_windows"] = [
-                *(previous.get("source_windows") or []), metadata["source_window"],
+                *(previous.get("source_windows") or []),
+                metadata["source_window"],
             ][-20:]
         merged_content = self._merge_memory_text(str(old["text"] or ""), content)
         merged["canonical_summary"] = merged_content
         merged["previous_id"] = memory_id
-        merged["guarded_merge_snapshot_v1"] = (metadata.get("source_window") or {}).get("snapshot_fingerprint")
+        merged["guarded_merge_snapshot_v1"] = (metadata.get("source_window") or {}).get(
+            "snapshot_fingerprint"
+        )
         merged["updated_at"] = time.time()
         merged_importance = max(
             clamp_float(previous.get("importance"), default=0.5),
@@ -1022,17 +1070,23 @@ class MemoryEngineCrudMixin:
         merged_sources = previous_sources
         if source_messages and dedup_config.get("merge_sources", True):
             maximum = max(1, int(dedup_config.get("max_source_messages", 50) or 50))
-            merged_sources = self._merge_unique_values(previous_sources, source_messages)[-maximum:]
+            merged_sources = self._merge_unique_values(
+                previous_sources, source_messages
+            )[-maximum:]
         if merged_sources:
             merged["source_message_count"] = len(merged_sources)
-        merged_atoms = classify_atoms(
-            key_facts=merged.get("key_facts") or [],
-            topics=merged.get("topics") or [],
-            participants=merged.get("participants") or [],
-            parent_importance=merged_importance,
-            session_id=session_id,
-            persona_id=persona_id,
-        ) if self.atom_enabled else []
+        merged_atoms = (
+            classify_atoms(
+                key_facts=merged.get("key_facts") or [],
+                topics=merged.get("topics") or [],
+                participants=merged.get("participants") or [],
+                parent_importance=merged_importance,
+                session_id=session_id,
+                persona_id=persona_id,
+            )
+            if self.atom_enabled
+            else []
+        )
         if self.atom_enabled and atoms:
             seen = {atom.content for atom in merged_atoms}
             merged_atoms.extend(atom for atom in atoms if atom.content not in seen)
@@ -1048,18 +1102,29 @@ class MemoryEngineCrudMixin:
                     docs = {row["id"]: dict(row) for row in await cursor.fetchall()}
                 latest = docs.get(memory_id)
                 candidate = docs.get(candidate_id)
-                if latest is None or candidate is None or memory_revision(latest) != revision:
+                if (
+                    latest is None
+                    or candidate is None
+                    or memory_revision(latest) != revision
+                ):
                     return False
                 async with db.execute(
-                    "SELECT source_json FROM memory_sources WHERE memory_id=?", (memory_id,),
+                    "SELECT source_json FROM memory_sources WHERE memory_id=?",
+                    (memory_id,),
                 ) as cursor:
                     row = await cursor.fetchone()
                 if (json.loads(row[0]) if row else []) != previous_sources:
                     return False
                 inactive = safe_json_dict(latest["metadata"])
-                if not await self._publish_verified_summary(db, candidate_id, op_id, needs_repair):
+                if not await self._publish_verified_summary(
+                    db, candidate_id, op_id, needs_repair
+                ):
                     return False
-                inactive.update(status="archived", superseded_by=candidate_id, superseded_at=time.time())
+                inactive.update(
+                    status="archived",
+                    superseded_by=candidate_id,
+                    superseded_at=time.time(),
+                )
                 await db.execute(
                     "UPDATE documents SET metadata=? WHERE id=?",
                     (json.dumps(inactive, ensure_ascii=False), memory_id),
@@ -1071,14 +1136,22 @@ class MemoryEngineCrudMixin:
         # durable staging workflow to its outcome before delivering cancellation.
         from .memory_engine_batch import _await_task_to_completion
 
-        task = self._create_tracked_task(self.add_memory(
-            content=merged_content, session_id=session_id, persona_id=persona_id,
-            importance=merged_importance, metadata=merged, atoms=merged_atoms,
-            source_messages=merged_sources or None, preserve_create_time=True,
-            source_validator=source_validator, source_publish_lease=source_publish_lease,
-            source_session_id=previous["source_session_id"],
-            _publish_candidate=publish,
-        ))
+        task = self._create_tracked_task(
+            self.add_memory(
+                content=merged_content,
+                session_id=session_id,
+                persona_id=persona_id,
+                importance=merged_importance,
+                metadata=merged,
+                atoms=merged_atoms,
+                source_messages=merged_sources or None,
+                preserve_create_time=True,
+                source_validator=source_validator,
+                source_publish_lease=source_publish_lease,
+                source_session_id=previous["source_session_id"],
+                _publish_candidate=publish,
+            )
+        )
         cancelled, error = await _await_task_to_completion(task)
         if cancelled:
             cancellation = asyncio.CancelledError()
@@ -1095,20 +1168,32 @@ class MemoryEngineCrudMixin:
             raise error
         return task.result()
 
-    async def rollback_guarded_summary_merge(self, memory_id: int, fingerprint: str) -> bool:
+    async def rollback_guarded_summary_merge(
+        self, memory_id: int, fingerprint: str
+    ) -> bool:
         """Withdraw a just-published replacement and restore its fenced predecessor."""
         async with self.source_state_guard.hold(), self._write_transaction() as db:
-            async with db.execute("SELECT metadata FROM documents WHERE id=?", (memory_id,)) as cursor:
+            async with db.execute(
+                "SELECT metadata FROM documents WHERE id=?", (memory_id,)
+            ) as cursor:
                 row = await cursor.fetchone()
             merged = safe_json_dict(row[0]) if row else {}
             predecessor_id = merged.get("previous_id")
-            if (merged.get("guarded_merge_snapshot_v1") != fingerprint
-                    or merged.get("status") != "active" or type(predecessor_id) is not int):
+            if (
+                merged.get("guarded_merge_snapshot_v1") != fingerprint
+                or merged.get("status") != "active"
+                or type(predecessor_id) is not int
+            ):
                 return False
-            async with db.execute("SELECT metadata FROM documents WHERE id=?", (predecessor_id,)) as cursor:
+            async with db.execute(
+                "SELECT metadata FROM documents WHERE id=?", (predecessor_id,)
+            ) as cursor:
                 row = await cursor.fetchone()
             previous = safe_json_dict(row[0]) if row else {}
-            if previous.get("status") != "archived" or previous.get("superseded_by") != memory_id:
+            if (
+                previous.get("status") != "archived"
+                or previous.get("superseded_by") != memory_id
+            ):
                 return False
             previous["status"] = "active"
             previous.pop("superseded_by", None)
@@ -1116,8 +1201,10 @@ class MemoryEngineCrudMixin:
             merged["status"] = "pending_source_validation"
             await db.executemany(
                 "UPDATE documents SET metadata=? WHERE id=?",
-                [(json.dumps(previous, ensure_ascii=False), predecessor_id),
-                 (json.dumps(merged, ensure_ascii=False), memory_id)],
+                [
+                    (json.dumps(previous, ensure_ascii=False), predecessor_id),
+                    (json.dumps(merged, ensure_ascii=False), memory_id),
+                ],
             )
         self._invalidate_search_cache()
         await self.delete_memory(memory_id)

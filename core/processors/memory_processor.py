@@ -11,7 +11,6 @@ import uuid
 
 import asyncio
 import json
-import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -168,14 +167,19 @@ class MemoryProcessor:
                 return self._llm_provider
             return None
 
-        background_provider_id = str(self.config.get("background_llm_provider_id", "") or "").strip()
+        background_provider_id = str(
+            self.config.get("background_llm_provider_id", "") or ""
+        ).strip()
         if background_provider_id:
             try:
                 provider = self.context.get_provider_by_id(background_provider_id)
             except Exception:
                 provider = None
-            if (provider and getattr(provider, "is_systemone_provider", False) is not True and
-                    callable(getattr(provider, "text_chat", None))):
+            if (
+                provider
+                and getattr(provider, "is_systemone_provider", False) is not True
+                and callable(getattr(provider, "text_chat", None))
+            ):
                 return provider
             # An explicit background selection is authoritative. Never fall
             # back to the foreground/default provider when that ID is stale.
@@ -420,7 +424,10 @@ class MemoryProcessor:
         )
 
     async def _call_llm_with_retry(
-        self, prompt: str, system_prompt: str, max_retries: int = 1,
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_retries: int = 1,
         purpose: str = "memory_summary",
     ) -> str:
         """
@@ -434,8 +441,8 @@ class MemoryProcessor:
         Returns:
             LLM 响应文本
         """
-        attempt_timeout=self._effective_llm_budget('llm_attempt_timeout_seconds')
-        total_timeout=self._effective_llm_budget('llm_total_timeout_seconds')
+        attempt_timeout = self._effective_llm_budget("llm_attempt_timeout_seconds")
+        total_timeout = self._effective_llm_budget("llm_total_timeout_seconds")
         total_deadline = asyncio.timeout(total_timeout)
         async with total_deadline:
             # Provider SDK retries and plugin retries multiply one another.
@@ -453,67 +460,119 @@ class MemoryProcessor:
                         raise RuntimeError("LLM Provider 不可用")
                     provider_config = getattr(provider, "provider_config", None)
                     try:
-                        raw_id = (provider_config.get("id") if isinstance(provider_config, dict)
-                                  else getattr(provider_config, "id", None))
+                        raw_id = (
+                            provider_config.get("id")
+                            if isinstance(provider_config, dict)
+                            else getattr(provider_config, "id", None)
+                        )
                         provider_id = str(raw_id)[:128] if raw_id else "unknown"
                     except Exception:
                         provider_id = "unknown"
-                    request_kwargs={'prompt':prompt,'system_prompt':system_prompt}
+                    request_kwargs = {"prompt": prompt, "system_prompt": system_prompt}
                     try:
-                        parameters=inspect.signature(provider.text_chat).parameters
-                    except (ValueError,TypeError):
-                        parameters={}
-                    if 'request_max_retries' in parameters or any(p.kind==inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
-                        request_kwargs['request_max_retries']=1
+                        parameters = inspect.signature(provider.text_chat).parameters
+                    except (ValueError, TypeError):
+                        parameters = {}
+                    if "request_max_retries" in parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in parameters.values()
+                    ):
+                        request_kwargs["request_max_retries"] = 1
                     async with asyncio.timeout(attempt_timeout):
-                        stream_mode = getattr(self, "config", {}).get("llm_stream_mode", "auto")
+                        stream_mode = getattr(self, "config", {}).get(
+                            "llm_stream_mode", "auto"
+                        )
                         if not hasattr(self, "_stream_only_providers"):
                             self._stream_only_providers = set()
                         if stream_mode not in {"always", "never", "auto"}:
                             stream_mode = "auto"
-                        provider_key = provider_id if provider_id != "unknown" else str(id(provider))
-                        use_stream = stream_mode == "always" or (stream_mode == "auto" and provider_key in self._stream_only_providers)
+                        provider_key = (
+                            provider_id
+                            if provider_id != "unknown"
+                            else str(id(provider))
+                        )
+                        use_stream = stream_mode == "always" or (
+                            stream_mode == "auto"
+                            and provider_key in self._stream_only_providers
+                        )
                         response = None
                         if not use_stream:
                             try:
                                 response = await provider.text_chat(**request_kwargs)
                             except Exception as exc:
-                                from ..utils.api_failure import terminal_provider_failure
+                                from ..utils.api_failure import (
+                                    terminal_provider_failure,
+                                )
+
                                 message = str(exc).lower()
-                                if terminal_provider_failure(exc) or stream_mode != "auto" or ("non-stream" not in message and "non_stream" not in message):
+                                if (
+                                    terminal_provider_failure(exc)
+                                    or stream_mode != "auto"
+                                    or (
+                                        "non-stream" not in message
+                                        and "non_stream" not in message
+                                    )
+                                ):
                                     raise
                                 self._stream_only_providers.add(provider_key)
                                 use_stream = True
                         if use_stream:
-                            async for chunk in provider.text_chat_stream(prompt=prompt, system_prompt=system_prompt):
-                                if not getattr(chunk, "is_chunk", True) and chunk.completion_text:
+                            async for chunk in provider.text_chat_stream(
+                                prompt=prompt, system_prompt=system_prompt
+                            ):
+                                if (
+                                    not getattr(chunk, "is_chunk", True)
+                                    and chunk.completion_text
+                                ):
                                     response = chunk
                             if response is None:
-                                raise RuntimeError("流式调用未返回完整响应，已按失败处理")
+                                raise RuntimeError(
+                                    "流式调用未返回完整响应，已按失败处理"
+                                )
                     logger.info(
                         "[MemoryProcessor] background_call call_id=%s purpose=%s "
                         "provider_id=%s effort=provider_configured deadline_s=%.1f attempt=1 "
                         "elapsed_s=%.2f outcome=success",
-                        call_id, purpose, provider_id, attempt_timeout, time.monotonic() - started,
+                        call_id,
+                        purpose,
+                        provider_id,
+                        attempt_timeout,
+                        time.monotonic() - started,
                     )
-                    record_llm_usage(getattr(response, "usage", None), prompt_text=prompt, completion_text=response.completion_text or "")
+                    record_llm_usage(
+                        getattr(response, "usage", None),
+                        prompt_text=prompt,
+                        completion_text=response.completion_text or "",
+                    )
                     return response.completion_text
                 except asyncio.CancelledError:
-                    outcome = "total_timeout" if total_deadline.expired() else "cancelled"
+                    outcome = (
+                        "total_timeout" if total_deadline.expired() else "cancelled"
+                    )
                     logger.info(
                         "[MemoryProcessor] background_call call_id=%s purpose=%s "
                         "provider_id=%s effort=provider_configured deadline_s=%.1f attempt=1 "
                         "elapsed_s=%.2f outcome=%s",
-                        call_id, purpose, provider_id, attempt_timeout, time.monotonic() - started, outcome,
+                        call_id,
+                        purpose,
+                        provider_id,
+                        attempt_timeout,
+                        time.monotonic() - started,
+                        outcome,
                     )
                     raise
                 except Exception as e:
                     from ..utils.api_failure import terminal_provider_failure
+
                     if terminal_provider_failure(e):
                         outcome = "policy_refusal"
                     elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
-                        outcome = "total_timeout" if total_deadline.expired() else "timeout"
-                    elif isinstance(e, RuntimeError) and str(e) == "LLM Provider 不可用":
+                        outcome = (
+                            "total_timeout" if total_deadline.expired() else "timeout"
+                        )
+                    elif (
+                        isinstance(e, RuntimeError) and str(e) == "LLM Provider 不可用"
+                    ):
                         outcome = "provider_unavailable"
                     else:
                         outcome = "transport_failure"
@@ -521,7 +580,12 @@ class MemoryProcessor:
                         "[MemoryProcessor] background_call call_id=%s purpose=%s "
                         "provider_id=%s effort=provider_configured deadline_s=%.1f attempt=1 "
                         "elapsed_s=%.2f outcome=%s",
-                        call_id, purpose, provider_id, attempt_timeout, time.monotonic() - started, outcome,
+                        call_id,
+                        purpose,
+                        provider_id,
+                        attempt_timeout,
+                        time.monotonic() - started,
+                        outcome,
                     )
                     raise
 
@@ -808,7 +872,9 @@ class MemoryProcessor:
             '"topics": ["主题1"], "importance": 0.5}'
         )
 
-        text = await self._call_llm_with_retry(prompt, system_prompt, purpose="memory_merge")
+        text = await self._call_llm_with_retry(
+            prompt, system_prompt, purpose="memory_merge"
+        )
         data = self._parse_merge_response(text)
 
         summary = str(data.get("summary", "")).strip()
@@ -851,35 +917,65 @@ class MemoryProcessor:
 
     async def log_background_provider_binding(self) -> None:
         """Log safe IDs for the configured and currently resolved background provider."""
-        configured_id = str(self.config.get("background_llm_provider_id", "") or "").strip()
+        configured_id = str(
+            self.config.get("background_llm_provider_id", "") or ""
+        ).strip()
         provider = await self._get_current_llm_provider()
-        provider_config = getattr(provider, "provider_config", None) if provider else None
+        provider_config = (
+            getattr(provider, "provider_config", None) if provider else None
+        )
         try:
-            raw_id = (provider_config.get("id") if isinstance(provider_config, dict)
-                      else getattr(provider_config, "id", None))
+            raw_id = (
+                provider_config.get("id")
+                if isinstance(provider_config, dict)
+                else getattr(provider_config, "id", None)
+            )
             selected_id = str(raw_id)[:128] if raw_id else "unknown"
         except Exception:
             selected_id = "unknown"
         effort = "unknown"
-        nested_thinking = (provider_config.get("gm_thinking_config")
-                           if isinstance(provider_config, dict)
-                           else getattr(provider_config, "gm_thinking_config", None))
+        nested_thinking = (
+            provider_config.get("gm_thinking_config")
+            if isinstance(provider_config, dict)
+            else getattr(provider_config, "gm_thinking_config", None)
+        )
         raw_efforts = [
-            (provider_config.get(key) if isinstance(provider_config, dict)
-             else getattr(provider_config, key, None))
+            (
+                provider_config.get(key)
+                if isinstance(provider_config, dict)
+                else getattr(provider_config, key, None)
+            )
             for key in ("reasoning_effort", "thinking_level", "effort")
         ]
         raw_efforts.append(
-            nested_thinking.get("level") if isinstance(nested_thinking, dict)
+            nested_thinking.get("level")
+            if isinstance(nested_thinking, dict)
             else getattr(nested_thinking, "level", None)
         )
         for raw_effort in raw_efforts:
-            normalized_effort = raw_effort.lower() if isinstance(raw_effort, str) else ""
-            if normalized_effort in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+            normalized_effort = (
+                raw_effort.lower() if isinstance(raw_effort, str) else ""
+            )
+            if normalized_effort in {
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            }:
                 effort = normalized_effort
                 break
-        configured_id = configured_id if re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", configured_id) else "unknown"
-        selected_id = selected_id if re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", selected_id) else "unknown"
+        configured_id = (
+            configured_id
+            if re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", configured_id)
+            else "unknown"
+        )
+        selected_id = (
+            selected_id
+            if re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", selected_id)
+            else "unknown"
+        )
         logger.info(
             "[MemoryProcessor] background_provider_binding configured_id=%s "
             "selected_id=%s effort=%s attempt_timeout_s=%.1f total_timeout_s=%.1f",

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from ..managers.conversation_manager import ConversationManager
 
 
-
 @dataclass(frozen=True)
 class OriginalInputMessage:
     """One immutable original message from the trusted CD handoff."""
@@ -69,9 +68,19 @@ def discard_unexpected_awaitable(value) -> None:
                 pass
 
 
-ORIGINAL_PART_KINDS = frozenset({
-    "text", "quote", "mention", "image", "audio", "video", "file", "think", "other",
-})
+ORIGINAL_PART_KINDS = frozenset(
+    {
+        "text",
+        "quote",
+        "mention",
+        "image",
+        "audio",
+        "video",
+        "file",
+        "think",
+        "other",
+    }
+)
 
 
 MAX_ORIGINAL_MESSAGES = 32
@@ -124,8 +133,11 @@ def validate_owned_original_input(
 ) -> OriginalInput | None:
     """Validate the CD-owned v1 source sidecar; never inspect request.prompt."""
     schema_version = dto.get("schema_version") if isinstance(dto, Mapping) else None
-    if (isinstance(schema_version, bool) or not isinstance(schema_version, int) or
-            schema_version != 1):
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+    ):
         return None
     source_scope = dto.get("scope")
     if not isinstance(source_scope, Mapping) or not isinstance(expected_scope, Mapping):
@@ -135,21 +147,34 @@ def validate_owned_original_input(
     for key in scope_keys:
         value = source_scope.get(key)
         expected = expected_scope.get(key)
-        if (not isinstance(value, str) or not value.strip() or
-                not isinstance(expected, str) or not expected.strip() or
-                value != expected):
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or not isinstance(expected, str)
+            or not expected.strip()
+            or value != expected
+        ):
             return None
         canonical_scope[key] = value
-    if (not isinstance(trigger_author_id, str) or not trigger_author_id.strip() or
-            not isinstance(self_id, str) or not self_id.strip() or
-            trigger_author_id == self_id):
+    if (
+        not isinstance(trigger_author_id, str)
+        or not trigger_author_id.strip()
+        or not isinstance(self_id, str)
+        or not self_id.strip()
+        or trigger_author_id == self_id
+    ):
         return None
 
     current_key = dto.get("current_event_key")
     raw_messages = dto.get("messages")
-    if (not isinstance(current_key, str) or not current_key.strip() or len(current_key) > 512 or
-            not isinstance(raw_messages, tuple) or not raw_messages or
-            len(raw_messages) > MAX_ORIGINAL_MESSAGES):
+    if (
+        not isinstance(current_key, str)
+        or not current_key.strip()
+        or len(current_key) > 512
+        or not isinstance(raw_messages, tuple)
+        or not raw_messages
+        or len(raw_messages) > MAX_ORIGINAL_MESSAGES
+    ):
         return None
 
     messages: list[OriginalInputMessage] = []
@@ -164,12 +189,27 @@ def validate_owned_original_input(
         platform_id = raw.get("platform_message_id")
         occurred = raw.get("occurred_at")
         raw_parts = raw.get("parts")
-        if (not isinstance(event_key, str) or not event_key.strip() or len(event_key) > 512 or
-                event_key in event_keys or not isinstance(author_id, str) or not author_id.strip() or
-                (platform_id is not None and (not isinstance(platform_id, str) or not platform_id.strip())) or
-                (occurred is not None and (isinstance(occurred, bool) or
-                 not isinstance(occurred, (int, float)) or not math.isfinite(float(occurred)))) or
-                not isinstance(raw_parts, tuple)):
+        if (
+            not isinstance(event_key, str)
+            or not event_key.strip()
+            or len(event_key) > 512
+            or event_key in event_keys
+            or not isinstance(author_id, str)
+            or not author_id.strip()
+            or (
+                platform_id is not None
+                and (not isinstance(platform_id, str) or not platform_id.strip())
+            )
+            or (
+                occurred is not None
+                and (
+                    isinstance(occurred, bool)
+                    or not isinstance(occurred, (int, float))
+                    or not math.isfinite(float(occurred))
+                )
+            )
+            or not isinstance(raw_parts, tuple)
+        ):
             return None
         event_keys.add(event_key)
         parts: list[dict] = []
@@ -196,7 +236,10 @@ def validate_owned_original_input(
                 if kind == "text" and isinstance(part_text, str):
                     message_text += len(part_text)
                     total_text += len(part_text)
-                    if message_text > MAX_ORIGINAL_TEXT_PER_MESSAGE or total_text > MAX_ORIGINAL_TEXT_TOTAL:
+                    if (
+                        message_text > MAX_ORIGINAL_TEXT_PER_MESSAGE
+                        or total_text > MAX_ORIGINAL_TEXT_TOTAL
+                    ):
                         return None
                 if kind == "text":
                     if not isinstance(part_text, str):
@@ -207,22 +250,37 @@ def validate_owned_original_input(
         except (TypeError, ValueError):
             return None
         timestamp = float(occurred) if occurred is not None else None
-        messages.append(OriginalInputMessage(
-            event_key=event_key, platform_message_id=platform_id,
-            author_id=author_id, occurred_at=timestamp,
-            parts=tuple(parts), plain_text="".join(plain_text),
-        ))
+        messages.append(
+            OriginalInputMessage(
+                event_key=event_key,
+                platform_message_id=platform_id,
+                author_id=author_id,
+                occurred_at=timestamp,
+                parts=tuple(parts),
+                plain_text="".join(plain_text),
+            )
+        )
 
-    current_messages = [message for message in messages if message.event_key == current_key]
-    if (len(current_messages) != 1 or current_messages[0].author_id != trigger_author_id or
-            current_messages[0].author_id == self_id):
+    current_messages = [
+        message for message in messages if message.event_key == current_key
+    ]
+    if (
+        len(current_messages) != 1
+        or current_messages[0].author_id != trigger_author_id
+        or current_messages[0].author_id == self_id
+    ):
         return None
-    if (platform_message_id and current_messages[0].platform_message_id and
-            current_messages[0].platform_message_id != platform_message_id):
+    if (
+        platform_message_id
+        and current_messages[0].platform_message_id
+        and current_messages[0].platform_message_id != platform_message_id
+    ):
         return None
 
-    ordered = [current_messages[0], *(message for message in messages
-                                      if message.event_key != current_key)]
+    ordered = [
+        current_messages[0],
+        *(message for message in messages if message.event_key != current_key),
+    ]
     query_parts: list[str] = []
     remaining = MAX_RECALL_QUERY_CHARS
     truncated = False
@@ -247,8 +305,11 @@ def validate_owned_original_input(
             truncated = True
             break
     return OriginalInput(
-        status="valid", scope=canonical_scope, current_event_key=current_key,
-        messages=tuple(messages), query_text=" ".join(part for part in query_parts if part),
+        status="valid",
+        scope=canonical_scope,
+        current_event_key=current_key,
+        messages=tuple(messages),
+        query_text=" ".join(part for part in query_parts if part),
         query_truncated=truncated,
     )
 
@@ -480,11 +541,9 @@ class MessageUtils:
                 f"实际删除={safe_to_delete}"
             )
 
-            actually_deleted = (
-                await self.conversation_manager.trim_session_messages(
-                    session_id,
-                    safe_to_delete,
-                )
+            actually_deleted = await self.conversation_manager.trim_session_messages(
+                session_id,
+                safe_to_delete,
             )
 
             new_actual_count = max(0, actual_count - actually_deleted)
@@ -506,12 +565,13 @@ class MessageUtils:
         except Exception as e:
             logger.error(f"[{session_id}] 删除旧消息失败: {e}", exc_info=True)
 
-
     async def resolve_original_input(self, event: AstrMessageEvent) -> OriginalInput:
         """Read only authentic source text; a CD-owned clone never falls back to prompt text."""
         owned = getattr(event, "_cd_owned_original_input_v1", None)
-        if (getattr(event, "_chat_dynamics_owned_request", None) is True
-                and owned is not True):
+        if (
+            getattr(event, "_chat_dynamics_owned_request", None) is True
+            and owned is not True
+        ):
             return OriginalInput("unavailable", None, None, (), "")
         if owned is not None and owned is not False and owned is not True:
             return OriginalInput("unavailable", None, None, (), "")
@@ -530,21 +590,35 @@ class MessageUtils:
                     return OriginalInput("unavailable", None, None, (), "")
                 umo = umo.strip()
                 platform_name_getter = getattr(event, "get_platform_name", None)
-                platform = (platform_name_getter() if callable(platform_name_getter) else None)
-                platform = platform.strip().lower()[:64] if isinstance(platform, str) else ""
+                platform = (
+                    platform_name_getter() if callable(platform_name_getter) else None
+                )
+                platform = (
+                    platform.strip().lower()[:64] if isinstance(platform, str) else ""
+                )
                 self_id_getter = getattr(event, "get_self_id", None)
                 sender_getter = getattr(event, "get_sender_id", None)
                 self_id = self_id_getter() if callable(self_id_getter) else None
                 author_id = sender_getter() if callable(sender_getter) else None
                 self_id = self_id.strip() if isinstance(self_id, str) else self_id
-                author_id = author_id.strip() if isinstance(author_id, str) else author_id
+                author_id = (
+                    author_id.strip() if isinstance(author_id, str) else author_id
+                )
                 message_obj = getattr(event, "message_obj", None)
                 raw_platform_id = getattr(message_obj, "message_id", None)
-                platform_id = (str(raw_platform_id).strip() if raw_platform_id is not None
-                               and not isinstance(raw_platform_id, bool) else None)
+                platform_id = (
+                    str(raw_platform_id).strip()
+                    if raw_platform_id is not None
+                    and not isinstance(raw_platform_id, bool)
+                    else None
+                )
                 validated = validate_owned_original_input(
                     dto,
-                    expected_scope={"umo": umo, "platform": platform, "self_id": self_id},
+                    expected_scope={
+                        "umo": umo,
+                        "platform": platform,
+                        "self_id": self_id,
+                    },
                     trigger_author_id=author_id,
                     platform_message_id=platform_id,
                     self_id=self_id,
@@ -562,15 +636,26 @@ class MessageUtils:
         if callable(get_messages):
             try:
                 from astrbot.core.message.components import Plain
+
                 components = get_messages()
                 if asyncio.iscoroutine(components) or hasattr(components, "__await__"):
                     components = await components
-                pieces = [part.text.strip() for part in components
-                          if isinstance(part, Plain) and isinstance(getattr(part, "text", None), str)
-                          and part.text.strip()]
+                pieces = [
+                    part.text.strip()
+                    for part in components
+                    if isinstance(part, Plain)
+                    and isinstance(getattr(part, "text", None), str)
+                    and part.text.strip()
+                ]
                 query = " ".join(pieces)[:MAX_RECALL_QUERY_CHARS]
-                return OriginalInput("not_owned", None, None, (), query,
-                                     query_truncated=sum(map(len, pieces)) > MAX_RECALL_QUERY_CHARS)
+                return OriginalInput(
+                    "not_owned",
+                    None,
+                    None,
+                    (),
+                    query,
+                    query_truncated=sum(map(len, pieces)) > MAX_RECALL_QUERY_CHARS,
+                )
             except Exception:
                 return OriginalInput("not_owned", None, None, (), "")
         try:
@@ -579,5 +664,11 @@ class MessageUtils:
             raise
         except Exception:
             query = ""
-        return OriginalInput("not_owned", None, None, (), query[:MAX_RECALL_QUERY_CHARS],
-                             query_truncated=len(query) > MAX_RECALL_QUERY_CHARS)
+        return OriginalInput(
+            "not_owned",
+            None,
+            None,
+            (),
+            query[:MAX_RECALL_QUERY_CHARS],
+            query_truncated=len(query) > MAX_RECALL_QUERY_CHARS,
+        )

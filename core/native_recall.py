@@ -35,8 +35,8 @@ def quote_frames(bundle: Any) -> list[dict[str, Any]]:
         event_proofs = source_view.get("native_events", [])
         material_rows = {
             str(row.get("material_id")): row
-            for row in materials if isinstance(row, dict)
-            and isinstance(row.get("material_id"), str)
+            for row in materials
+            if isinstance(row, dict) and isinstance(row.get("material_id"), str)
         }
         material_ids = set(material_rows)
         scope = source_view.get("scope")
@@ -44,7 +44,10 @@ def quote_frames(bundle: Any) -> list[dict[str, Any]]:
         for atom in view.get("atoms", []):
             if not isinstance(atom, dict):
                 continue
-            if atom.get("kind") != "utterance_fact" or atom.get("status") != "verified_utterance":
+            if (
+                atom.get("kind") != "utterance_fact"
+                or atom.get("status") != "verified_utterance"
+            ):
                 continue
             claim = atom.get("claim")
             if not isinstance(claim, str) or not claim.strip() or len(claim) > 500:
@@ -64,8 +67,10 @@ def quote_frames(bundle: Any) -> list[dict[str, Any]]:
                     and bool(ref.get("author_id"))
                     and isinstance(ref.get("exact_span"), list)
                     and len(ref["exact_span"]) == 2
-                    and all(isinstance(value, int) and not isinstance(value, bool)
-                            for value in ref["exact_span"])
+                    and all(
+                        isinstance(value, int) and not isinstance(value, bool)
+                        for value in ref["exact_span"]
+                    )
                     and ref["exact_span"][0] == 0
                     and ref["exact_span"][1] == len(claim)
                 ) or (
@@ -100,50 +105,79 @@ def quote_frames(bundle: Any) -> list[dict[str, Any]]:
             source_uids = [str(ref["author_id"]) for ref in valid_refs]
             subjects = atom.get("subject_ids", [])
             if isinstance(subjects, list):
-                source_uids.extend(str(subject) for subject in subjects
-                                   if isinstance(subject, str) and subject.strip())
-            retrieval_rows = [material_rows.get(str(ref.get("material_id"))) for ref in valid_refs
-                              if isinstance(ref.get("material_id"), str)]
-            retrieval_rows = [row for row in retrieval_rows if isinstance(row, dict)
-                              and row.get("retrieval_hit") is True]
-            retrieval_rank = min((int(row["retrieval_rank"]) for row in retrieval_rows
-                                  if isinstance(row.get("retrieval_rank"), int)
-                                  and not isinstance(row.get("retrieval_rank"), bool)), default=None)
-            frames.append({
-                "atom_id": atom_id,
-                "scope_umo": scope_id,
-                "text": claim,
-                "source_uids": list(dict.fromkeys(source_uids)),
-                "author_uid": str(first_ref["author_id"]),
-                "occurred_at": occurred_at,
-                "source_kind": source_kind,
-                "source_material_ids": list(dict.fromkeys(
-                    str(ref["material_id"]) for ref in valid_refs
-                    if isinstance(ref.get("material_id"), str)
-                )),
-                "source_event_ids": list(dict.fromkeys(
-                    str(ref["source_event_id"]) for ref in valid_refs
-                    if isinstance(ref.get("source_event_id"), str)
-                )),
-                "retrieval_hit": bool(retrieval_rows),
-                "retrieval_rank": retrieval_rank,
-                "provenance_complete": True,
-            })
+                source_uids.extend(
+                    str(subject)
+                    for subject in subjects
+                    if isinstance(subject, str) and subject.strip()
+                )
+            retrieval_rows = [
+                material_rows.get(str(ref.get("material_id")))
+                for ref in valid_refs
+                if isinstance(ref.get("material_id"), str)
+            ]
+            retrieval_rows = [
+                row
+                for row in retrieval_rows
+                if isinstance(row, dict) and row.get("retrieval_hit") is True
+            ]
+            retrieval_rank = min(
+                (
+                    int(row["retrieval_rank"])
+                    for row in retrieval_rows
+                    if isinstance(row.get("retrieval_rank"), int)
+                    and not isinstance(row.get("retrieval_rank"), bool)
+                ),
+                default=None,
+            )
+            frames.append(
+                {
+                    "atom_id": atom_id,
+                    "scope_umo": scope_id,
+                    "text": claim,
+                    "source_uids": list(dict.fromkeys(source_uids)),
+                    "author_uid": str(first_ref["author_id"]),
+                    "occurred_at": occurred_at,
+                    "source_kind": source_kind,
+                    "source_material_ids": list(
+                        dict.fromkeys(
+                            str(ref["material_id"])
+                            for ref in valid_refs
+                            if isinstance(ref.get("material_id"), str)
+                        )
+                    ),
+                    "source_event_ids": list(
+                        dict.fromkeys(
+                            str(ref["source_event_id"])
+                            for ref in valid_refs
+                            if isinstance(ref.get("source_event_id"), str)
+                        )
+                    ),
+                    "retrieval_hit": bool(retrieval_rows),
+                    "retrieval_rank": retrieval_rank,
+                    "provenance_complete": True,
+                }
+            )
     return frames[:12]
 
 
-def relevant_frames(frames: list[dict[str, Any]], query: str, tokens: list[str] | None = None) -> list[dict[str, Any]]:
+def relevant_frames(
+    frames: list[dict[str, Any]], query: str, tokens: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Keep bounded retrieval matches using LivingMemory's tokenizer output."""
     text = str(query or "").strip().casefold()
     if not text:
         return []
-    terms = [str(token).strip().casefold() for token in (tokens or []) if str(token).strip()]
+    terms = [
+        str(token).strip().casefold() for token in (tokens or []) if str(token).strip()
+    ]
     if not terms:
         parts = [part for part in re.split(r"[^\w\u3400-\u9fff]+", text) if part]
         terms = []
         for part in parts:
             if re.search(r"[\u3400-\u9fff]", part):
-                terms.extend(part[index:index + 2] for index in range(max(0, len(part) - 1)))
+                terms.extend(
+                    part[index : index + 2] for index in range(max(0, len(part) - 1))
+                )
                 if len(part) == 1:
                     terms.append(part)
             else:
@@ -160,11 +194,17 @@ def relevant_frames(frames: list[dict[str, Any]], query: str, tokens: list[str] 
     if len(matched) >= 3:
         return matched
     fallback = sorted(
-        (frame for frame in frames if frame.get("retrieval_hit") is True
-         and frame not in matched),
-        key=lambda frame: (frame.get("retrieval_rank")
-                           if isinstance(frame.get("retrieval_rank"), int) else 10_000),
-    )[:3 - len(matched)]
+        (
+            frame
+            for frame in frames
+            if frame.get("retrieval_hit") is True and frame not in matched
+        ),
+        key=lambda frame: (
+            frame.get("retrieval_rank")
+            if isinstance(frame.get("retrieval_rank"), int)
+            else 10_000
+        ),
+    )[: 3 - len(matched)]
     return [*matched, *fallback]
 
 
@@ -192,7 +232,10 @@ def append_quote_surface(req: Any, frames: list[dict[str, Any]]) -> bool:
         part = marker()
     try:
         from .recall_runtime import remember_private_segment
-        remember_private_segment(req, part, source_level="verified_quote", item_count=len(frames))
+
+        remember_private_segment(
+            req, part, source_level="verified_quote", item_count=len(frames)
+        )
     except Exception:
         pass
     parts.append(part)

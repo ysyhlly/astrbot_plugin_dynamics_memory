@@ -259,9 +259,7 @@ async def _make_db_with_graph(tmp_path, doc_scopes, atom_scopes, graph_scopes):
 async def test_missing_optional_tables_are_skipped(tmp_path):
     """图记忆关闭时 memory_atoms / graph_entries 不存在，文档迁移仍应可用（M1）。"""
     conn = await aiosqlite.connect(tmp_path / "lm.db")
-    await conn.execute(
-        "CREATE TABLE documents (id INTEGER PRIMARY KEY, metadata TEXT)"
-    )
+    await conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, metadata TEXT)")
     await conn.execute(
         "INSERT INTO documents (id, metadata) VALUES (1, ?)",
         (json.dumps({"session_id": OLD_PRIVATE}),),
@@ -380,9 +378,7 @@ async def test_execute_backup_runs_outside_pending_transaction(tmp_path):
 async def test_malformed_and_non_object_metadata_are_normalized_and_migrated(tmp_path):
     """坏 JSON / 非对象根之前会被计数但静默不改，现在应归一化后真正迁移（m1/m2）。"""
     conn = await aiosqlite.connect(tmp_path / "lm.db")
-    await conn.execute(
-        "CREATE TABLE documents (id INTEGER PRIMARY KEY, metadata TEXT)"
-    )
+    await conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, metadata TEXT)")
     rows = ["{bad json", "[]", "5", "null", '"text"']
     for idx, metadata in enumerate(rows, start=1):
         await conn.execute(

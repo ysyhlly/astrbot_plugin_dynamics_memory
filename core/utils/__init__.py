@@ -83,6 +83,7 @@ __all__ = [
 
 _PERSONA_ALIASES: dict[str, str] = {}
 
+
 def set_persona_aliases(value) -> dict[str, str]:
     """安装记忆人格别名：每行 ``来源人格=载体人格``，来源人格的记忆统一以载体人格读写。"""
     aliases: dict[str, str] = {}
@@ -96,12 +97,16 @@ def set_persona_aliases(value) -> dict[str, str]:
     _PERSONA_ALIASES.update(aliases)
     return dict(aliases)
 
+
 def resolve_persona_alias(persona_id: str | None) -> str | None:
     if not persona_id:
         return persona_id
     return _PERSONA_ALIASES.get(persona_id, persona_id)
 
-async def _get_native_persona_id(context: Context, event: AstrMessageEvent) -> str | None:
+
+async def _get_native_persona_id(
+    context: Context, event: AstrMessageEvent
+) -> str | None:
     try:
         umo = event.unified_msg_origin
 
@@ -154,3 +159,19 @@ async def _get_native_persona_id(context: Context, event: AstrMessageEvent) -> s
     except Exception as e:
         logger.debug(f"获取人格ID失败: {e}")
         return None
+
+
+__all__ = [
+    "OperationContext",
+    "StopwordsManager",
+    "TextProcessor",
+    "_get_native_persona_id",
+    "extract_json_from_response",
+    "format_memories_for_injection",
+    "get_persona_id",
+    "get_stopwords_manager",
+    "resolve_persona_alias",
+    "safe_parse_metadata",
+    "set_persona_aliases",
+    "validate_timestamp",
+]

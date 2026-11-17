@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 from astrbot.api import logger
 
+
 # Match metadata.yaml; backup manifests use this plugin version.
 def _read_plugin_version() -> str:
     """Read the plugin version from metadata.yaml, the single source of truth.
@@ -399,5 +400,3 @@ __all__ = [
     "BackupManager",
     "PLUGIN_VERSION",
 ]
-
-

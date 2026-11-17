@@ -1,10 +1,13 @@
-from astrbot_plugin_dynamics_memory.core.base.constants import MEMORY_INJECTION_HEADER, MEMORY_INJECTION_FOOTER
 """Extended tests for core/utils/__init__.py to improve coverage."""
 
 import json
 import time
 from datetime import datetime, timezone
 
+from astrbot_plugin_dynamics_memory.core.base.constants import (
+    MEMORY_INJECTION_FOOTER,
+    MEMORY_INJECTION_HEADER,
+)
 from astrbot_plugin_dynamics_memory.core.utils import (
     extract_json_from_response,
     format_memories_for_injection,

@@ -18,7 +18,9 @@ from astrbot_plugin_dynamics_memory.core.models.graph_models import (
     GraphEntry,
     GraphNode,
 )
-from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import GraphExtractor
+from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
+    GraphExtractor,
+)
 from astrbot_plugin_dynamics_memory.core.processors.text_processor import TextProcessor
 from astrbot_plugin_dynamics_memory.core.retrieval.graph_keyword_retriever import (
     GraphKeywordRetriever,

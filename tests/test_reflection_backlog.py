@@ -176,8 +176,12 @@ async def test_backlog_stops_when_segment_fails(tmp_path):
             await manager.get_session_metadata(session_id, "last_summarized_index", 0)
             == 0
         )
-        pending = await manager.get_session_metadata(session_id, "pending_summary", None)
-        assert {key: pending[key] for key in ("start_index", "end_index", "retry_count")} == {"start_index": 0, "end_index": 4, "retry_count": 1}
+        pending = await manager.get_session_metadata(
+            session_id, "pending_summary", None
+        )
+        assert {
+            key: pending[key] for key in ("start_index", "end_index", "retry_count")
+        } == {"start_index": 0, "end_index": 4, "retry_count": 1}
         assert pending["failure_stage"] == "model"
         handler.memory_engine.add_memory.assert_not_awaited()
     finally:
@@ -219,8 +223,12 @@ async def test_rejected_summary_keeps_pending_retry_without_storing(tmp_path, er
 
         handler.memory_engine.add_memory.assert_not_awaited()
         assert handler.memory_processor.process_conversation.await_count == 1
-        pending = await manager.get_session_metadata(session_id, "pending_summary", None)
-        assert {key: pending[key] for key in ("start_index", "end_index", "retry_count")} == {"start_index": 0, "end_index": 4, "retry_count": 1}
+        pending = await manager.get_session_metadata(
+            session_id, "pending_summary", None
+        )
+        assert {
+            key: pending[key] for key in ("start_index", "end_index", "retry_count")
+        } == {"start_index": 0, "end_index": 4, "retry_count": 1}
         assert pending["failure_stage"] == "model"
         assert pending["error_code"] == error.error_code
         assert (

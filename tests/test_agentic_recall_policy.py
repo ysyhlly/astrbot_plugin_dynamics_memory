@@ -204,9 +204,7 @@ class TestPolicyInjection:
         handler, engine, conversation_manager = _make_handler(
             {"enable_recall_tool": True, "enable_agentic_recall_beta": True}
         )
-        engine.search_memories = AsyncMock(
-            return_value=[_recalled("记忆内容")]
-        )
+        engine.search_memories = AsyncMock(return_value=[_recalled("记忆内容")])
         event = _make_event()
         req = _make_req(["recall_long_term_memory"])
         await _run(handler, event, req)
@@ -240,9 +238,10 @@ class TestPolicyInjection:
         await _run(handler, _make_event(), req)
         assert _policy_parts(req) == []
 
-
     @pytest.mark.asyncio
-    async def test_malformed_owned_event_skips_policy_and_never_falls_back_to_plain(self):
+    async def test_malformed_owned_event_skips_policy_and_never_falls_back_to_plain(
+        self,
+    ):
         handler, engine, conversation_manager = _make_handler(
             {"enable_recall_tool": True, "enable_agentic_recall_beta": True}
         )
@@ -262,7 +261,9 @@ class TestPolicyInjection:
 
 @pytest.mark.asyncio
 async def test_policy_uses_the_actual_deep_read_cursor_schema():
-    from astrbot_plugin_dynamics_memory.core.tools.memory_read_tool import MemoryReadTool
+    from astrbot_plugin_dynamics_memory.core.tools.memory_read_tool import (
+        MemoryReadTool,
+    )
 
     handler, _, _ = _make_handler(
         {"enable_recall_tool": True, "enable_agentic_recall_beta": True}, top_k=0

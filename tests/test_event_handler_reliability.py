@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManager
 from astrbot_plugin_dynamics_memory.core.event_handler import EventHandler
-from tests.event_handler_support import _make_event, _make_req, _make_resp, _make_real_handler
+from tests.event_handler_support import (
+    _make_event,
+    _make_req,
+    _make_resp,
+    _make_real_handler,
+)
 
 
 def _make_handler() -> EventHandler:
@@ -91,7 +96,9 @@ async def test_handle_memory_recall_reraises_caller_cancellation() -> None:
 @pytest.mark.asyncio
 async def test_cancelled_recall_scope_returns_partial() -> None:
     handler = _make_handler()
-    handler.memory_engine.search_memories = AsyncMock(side_effect=asyncio.CancelledError())
+    handler.memory_engine.search_memories = AsyncMock(
+        side_effect=asyncio.CancelledError()
+    )
     req = _make_req()
 
     await handler.handle_memory_recall(_make_event(), req)
@@ -129,11 +136,16 @@ async def test_handle_memory_recall_awaits_async_component_getter() -> None:
     event.get_messages.assert_awaited_once()
     event.get_message_str.assert_not_called()
     handler.memory_engine.search_memories.assert_awaited_once()
-    assert handler.memory_engine.search_memories.await_args.kwargs["query"] == "async getter text"
+    assert (
+        handler.memory_engine.search_memories.await_args.kwargs["query"]
+        == "async getter text"
+    )
 
 
 @pytest.mark.asyncio
-async def test_handle_memory_recall_awaits_async_text_getter_for_legacy_adapter() -> None:
+async def test_handle_memory_recall_awaits_async_text_getter_for_legacy_adapter() -> (
+    None
+):
     handler = _make_handler()
     event = _make_event()
     event.get_messages = None
@@ -144,7 +156,10 @@ async def test_handle_memory_recall_awaits_async_text_getter_for_legacy_adapter(
 
     event.get_message_str.assert_awaited_once()
     handler.memory_engine.search_memories.assert_awaited_once()
-    assert handler.memory_engine.search_memories.await_args.kwargs["query"] == "legacy adapter text"
+    assert (
+        handler.memory_engine.search_memories.await_args.kwargs["query"]
+        == "legacy adapter text"
+    )
 
 
 @pytest.mark.asyncio
@@ -187,14 +202,25 @@ async def test_shutdown_cancels_storage_tasks_after_timeout(monkeypatch) -> None
     assert cancelled.is_set()
     assert not handler._storage_tasks
     assert task.done()
+
+
 @pytest.mark.asyncio
 async def test_provider_policy_refusal_is_not_retried():
-    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
-    processor=MemoryProcessor.__new__(MemoryProcessor)
-    provider=Mock(text_chat=AsyncMock(side_effect=RuntimeError('Gemini prompt blocked: PROHIBITED_CONTENT')))
-    processor._get_current_llm_provider=lambda:provider
-    with pytest.raises(RuntimeError):await processor._call_llm_with_retry('synthetic','system')
+    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
+
+    processor = MemoryProcessor.__new__(MemoryProcessor)
+    provider = Mock(
+        text_chat=AsyncMock(
+            side_effect=RuntimeError("Gemini prompt blocked: PROHIBITED_CONTENT")
+        )
+    )
+    processor._get_current_llm_provider = lambda: provider
+    with pytest.raises(RuntimeError):
+        await processor._call_llm_with_retry("synthetic", "system")
     provider.text_chat.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_existing_stored_summary_does_not_call_model_again(tmp_path):
@@ -214,9 +240,13 @@ async def test_existing_stored_summary_does_not_call_model_again(tmp_path):
         handler.memory_engine.stored_summary_window.assert_awaited_once()
         handler.memory_processor.process_conversation.assert_not_awaited()
         handler.memory_engine.add_memory.assert_not_awaited()
-        assert await manager.get_session_metadata(session_id, "last_summarized_index", 0) == 2
+        assert (
+            await manager.get_session_metadata(session_id, "last_summarized_index", 0)
+            == 2
+        )
     finally:
         await store.close()
+
 
 @pytest.mark.asyncio
 async def test_managed_receipt_does_not_replay_rejected_window(tmp_path):
@@ -229,31 +259,57 @@ async def test_managed_receipt_does_not_replay_rejected_window(tmp_path):
     handler.memory_processor.process_conversation = AsyncMock()
     session = scope_key(SCOPE)
     try:
-        assert await store.ingest_narrative_event(envelope("input", text="first original source"))
+        assert await store.ingest_narrative_event(
+            envelope("input", text="first original source")
+        )
         assert await store.ingest_narrative_event(
             envelope("delivery", "delivery.success", "second original source")
         )
-        await manager.update_session_metadata(session, "pending_summary", {
-            "failure_stage": "provider_terminal", "retry_count": 1,
-            "start_index": 0, "end_index": 2,
-        })
+        await manager.update_session_metadata(
+            session,
+            "pending_summary",
+            {
+                "failure_stage": "provider_terminal",
+                "retry_count": 1,
+                "start_index": 0,
+                "end_index": 2,
+            },
+        )
         await handler.reflect_recorded_scope(SCOPE)
         handler.memory_processor.process_conversation.assert_not_awaited()
         assert not handler._storage_tasks
         assert await manager.get_session_metadata(session, "last_summarized_index") == 0
-        _, rows, refusal = await store.get_managed_summary_window(session, 2, 2, retry_refused=True)
-        assert [row.content for row in rows] == ["first original source", "second original source"]
+        _, rows, refusal = await store.get_managed_summary_window(
+            session, 2, 2, retry_refused=True
+        )
+        assert [row.content for row in rows] == [
+            "first original source",
+            "second original source",
+        ]
         assert refusal["failure_stage"] == "provider_terminal"
     finally:
         await handler.shutdown()
         await store.close()
+
+
 @pytest.mark.asyncio
 async def test_memory_model_total_deadline_prevents_nested_retry_storm():
-    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
-    processor=MemoryProcessor.__new__(MemoryProcessor)
-    processor.config={'llm_attempt_timeout_seconds':.005,'llm_total_timeout_seconds':.02}
-    async def slow(**kwargs):await asyncio.sleep(1)
-    provider=Mock(text_chat=AsyncMock(side_effect=slow));processor._get_current_llm_provider=lambda:provider
-    with pytest.raises(TimeoutError):await processor._call_llm_with_retry('synthetic','system')
-    assert provider.text_chat.await_count==1
-    assert provider.text_chat.call_args.kwargs['request_max_retries']==1
+    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
+
+    processor = MemoryProcessor.__new__(MemoryProcessor)
+    processor.config = {
+        "llm_attempt_timeout_seconds": 0.005,
+        "llm_total_timeout_seconds": 0.02,
+    }
+
+    async def slow(**kwargs):
+        await asyncio.sleep(1)
+
+    provider = Mock(text_chat=AsyncMock(side_effect=slow))
+    processor._get_current_llm_provider = lambda: provider
+    with pytest.raises(TimeoutError):
+        await processor._call_llm_with_retry("synthetic", "system")
+    assert provider.text_chat.await_count == 1
+    assert provider.text_chat.call_args.kwargs["request_max_retries"] == 1

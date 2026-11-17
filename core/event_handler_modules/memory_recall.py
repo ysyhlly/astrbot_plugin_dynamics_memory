@@ -37,10 +37,8 @@ from astrbot.core.agent.message import TextPart
 from ..memory_scope import (
     is_event_memory_allowed,
     is_suspicious_session_id,
-    resolve_event_memory_access,
 )
 from ..utils import (
-    OperationContext,
     format_memories_for_injection,
 )
 from .memory_reflection import cancel_session_storage_task
@@ -131,7 +129,9 @@ class MemoryRecall:
                 logger.debug("[LMRecall] route=policy outcome=denied")
                 return
             session_id = str(getattr(event, "unified_msg_origin", "") or "").strip()
-            deadline = budget if isinstance(budget, RecallDeadline) else RecallDeadline.start()
+            deadline = (
+                budget if isinstance(budget, RecallDeadline) else RecallDeadline.start()
+            )
 
             # 检测异常session_id
             if is_suspicious_session_id(session_id):
@@ -153,7 +153,10 @@ class MemoryRecall:
                 return
             self._remove_agent_recall_policy_from_context(req)
             self._maybe_inject_agent_recall_policy(req, session_id)
-            if original.status == "not_owned" and event.get_message_type() != MessageType.GROUP_MESSAGE:
+            if (
+                original.status == "not_owned"
+                and event.get_message_type() != MessageType.GROUP_MESSAGE
+            ):
                 try:
                     async with asyncio.timeout(deadline.search_remaining()):
                         await self._reconcile_with_llm_context(event, session_id, req)
@@ -166,7 +169,6 @@ class MemoryRecall:
                 return
 
             async with RecallOperationContext("memory_recall"):
-
                 # 自动删除旧的注入记忆
                 if self.config_manager.get("recall_engine.auto_remove_injected", True):
                     removed = self._remove_injected_memories_from_context(
@@ -174,7 +176,9 @@ class MemoryRecall:
                     )
                     removed += self._remove_fake_tool_call_from_context(req, session_id)
                     if removed > 0:
-                        logger.debug("[LMRecall] route=context_cleanup removed=%d", removed)
+                        logger.debug(
+                            "[LMRecall] route=context_cleanup removed=%d", removed
+                        )
 
                 if not actual_query:
                     self._set_recall_outcome(req, "empty")
@@ -187,15 +191,20 @@ class MemoryRecall:
                 source_store_partial = False
                 if not is_group and actual_query and original.status == "valid":
                     try:
-                        source_store_partial = not await self._store_owned_original_messages(
-                            event, req, original, deadline
+                        source_store_partial = (
+                            not await self._store_owned_original_messages(
+                                event, req, original, deadline
+                            )
                         )
                         setattr(
-                            req, "_lm_private_original_store_status_v1",
+                            req,
+                            "_lm_private_original_store_status_v1",
                             "unavailable" if source_store_partial else "stored",
                         )
                     except asyncio.TimeoutError:
-                        setattr(req, "_lm_private_original_store_status_v1", "unavailable")
+                        setattr(
+                            req, "_lm_private_original_store_status_v1", "unavailable"
+                        )
                         self._set_recall_outcome(req, "deadline_exceeded")
                         return
                 elif not is_group and actual_query and original.status == "not_owned":
@@ -229,7 +238,9 @@ class MemoryRecall:
                 top_k = self.config_manager.get("recall_engine.top_k", 5)
                 if top_k <= 0:
                     logger.debug("[LMRecall] route=search outcome=disabled")
-                    self._set_recall_outcome(req, "partial" if source_store_partial else "empty")
+                    self._set_recall_outcome(
+                        req, "partial" if source_store_partial else "empty"
+                    )
                     return
 
                 # on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
@@ -264,15 +275,23 @@ class MemoryRecall:
                     persona_id=persona_id,
                     verified_group_sessions=verified_groups,
                 )
-                recall_persona_id = persona_id if self.config_manager.get("filtering_settings.use_persona_filtering", True) else None
+                recall_persona_id = (
+                    persona_id
+                    if self.config_manager.get(
+                        "filtering_settings.use_persona_filtering", True
+                    )
+                    else None
+                )
 
                 # Use the trusted original query, current event first. Do not
                 # concatenate stored assistant turns or rewritten request text.
                 query_for_search = actual_query
 
                 # 执行记忆召回
-                logger.info("[LMRecall] route=search outcome=start query_chars=%d",
-                            len(query_for_search))
+                logger.info(
+                    "[LMRecall] route=search outcome=start query_chars=%d",
+                    len(query_for_search),
+                )
 
                 recall_k = self.config_manager.get("recall_engine.top_k", 5)
                 recalled_by_id = {}
@@ -282,8 +301,11 @@ class MemoryRecall:
                 # The source guard needs the authenticated persona even when
                 # the retriever is configured to skip persona filtering.
                 search_context = self._make_search_context(
-                    session_id=session_id, query=query_for_search,
-                    persona_id=persona_id, budget=deadline, req=req,
+                    session_id=session_id,
+                    query=query_for_search,
+                    persona_id=persona_id,
+                    budget=deadline,
+                    req=req,
                 )
                 phase_started = time.monotonic()
                 scope_jobs = []
@@ -298,31 +320,49 @@ class MemoryRecall:
                     )
                     interaction_type = (
                         scope.interaction_types[0]
-                        if scope.interaction_types
-                        and len(scope.interaction_types) == 1
+                        if scope.interaction_types and len(scope.interaction_types) == 1
                         else None
                     )
-                    scope_jobs.append((scope, scope_session_id, scope_persona_id, interaction_type))
+                    scope_jobs.append(
+                        (scope, scope_session_id, scope_persona_id, interaction_type)
+                    )
                 scope_results_list = await self._run_scope_searches(
-                    scope_jobs, deadline, query_for_search, recall_k, search_context, req,
-                    session_id, persona_id,
+                    scope_jobs,
+                    deadline,
+                    query_for_search,
+                    recall_k,
+                    search_context,
+                    req,
+                    session_id,
+                    persona_id,
                 )
                 phases = getattr(req, "_lm_private_phase_ms_v1", {})
-                phases["scope_searches"] = round((time.monotonic() - phase_started) * 1000, 1)
-                req._lm_private_phase_ms_v1 = phases
-                search_partial = (
-                    any(outcome["state"] != "completed" for outcome in scope_results_list)
-                    or bool(search_context and search_context.route_failures)
+                phases["scope_searches"] = round(
+                    (time.monotonic() - phase_started) * 1000, 1
                 )
-                for (scope, scope_session_id, _, _), outcome in zip(scope_jobs, scope_results_list):
+                req._lm_private_phase_ms_v1 = phases
+                search_partial = any(
+                    outcome["state"] != "completed" for outcome in scope_results_list
+                ) or bool(search_context and search_context.route_failures)
+                for (scope, scope_session_id, _, _), outcome in zip(
+                    scope_jobs, scope_results_list
+                ):
                     scope_results = outcome["value"]
                     for result in scope_results:
                         existing = recalled_by_id.get(result.doc_id)
-                        if existing is None or result.final_score > existing.final_score:
+                        if (
+                            existing is None
+                            or result.final_score > existing.final_score
+                        ):
                             recalled_by_id[result.doc_id] = result
-                            source_scope_by_id[int(result.doc_id)] = self._search_scope_identity(
-                                req, session_id, scope_session_id, persona_id,
-                                scope.source_session_id,
+                            source_scope_by_id[int(result.doc_id)] = (
+                                self._search_scope_identity(
+                                    req,
+                                    session_id,
+                                    scope_session_id,
+                                    persona_id,
+                                    scope.source_session_id,
+                                )
                             )
                             read_only_by_id[int(result.doc_id)] = bool(scope.read_only)
                         if not scope.read_only:
@@ -333,15 +373,25 @@ class MemoryRecall:
                     reverse=True,
                 )[:recall_k]
                 for scope in access_policy.read_scopes:
-                    if (not scope.read_only and scope.session_ids and
-                            len(scope.session_ids) == 1 and scope.session_ids[0] == session_id):
-                        migrate = getattr(self.memory_engine, "schedule_legacy_session_migration", None)
+                    if (
+                        not scope.read_only
+                        and scope.session_ids
+                        and len(scope.session_ids) == 1
+                        and scope.session_ids[0] == session_id
+                    ):
+                        migrate = getattr(
+                            self.memory_engine,
+                            "schedule_legacy_session_migration",
+                            None,
+                        )
                         if callable(migrate):
                             migrate(session_id)
 
                 if recalled_memories:
-                    logger.debug("[LMRecall] route=search outcome=found item_count=%d",
-                                 len(recalled_memories))
+                    logger.debug(
+                        "[LMRecall] route=search outcome=found item_count=%d",
+                        len(recalled_memories),
+                    )
 
                     # 格式化并注入记忆
                     memory_list = [
@@ -369,7 +419,9 @@ class MemoryRecall:
                         if projected is not None:
                             memory_list = projected
                             if not memory_list:
-                                logger.debug("证据视图尚未就绪，本轮不注入未解析的混合摘要")
+                                logger.debug(
+                                    "证据视图尚未就绪，本轮不注入未解析的混合摘要"
+                                )
                                 self._set_recall_outcome(req, "partial")
                                 return
 
@@ -377,7 +429,7 @@ class MemoryRecall:
                     for i, mem in enumerate(memory_list, 1):
                         logger.debug(
                             f"[LMRecall] item={i} score={float(mem.get('score', 0)):.3f}, "
-                            f"provenance={str((mem.get('metadata') or {}).get('provenance_kind','unknown'))[:32]}"
+                            f"provenance={str((mem.get('metadata') or {}).get('provenance_kind', 'unknown'))[:32]}"
                         )
 
                     # 注入策略适配层负责把历史配置值映射到唯一的 add-only
@@ -385,8 +437,8 @@ class MemoryRecall:
                     configured_method = self.config_manager.get(
                         "recall_engine.injection_method", "extra_user_content"
                     )
-                    injection_method, fallback_reason = (
-                        self.injection_adapter.resolve(configured_method)
+                    injection_method, fallback_reason = self.injection_adapter.resolve(
+                        configured_method
                     )
                     if fallback_reason:
                         logger.warning(
@@ -404,105 +456,167 @@ class MemoryRecall:
                         memory_id = getattr(memory, "doc_id", None)
                         content = getattr(memory, "content", None)
                         metadata = getattr(memory, "metadata", None)
-                        if (isinstance(memory_id, bool) or not isinstance(memory_id, int)
-                                or not isinstance(content, str) or not isinstance(metadata, dict)):
+                        if (
+                            isinstance(memory_id, bool)
+                            or not isinstance(memory_id, int)
+                            or not isinstance(content, str)
+                            or not isinstance(metadata, dict)
+                        ):
                             continue
                         source_scope = dict(source_scope_by_id.get(memory_id) or {})
-                        source_umo = metadata.get("source_session_id") or metadata.get("session_id")
+                        source_umo = metadata.get("source_session_id") or metadata.get(
+                            "session_id"
+                        )
                         if isinstance(source_umo, str) and source_umo.strip():
                             source_scope["umo"] = source_umo
-                        if isinstance(metadata.get("persona_id"), str) and metadata["persona_id"].strip():
+                        if (
+                            isinstance(metadata.get("persona_id"), str)
+                            and metadata["persona_id"].strip()
+                        ):
                             source_scope["persona_id"] = metadata["persona_id"]
                         projection = getattr(memory, "atom_projection", None)
                         if not isinstance(projection, AtomProjectionProof):
                             projection = None
                         content_hash = text_sha256(content)
-                        source_records.append({
-                            "document_id": memory_id,
-                            "document_text_sha256": (
-                                projection.document_sha256 if projection else content_hash
-                            ),
-                            "projected_text_sha256": content_hash,
-                            "atom_proof": [list(atom) for atom in projection.atoms] if projection else [],
-                            "summary_metadata_sha256": summary_metadata_sha256(metadata),
-                            "source_scope": source_scope,
-                            "source_session_id": source_umo,
-                            "source_platform": metadata.get("source_platform"),
-                            "interaction_type": metadata.get("interaction_type"),
-                            "persona_id": metadata.get("persona_id"),
-                            "memory_visibility": metadata.get("memory_visibility"),
-                            "status": metadata.get("status", "active"),
-                            "read_only": read_only_by_id.get(memory_id, memory_id not in own_recalled_ids),
-                        })
+                        source_records.append(
+                            {
+                                "document_id": memory_id,
+                                "document_text_sha256": (
+                                    projection.document_sha256
+                                    if projection
+                                    else content_hash
+                                ),
+                                "projected_text_sha256": content_hash,
+                                "atom_proof": [list(atom) for atom in projection.atoms]
+                                if projection
+                                else [],
+                                "summary_metadata_sha256": summary_metadata_sha256(
+                                    metadata
+                                ),
+                                "source_scope": source_scope,
+                                "source_session_id": source_umo,
+                                "source_platform": metadata.get("source_platform"),
+                                "interaction_type": metadata.get("interaction_type"),
+                                "persona_id": metadata.get("persona_id"),
+                                "memory_visibility": metadata.get("memory_visibility"),
+                                "status": metadata.get("status", "active"),
+                                "read_only": read_only_by_id.get(
+                                    memory_id, memory_id not in own_recalled_ids
+                                ),
+                            }
+                        )
                     if deadline.remaining() <= 0:
                         self._set_recall_outcome(req, "deadline_exceeded")
                         return
                     # Attach the summary as a temporary part once its source
                     # records are ready for the guard.
-                    previous_summary_sources = getattr(req, '_lm_private_summary_sources_v1', None)
-                    previous_summary_validator = getattr(req, '_lm_private_summary_validate_v1', None)
+                    previous_summary_sources = getattr(
+                        req, "_lm_private_summary_sources_v1", None
+                    )
+                    previous_summary_validator = getattr(
+                        req, "_lm_private_summary_validate_v1", None
+                    )
                     injected_part = TextPart(text=memory_str).mark_as_temp()
                     req.extra_user_content_parts.append(injected_part)
                     remember_private_segment(
-                        req, injected_part,
+                        req,
+                        injected_part,
                         source_level="legacy_summary",
                         item_count=len(memory_list),
                     )
                     guarded = False
-                    if (callable(self.summary_guard) and source_records
-                            and len(source_records) == len(recalled_memories)):
+                    if (
+                        callable(self.summary_guard)
+                        and source_records
+                        and len(source_records) == len(recalled_memories)
+                    ):
                         card = getattr(req, "_cd_memory_feedback_v1", None)
                         try:
                             guard_result = self.summary_guard(
-                                event, req, source_records,
+                                event,
+                                req,
+                                source_records,
                                 target_persona_id=persona_id,
-                                card_version=(str(card.get("card_version", ""))
-                                              if isinstance(card, dict) else ""),
+                                card_version=(
+                                    str(card.get("card_version", ""))
+                                    if isinstance(card, dict)
+                                    else ""
+                                ),
                                 segment_text=getattr(injected_part, "text", ""),
                                 item_count=len(memory_list),
                             )
-                            if asyncio.iscoroutine(guard_result) or hasattr(guard_result, "__await__"):
+                            if asyncio.iscoroutine(guard_result) or hasattr(
+                                guard_result, "__await__"
+                            ):
                                 guard_result = await asyncio.wait_for(
                                     guard_result, timeout=deadline.remaining()
                                 )
-                            validator = getattr(req, "_lm_private_summary_validate_v1", None)
+                            validator = getattr(
+                                req, "_lm_private_summary_validate_v1", None
+                            )
                             guarded = guard_result is True and callable(validator)
                             if guarded:
-                                guarded = await asyncio.wait_for(
-                                    validator(), timeout=deadline.remaining()
-                                ) is True
+                                guarded = (
+                                    await asyncio.wait_for(
+                                        validator(), timeout=deadline.remaining()
+                                    )
+                                    is True
+                                )
                             if deadline.remaining() <= 0:
                                 raise asyncio.TimeoutError
                         except asyncio.TimeoutError:
                             guarded = False
                             self._set_recall_outcome(req, "deadline_exceeded")
                         except asyncio.CancelledError:
-                            discard_private_summary_segment(req, injected_part,
+                            discard_private_summary_segment(
+                                req,
+                                injected_part,
                                 previous_sources=previous_summary_sources,
-                                previous_validator=previous_summary_validator)
+                                previous_validator=previous_summary_validator,
+                            )
                             raise
                         except Exception:
                             guarded = False
                     if not guarded:
-                        discard_private_summary_segment(req, injected_part,
-                            previous_sources=previous_summary_sources, previous_validator=previous_summary_validator)
-                        if getattr(req, "_lm_private_hook_outcome_v1", None) != "deadline_exceeded":
+                        discard_private_summary_segment(
+                            req,
+                            injected_part,
+                            previous_sources=previous_summary_sources,
+                            previous_validator=previous_summary_validator,
+                        )
+                        if (
+                            getattr(req, "_lm_private_hook_outcome_v1", None)
+                            != "deadline_exceeded"
+                        ):
                             self._set_recall_outcome(req, "partial")
                         return
-                    own_ids = [int(mem.doc_id) for mem in recalled_memories
-                               if isinstance(getattr(mem, "doc_id", None), int)
-                               and int(mem.doc_id) in own_recalled_ids]
-                    atoms = [int(atom_id) for mem in recalled_memories
-                             if isinstance(getattr(mem, "doc_id", None), int)
-                             and int(mem.doc_id) in own_recalled_ids
-                             for atom_id in (mem.metadata or {}).get("retrieved_atom_ids", [])
-                             if isinstance(atom_id, int) and not isinstance(atom_id, bool)]
+                    own_ids = [
+                        int(mem.doc_id)
+                        for mem in recalled_memories
+                        if isinstance(getattr(mem, "doc_id", None), int)
+                        and int(mem.doc_id) in own_recalled_ids
+                    ]
+                    atoms = [
+                        int(atom_id)
+                        for mem in recalled_memories
+                        if isinstance(getattr(mem, "doc_id", None), int)
+                        and int(mem.doc_id) in own_recalled_ids
+                        for atom_id in (mem.metadata or {}).get(
+                            "retrieved_atom_ids", []
+                        )
+                        if isinstance(atom_id, int) and not isinstance(atom_id, bool)
+                    ]
                     if own_ids:
-                        touch = getattr(self.memory_engine, "schedule_recall_access_touch", None)
+                        touch = getattr(
+                            self.memory_engine, "schedule_recall_access_touch", None
+                        )
                         if callable(touch):
                             touch(own_ids, atoms)
                     self._set_recall_outcome(
-                        req, "partial" if search_partial or source_store_partial else "ready"
+                        req,
+                        "partial"
+                        if search_partial or source_store_partial
+                        else "ready",
                     )
                     logger.info(
                         "[LMRecall] route=surface outcome=appended item_count=%d",
@@ -511,7 +625,10 @@ class MemoryRecall:
                 else:
                     logger.info("[LMRecall] route=search outcome=empty")
                     self._set_recall_outcome(
-                        req, "partial" if search_partial or source_store_partial else "empty"
+                        req,
+                        "partial"
+                        if search_partial or source_store_partial
+                        else "empty",
                     )
 
         except asyncio.CancelledError:
@@ -519,8 +636,10 @@ class MemoryRecall:
             raise
         except Exception as e:
             self._set_recall_outcome(req, "error")
-            logger.error("[LMRecall] route=handler outcome=error exception_type=%s",
-                         type(e).__name__)
+            logger.error(
+                "[LMRecall] route=handler outcome=error exception_type=%s",
+                type(e).__name__,
+            )
 
     def _remove_agent_recall_policy_from_context(self, req: ProviderRequest) -> int:
         """移除本插件上一轮注入的自主回忆规则临时片段（重复钩子去重）。
@@ -808,14 +927,22 @@ class MemoryRecall:
 
     @staticmethod
     def _set_recall_outcome(req, outcome: str) -> None:
-        if outcome not in {"ready", "partial", "empty", "deadline_exceeded", "cancelled",
-                           "busy", "error", "original_input_unavailable", "disabled"}:
+        if outcome not in {
+            "ready",
+            "partial",
+            "empty",
+            "deadline_exceeded",
+            "cancelled",
+            "busy",
+            "error",
+            "original_input_unavailable",
+            "disabled",
+        }:
             outcome = "error"
         try:
             setattr(req, "_lm_private_hook_outcome_v1", outcome)
         except Exception:
             pass
-
 
     async def _run_scope_searches(
         self, jobs, deadline, query, k, context, req, session_id, persona_id
@@ -832,16 +959,28 @@ class MemoryRecall:
                     break
                 index, (scope, selected_session, search_persona, interaction) = job
                 identity = self._search_scope_identity(
-                    req, session_id, selected_session, persona_id, scope.source_session_id
+                    req,
+                    session_id,
+                    selected_session,
+                    persona_id,
+                    scope.source_session_id,
                 )
                 scoped_context = (
-                    context.for_scope(identity, self._scope_revision(identity)) if context else None
+                    context.for_scope(identity, self._scope_revision(identity))
+                    if context
+                    else None
                 )
                 task = self._submit_scope_search(
-                    query=query, k=k, session_id=selected_session, persona_id=search_persona,
-                    interaction_type=interaction, source_platform=scope.source_platform,
-                    source_session_id=scope.source_session_id, touch_access=False,
-                    cache_results=False, allow_legacy_session_migration=False,
+                    query=query,
+                    k=k,
+                    session_id=selected_session,
+                    persona_id=search_persona,
+                    interaction_type=interaction,
+                    source_platform=scope.source_platform,
+                    source_session_id=scope.source_session_id,
+                    touch_access=False,
+                    cache_results=False,
+                    allow_legacy_session_migration=False,
                     execution_context=scoped_context,
                 )
                 if task is None:
@@ -853,7 +992,9 @@ class MemoryRecall:
             fill_slots()
             while active:
                 done, _ = await asyncio.wait(
-                    active, timeout=deadline.search_remaining(), return_when=asyncio.FIRST_COMPLETED
+                    active,
+                    timeout=deadline.search_remaining(),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
                     break
@@ -865,8 +1006,10 @@ class MemoryRecall:
                         finished, value = task.result()
                     except Exception as exc:
                         outcomes[index]["state"] = "error"
-                        logger.debug("[LMRecall] route=memory_scope outcome=error exception_type=%s",
-                                     type(exc).__name__)
+                        logger.debug(
+                            "[LMRecall] route=memory_scope outcome=error exception_type=%s",
+                            type(exc).__name__,
+                        )
                     else:
                         if finished <= deadline.search_deadline:
                             outcomes[index] = {"state": "completed", "value": value}
@@ -908,41 +1051,62 @@ class MemoryRecall:
             return None
         try:
             revision = provider(scope)
-            return revision.get("correction_revision") if isinstance(revision, dict) else None
+            return (
+                revision.get("correction_revision")
+                if isinstance(revision, dict)
+                else None
+            )
         except Exception:
             return None
 
     def _make_search_context(self, *, session_id, query, persona_id, budget, req):
         if self.recall_runtime is None:
             return None
-        scope = self._search_scope_identity(req, session_id, session_id, persona_id, None)
+        scope = self._search_scope_identity(
+            req, session_id, session_id, persona_id, None
+        )
         receipt = getattr(req, "_cd_memory_feedback_v1", None)
         # Leave time for keyword reads, canonical hydration and atom projection.
-        remote_deadline = budget.search_deadline - min(1.0, budget.search_remaining() * 0.35)
+        remote_deadline = budget.search_deadline - min(
+            1.0, budget.search_remaining() * 0.35
+        )
         return BoundedRecallSearchContext(
-            self.recall_runtime, budget,
+            self.recall_runtime,
+            budget,
             scope=scope,
-            query=query, purpose="reply",
+            query=query,
+            purpose="reply",
             card_version=str(receipt.get("card_version", ""))[:256]
-            if isinstance(receipt, dict) else "",
+            if isinstance(receipt, dict)
+            else "",
             correction_revision=self._scope_revision(scope),
-            persona_ids=(persona_id,) if persona_id else (), origin="private-native",
-            max_parallel=3, hard_deadline=True, remote_deadline=remote_deadline,
-            embedding_cache=QueryEmbeddingCache(remote_deadline, owner=self.recall_runtime),
+            persona_ids=(persona_id,) if persona_id else (),
+            origin="private-native",
+            max_parallel=3,
+            hard_deadline=True,
+            remote_deadline=remote_deadline,
+            embedding_cache=QueryEmbeddingCache(
+                remote_deadline, owner=self.recall_runtime
+            ),
             local_only=getattr(req, "_cd_local_recall_only_v1", False) is True,
         )
 
     @staticmethod
-    def _search_scope_identity(req, session_id, selected_session, persona_id, shared_session):
+    def _search_scope_identity(
+        req, session_id, selected_session, persona_id, shared_session
+    ):
         receipt = getattr(req, "_cd_memory_feedback_v1", None)
         base = receipt.get("scope") if isinstance(receipt, dict) else None
         if isinstance(base, dict):
-            scope = {key: base.get(key) for key in
-                     ("platform", "umo", "persona_id", "instance_id")}
+            scope = {
+                key: base.get(key)
+                for key in ("platform", "umo", "persona_id", "instance_id")
+            }
         else:
             scope = {
                 "platform": str(session_id).split(":", 1)[0],
-                "umo": session_id, "persona_id": persona_id or "",
+                "umo": session_id,
+                "persona_id": persona_id or "",
                 "instance_id": persona_id or "",
             }
         target = shared_session or selected_session or session_id
@@ -975,25 +1139,39 @@ class MemoryRecall:
         task.add_done_callback(release, context=contextvars.Context())
         return "scheduled"
 
-    async def _store_owned_original_messages(self, event, req, original, budget) -> bool:
+    async def _store_owned_original_messages(
+        self, event, req, original, budget
+    ) -> bool:
         if original.status != "valid" or not isinstance(original.scope, dict):
             return False
         if classify_umo(original.scope.get("umo")) != "private":
             return False
         request_receipt = getattr(req, "_cd_memory_feedback_v1", None)
-        receipt_scope = request_receipt.get("scope") if isinstance(request_receipt, dict) else None
+        receipt_scope = (
+            request_receipt.get("scope") if isinstance(request_receipt, dict) else None
+        )
         if not isinstance(receipt_scope, dict):
             getter = getattr(event, "get_extra", None)
-            context = getter("_autonomous_blocking_context_v1", None) if callable(getter) else None
+            context = (
+                getter("_autonomous_blocking_context_v1", None)
+                if callable(getter)
+                else None
+            )
             receipt_scope = context.get("scope") if isinstance(context, dict) else None
         if not isinstance(receipt_scope, dict):
             return False
-        scope = {key: receipt_scope.get(key) for key in
-                 ("platform", "umo", "persona_id", "instance_id")}
-        if (scope.get("umo") != original.scope.get("umo") or
-                scope.get("platform") != str(scope.get("umo") or "").rsplit(":", 2)[0] or
-                not all(isinstance(scope.get(key), str) and scope[key].strip()
-                        for key in ("platform", "umo", "persona_id", "instance_id"))):
+        scope = {
+            key: receipt_scope.get(key)
+            for key in ("platform", "umo", "persona_id", "instance_id")
+        }
+        if (
+            scope.get("umo") != original.scope.get("umo")
+            or scope.get("platform") != str(scope.get("umo") or "").rsplit(":", 2)[0]
+            or not all(
+                isinstance(scope.get(key), str) and scope[key].strip()
+                for key in ("platform", "umo", "persona_id", "instance_id")
+            )
+        ):
             return False
         self_id_getter = getattr(event, "get_self_id", None)
         try:
@@ -1020,7 +1198,9 @@ class MemoryRecall:
                 "original_parts": [dict(part) for part in item.parts],
                 "platform_message_id": item.platform_message_id,
             }
-            remaining = budget.search_remaining() if isinstance(budget, RecallDeadline) else 0.0
+            remaining = (
+                budget.search_remaining() if isinstance(budget, RecallDeadline) else 0.0
+            )
             if remaining <= 0:
                 raise asyncio.TimeoutError
             await asyncio.wait_for(

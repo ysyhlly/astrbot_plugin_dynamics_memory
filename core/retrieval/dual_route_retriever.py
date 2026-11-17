@@ -68,8 +68,14 @@ class DualRouteRetriever:
         if getattr(execution_context, "remote_deadline", None) is not None:
             budget = execution_context.budget
             reserve = min(0.2, budget.search_remaining() * 0.20)
-            graph_context = execution_context.with_deadline(budget.search_deadline - reserve)
-        outer_cache = query_embeddings.get() if relevance_only or execution_context is not None else None
+            graph_context = execution_context.with_deadline(
+                budget.search_deadline - reserve
+            )
+        outer_cache = (
+            query_embeddings.get()
+            if relevance_only or execution_context is not None
+            else None
+        )
         cache = outer_cache if outer_cache is not None else {}
         token = query_embeddings.set(cache) if outer_cache is None else None
         doc_diagnostics: dict[str, Any] = {}
@@ -87,12 +93,15 @@ class DualRouteRetriever:
         if narrative_plan is not None:
             doc_options["narrative_plan"] = narrative_plan
         try:
+
             def document_route():
                 return search_route(
                     "document",
                     self.document_retriever.search(
                         query,
-                        narrative_plan.initial if narrative_plan is not None else max(k * 2, k),
+                        narrative_plan.initial
+                        if narrative_plan is not None
+                        else max(k * 2, k),
                         session_id,
                         persona_id,
                         interaction_type=interaction_type,
@@ -101,86 +110,167 @@ class DualRouteRetriever:
                         execution_context=execution_context,
                         **doc_options,
                     ),
-                    timeout, safe_errors=execution_context is not None,
+                    timeout,
+                    safe_errors=execution_context is not None,
                 )
 
             async def graph_candidates():
-                limit = narrative_plan.initial if narrative_plan is not None else max(k * 2, k)
+                limit = (
+                    narrative_plan.initial
+                    if narrative_plan is not None
+                    else max(k * 2, k)
+                )
                 while True:
                     rows = await self.graph_retriever.search(
-                        query, limit, session_id or source_session_id, persona_id,
-                        source_platform=source_platform, interaction_type=interaction_type,
-                        source_session_id=source_session_id, execution_context=graph_context,
-                        **graph_options)
+                        query,
+                        limit,
+                        session_id or source_session_id,
+                        persona_id,
+                        source_platform=source_platform,
+                        interaction_type=interaction_type,
+                        source_session_id=source_session_id,
+                        execution_context=graph_context,
+                        **graph_options,
+                    )
                     if narrative_plan is None or not rows:
                         return rows
                     ids = list(dict.fromkeys(r.doc_id for r in rows))
+
                     async def load_parents():
                         if self.memory_batch_loader is not None:
-                            return await self.memory_batch_loader(metadata_filters={}, ids=ids, limit=len(ids))
-                        return await asyncio.gather(*(self.memory_loader(i) for i in ids))
+                            return await self.memory_batch_loader(
+                                metadata_filters={}, ids=ids, limit=len(ids)
+                            )
+                        return await asyncio.gather(
+                            *(self.memory_loader(i) for i in ids)
+                        )
+
                     if execution_context is None:
                         parents = await load_parents()
                     else:
-                        outcome = await execution_context.run("graph_parents", load_parents,
-                                                              discriminator={"ids": ids})
-                        parents = outcome.get("value", []) if outcome.get("state") == "completed" else []
+                        outcome = await execution_context.run(
+                            "graph_parents", load_parents, discriminator={"ids": ids}
+                        )
+                        parents = (
+                            outcome.get("value", [])
+                            if outcome.get("state") == "completed"
+                            else []
+                        )
                     if self.memory_batch_loader is not None:
-                        canonical = {int(r["id"]): r for r in parents if isinstance(r, dict)}
+                        canonical = {
+                            int(r["id"]): r for r in parents if isinstance(r, dict)
+                        }
                     else:
-                        canonical = {i: r for i, r in zip(ids, parents) if isinstance(r, dict)}
-                    candidates = [HybridResult(r.doc_id, r.final_score, r.rrf_score,
-                        r.keyword_score, r.vector_score, str(canonical[r.doc_id].get("text") or ""),
-                        safe_json_dict(canonical[r.doc_id].get("metadata")), r.score_breakdown)
-                        for r in rows if r.doc_id in canonical]
-                    valid = await narrative_plan.validate(candidates, execution_context, "graph_policy")
+                        canonical = {
+                            i: r for i, r in zip(ids, parents) if isinstance(r, dict)
+                        }
+                    candidates = [
+                        HybridResult(
+                            r.doc_id,
+                            r.final_score,
+                            r.rrf_score,
+                            r.keyword_score,
+                            r.vector_score,
+                            str(canonical[r.doc_id].get("text") or ""),
+                            safe_json_dict(canonical[r.doc_id].get("metadata")),
+                            r.score_breakdown,
+                        )
+                        for r in rows
+                        if r.doc_id in canonical
+                    ]
+                    valid = await narrative_plan.validate(
+                        candidates, execution_context, "graph_policy"
+                    )
                     if valid:
                         narrative_plan.graph_fallback = list(valid)
                     valid_map = {r.doc_id: r for r in valid}
-                    checked = [replace(r, content=valid_map[r.doc_id].content,
-                                       metadata=valid_map[r.doc_id].metadata)
-                               for r in rows if r.doc_id in valid_map]
-                    if (len(checked) >= narrative_plan.target_k or len(rows) < limit
-                            or limit >= narrative_plan.graph_ceiling
-                            or not narrative_plan.can_expand(execution_context)):
+                    checked = [
+                        replace(
+                            r,
+                            content=valid_map[r.doc_id].content,
+                            metadata=valid_map[r.doc_id].metadata,
+                        )
+                        for r in rows
+                        if r.doc_id in valid_map
+                    ]
+                    if (
+                        len(checked) >= narrative_plan.target_k
+                        or len(rows) < limit
+                        or limit >= narrative_plan.graph_ceiling
+                        or not narrative_plan.can_expand(execution_context)
+                    ):
                         return checked
                     limit = min(limit * 2, narrative_plan.graph_ceiling)
 
             def graph_route():
-                return search_route("graph", graph_candidates(), timeout,
-                                    safe_errors=execution_context is not None)
+                return search_route(
+                    "graph",
+                    graph_candidates(),
+                    timeout,
+                    safe_errors=execution_context is not None,
+                )
 
             graph_skipped = False
             if self._document_first_query(query):
                 started = asyncio.get_running_loop().time()
                 overall_timeout = timeout
                 document_task = asyncio.create_task(document_route())
-                ready_task = (asyncio.create_task(narrative_plan.documents_ready.wait())
-                              if narrative_plan is not None else None)
+                ready_task = (
+                    asyncio.create_task(narrative_plan.documents_ready.wait())
+                    if narrative_plan is not None
+                    else None
+                )
                 try:
-                    waiting = {document_task, ready_task} if ready_task is not None else {document_task}
-                    done, _ = await asyncio.wait(waiting, timeout=overall_timeout * 0.65,
-                                                 return_when=asyncio.FIRST_COMPLETED)
-                    if narrative_plan is not None and narrative_plan.documents_ready.is_set():
+                    waiting = (
+                        {document_task, ready_task}
+                        if ready_task is not None
+                        else {document_task}
+                    )
+                    done, _ = await asyncio.wait(
+                        waiting,
+                        timeout=overall_timeout * 0.65,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if (
+                        narrative_plan is not None
+                        and narrative_plan.documents_ready.is_set()
+                    ):
                         graph_skipped = narrative_plan.documents_sufficient()
                     elif document_task in done:
                         doc_results, doc_error = document_task.result()
-                        graph_skipped = (narrative_plan is None and doc_error is None and len(doc_results) >= k > 0
-                                         and all(item.final_score > 0 and item.content
-                                                 and float(item.bm25_score or 0) > 0
-                                                 for item in doc_results[:k]))
+                        graph_skipped = (
+                            narrative_plan is None
+                            and doc_error is None
+                            and len(doc_results) >= k > 0
+                            and all(
+                                item.final_score > 0
+                                and item.content
+                                and float(item.bm25_score or 0) > 0
+                                for item in doc_results[:k]
+                            )
+                        )
                     if graph_skipped:
                         doc_results, doc_error = await document_task
                         graph_results, graph_error = [], None
                         # An error after the early signal must still allow rescue.
                         if doc_error is not None or not doc_results:
                             graph_skipped = False
-                            timeout = max(0.0, overall_timeout - (asyncio.get_running_loop().time() - started))
+                            timeout = max(
+                                0.0,
+                                overall_timeout
+                                - (asyncio.get_running_loop().time() - started),
+                            )
                             graph_results, graph_error = await graph_route()
                     else:
-                        timeout = max(0.0, overall_timeout - (asyncio.get_running_loop().time() - started))
-                        (doc_results, doc_error), (graph_results, graph_error) = await asyncio.gather(
-                            document_task, graph_route())
+                        timeout = max(
+                            0.0,
+                            overall_timeout
+                            - (asyncio.get_running_loop().time() - started),
+                        )
+                        (
+                            (doc_results, doc_error),
+                            (graph_results, graph_error),
+                        ) = await asyncio.gather(document_task, graph_route())
                 finally:
                     owned = [t for t in (document_task, ready_task) if t is not None]
                     for task in owned:
@@ -188,12 +278,18 @@ class DualRouteRetriever:
                             task.cancel()
                     await asyncio.gather(*owned, return_exceptions=True)
             else:
-                (doc_results, doc_error), (graph_results, graph_error) = await asyncio.gather(
-                    document_route(), graph_route())
+                (
+                    (doc_results, doc_error),
+                    (graph_results, graph_error),
+                ) = await asyncio.gather(document_route(), graph_route())
             if diagnostics is not None:
                 diagnostics["graph_selection"] = (
-                    "skipped_simple_preference" if graph_skipped else
-                    "fallback" if self._document_first_query(query) else "parallel")
+                    "skipped_simple_preference"
+                    if graph_skipped
+                    else "fallback"
+                    if self._document_first_query(query)
+                    else "parallel"
+                )
             merge_route(diagnostics, "document", doc_diagnostics, doc_error)
             if not graph_skipped:
                 merge_route(diagnostics, "graph", graph_diagnostics, graph_error)
@@ -206,27 +302,79 @@ class DualRouteRetriever:
                 if cache:
                     await asyncio.gather(*cache.values(), return_exceptions=True)
 
+        preloaded_graph_docs: dict[int, dict[str, Any]] = {}
         if (
             interaction_type is not None
             or source_platform is not None
             or source_session_id is not None
-        ):
+        ) and graph_results:
             checked = []
-            for result in graph_results:
-                # Graph index metadata is derived and may be stale. Only the
-                # canonical parent document can grant cross-scope visibility.
+            # Graph index metadata is derived and may be stale. Only the
+            # canonical parent document can grant cross-scope visibility.
+            if callable(self.memory_batch_loader):
+                graph_ids = list(
+                    dict.fromkeys(int(result.doc_id) for result in graph_results)
+                )
                 if execution_context is None:
-                    memory = await self.memory_loader(result.doc_id)
+                    loaded_docs = await self.memory_batch_loader(
+                        metadata_filters={}, ids=graph_ids, limit=len(graph_ids)
+                    )
                 else:
                     outcome = await execution_context.run(
-                        "graph_policy_hydration", self.memory_loader, result.doc_id,
-                        discriminator={"document_id": int(result.doc_id)},
+                        "graph_policy_hydration",
+                        self.memory_batch_loader,
+                        metadata_filters={},
+                        ids=graph_ids,
+                        limit=len(graph_ids),
+                        discriminator={"document_ids": graph_ids},
                     )
-                    memory = outcome.get("value") if outcome.get("state") == "completed" else None
+                    loaded_docs = (
+                        outcome.get("value", [])
+                        if outcome.get("state") == "completed"
+                        else []
+                    )
+                memories_by_id: dict[int, Any] = {}
+                for doc in loaded_docs or ():
+                    doc_key = (
+                        doc.get("id")
+                        if isinstance(doc, dict)
+                        else getattr(doc, "id", None)
+                    )
+                    if doc_key is not None:
+                        memories_by_id[int(doc_key)] = doc
+            else:
+                memories_by_id = {}
+                for result in graph_results:
+                    if execution_context is None:
+                        memory = await self.memory_loader(result.doc_id)
+                    else:
+                        outcome = await execution_context.run(
+                            "graph_policy_hydration",
+                            self.memory_loader,
+                            result.doc_id,
+                            discriminator={"document_id": int(result.doc_id)},
+                        )
+                        memory = (
+                            outcome.get("value")
+                            if outcome.get("state") == "completed"
+                            else None
+                        )
+                    memories_by_id[int(result.doc_id)] = memory
+
+            for result in graph_results:
+                doc_id = int(result.doc_id)
+                memory = memories_by_id.get(doc_id)
                 if isinstance(memory, dict):
-                    metadata = memory.get("metadata") or {}
+                    metadata = safe_json_dict(memory.get("metadata"))
+                    text_val = memory.get("text")
+                    if text_val is not None:
+                        preloaded_graph_docs[doc_id] = {
+                            "id": doc_id,
+                            "text": str(text_val),
+                            "metadata": dict(metadata),
+                        }
                 elif memory is not None:
-                    metadata = getattr(memory, "metadata", {}) or {}
+                    metadata = safe_json_dict(getattr(memory, "metadata", None))
                 else:
                     metadata = {}
                 if memory_metadata_matches_policy(
@@ -257,14 +405,27 @@ class DualRouteRetriever:
         graph_map = {item.doc_id: item for item in graph_results}
         all_doc_ids = set(doc_map) | set(graph_map)
 
-        preloaded = ({r.doc_id: {"id": r.doc_id, "text": r.content, "metadata": r.metadata}
-                      for r in graph_results} if narrative_plan is not None else {})
+        preloaded = dict(preloaded_graph_docs)
+        if narrative_plan is not None:
+            preloaded.update(
+                {
+                    r.doc_id: {
+                        "id": r.doc_id,
+                        "text": r.content,
+                        "metadata": r.metadata,
+                    }
+                    for r in graph_results
+                }
+            )
         missing_ids = [
             doc_id
             for doc_id in all_doc_ids
-            if doc_id not in preloaded and (doc_id not in doc_map
-            or not doc_map[doc_id].content
-            or not doc_map[doc_id].metadata)
+            if doc_id not in preloaded
+            and (
+                doc_id not in doc_map
+                or not doc_map[doc_id].content
+                or not doc_map[doc_id].metadata
+            )
         ]
         loaded = dict(preloaded)
         if missing_ids:
@@ -275,25 +436,39 @@ class DualRouteRetriever:
                     )
                 else:
                     outcome = await execution_context.run(
-                        "document_hydration", self.memory_batch_loader,
-                        metadata_filters={}, ids=missing_ids, limit=len(missing_ids),
+                        "document_hydration",
+                        self.memory_batch_loader,
+                        metadata_filters={},
+                        ids=missing_ids,
+                        limit=len(missing_ids),
                         discriminator={"document_ids": missing_ids},
                     )
-                    documents = outcome.get("value", []) if outcome.get("state") == "completed" else []
+                    documents = (
+                        outcome.get("value", [])
+                        if outcome.get("state") == "completed"
+                        else []
+                    )
                 loaded.update({int(document["id"]): document for document in documents})
             else:
+
                 async def load_missing():
                     return await asyncio.gather(
                         *(self.memory_loader(doc_id) for doc_id in missing_ids)
                     )
+
                 if execution_context is None:
                     documents = await load_missing()
                 else:
                     outcome = await execution_context.run(
-                        "document_hydration", load_missing,
+                        "document_hydration",
+                        load_missing,
                         discriminator={"document_ids": missing_ids},
                     )
-                    documents = outcome.get("value", []) if outcome.get("state") == "completed" else []
+                    documents = (
+                        outcome.get("value", [])
+                        if outcome.get("state") == "completed"
+                        else []
+                    )
                 loaded.update(dict(zip(missing_ids, documents)))
 
         merged_results: list[HybridResult] = []
@@ -564,9 +739,13 @@ class DualRouteRetriever:
         _, _, intent = self._route_weights_for_query(normalized)
         if "relationship" in intent or "temporal" in intent:
             return False
-        return bool(re.fullmatch(
-            r"(?:我|你|我的|你的)?(?:饮料|饮食|口味|音乐|电影|游戏|颜色|作息)(?:偏好|喜好|习惯)"
-            r"|(?:我|你)(?:喜欢|爱)(?:喝|吃|听|玩)什么", normalized))
+        return bool(
+            re.fullmatch(
+                r"(?:我|你|我的|你的)?(?:饮料|饮食|口味|音乐|电影|游戏|颜色|作息)(?:偏好|喜好|习惯)"
+                r"|(?:我|你)(?:喜欢|爱)(?:喝|吃|听|玩)什么",
+                normalized,
+            )
+        )
 
 
 __all__ = ["DualRouteRetriever"]

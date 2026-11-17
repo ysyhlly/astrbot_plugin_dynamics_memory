@@ -17,9 +17,14 @@ from astrbot_plugin_dynamics_memory.core.prompts.prompt_manager import (
 class TestPromptRegistry:
     def test_all_prompts_have_required_fields(self):
         required = {
-            "id", "name", "name_en",
-            "description", "description_en",
-            "category", "file", "variables",
+            "id",
+            "name",
+            "name_en",
+            "description",
+            "description_en",
+            "category",
+            "file",
+            "variables",
         }
         for pid, meta in PROMPT_REGISTRY.items():
             missing = required - set(meta.keys())
@@ -34,7 +39,9 @@ class TestPromptRegistry:
     def test_categories_valid(self):
         valid = set(PROMPT_CATEGORIES.keys())
         for pid, meta in PROMPT_REGISTRY.items():
-            assert meta["category"] in valid, f"{pid} category '{meta['category']}' invalid"
+            assert meta["category"] in valid, (
+                f"{pid} category '{meta['category']}' invalid"
+            )
 
     def test_categories_have_bilingual_fields(self):
         for cat_id, cat_info in PROMPT_CATEGORIES.items():
@@ -134,7 +141,9 @@ class TestPromptManagerCache:
     def test_cache_hit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mgr = PromptManager(tmpdir)
-            assert mgr.get_prompt("group_chat_prompt") == mgr.get_prompt("group_chat_prompt")
+            assert mgr.get_prompt("group_chat_prompt") == mgr.get_prompt(
+                "group_chat_prompt"
+            )
 
     def test_cache_busted_after_update(self):
         with tempfile.TemporaryDirectory() as tmpdir:

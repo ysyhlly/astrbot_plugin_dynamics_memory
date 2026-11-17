@@ -7,15 +7,13 @@ from tests.event_handler_support import (
     _make_event,
     _make_req,
     _recalled,
-    conversation_manager,
-    handler,
-    memory_engine,
-    memory_processor,
 )
 
 
 @pytest.mark.asyncio
-async def test_handle_memory_recall_fake_tool_call_fallback_logs_once(handler, memory_engine, caplog):
+async def test_handle_memory_recall_fake_tool_call_fallback_logs_once(
+    handler, memory_engine, caplog
+):
     config = ConfigManager({"recall_engine": {"injection_method": "fake_tool_call"}})
     handler._memory_recall.config_manager = config
     memory_engine.search_memories.return_value = [_recalled("记忆内容")]
@@ -28,7 +26,8 @@ async def test_handle_memory_recall_fake_tool_call_fallback_logs_once(handler, m
 
     await handler.shutdown()
     warnings = [
-        record.message for record in caplog.records
+        record.message
+        for record in caplog.records
         if record.levelname == "WARNING" and "fake_tool_call" in record.message
     ]
     assert len(warnings) == 1

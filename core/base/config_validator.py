@@ -5,11 +5,6 @@ Pydantic 模型是配置的唯一校验源：字段类型、范围与枚举约�
 插件启动时按模型校验原始配置，非法配置直接报错而不是静默修正。
 """
 
-import re
-from pydantic import model_validator
-from astrbot.api import logger
-
-
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -64,7 +59,9 @@ class RecallEngineConfig(BaseModel):
     fusion_agreement_bonus: float = Field(default=0.25, ge=0.0, le=1.0)
 
     narrative_total_timeout_seconds: float = Field(
-        default=6.0, ge=0.1, le=7.0,
+        default=6.0,
+        ge=0.1,
+        le=7.0,
         description="叙事召回总预算（秒），应小于调用方超时",
     )
 

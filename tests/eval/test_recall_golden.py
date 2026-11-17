@@ -24,8 +24,13 @@ def restore_host_logging_after_evaluation():
     manager = logging.root.manager
     disabled = manager.disable
     levels = {logging.getLogger(): logging.getLogger().level}
-    levels.update({logger: logger.level for logger in manager.loggerDict.values()
-                   if isinstance(logger, logging.Logger)})
+    levels.update(
+        {
+            logger: logger.level
+            for logger in manager.loggerDict.values()
+            if isinstance(logger, logging.Logger)
+        }
+    )
     try:
         yield
     finally:

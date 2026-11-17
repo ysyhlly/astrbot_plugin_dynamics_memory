@@ -12,6 +12,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
+from ...storage.sqlite_connection import open_connection
 from ..memory_scope import (
     adapter_sql,
     current_adapter_access,
@@ -30,7 +31,7 @@ class MemoryEngineBatchMixin:
     """
 
     # 访问统计合并窗口：窗口内的多次召回合并为一次 UPDATE
-    _ACCESS_UPDATE_DEBOUNCE_SECONDS = 3.0
+    _ACCESS_UPDATE_DEBOUNCE_SECONDS = 0.05
 
     # 宿主共享状态契约（由 MemoryEngine.__init__ / initialize 赋值）
     db_connection: aiosqlite.Connection | None
@@ -532,11 +533,6 @@ class MemoryEngineBatchMixin:
 
                 updates.append((json.dumps(metadata, ensure_ascii=False), doc_id))
 
-            if updates:
-                async with self._write_db() as db:
-                    await db.executemany(
-                        "UPDATE documents SET metadata = ? WHERE id = ?", updates
-                    )
             updated_count = len(updates)
             async with self._write_transaction() as connection:
                 if updates:
@@ -745,84 +741,57 @@ class MemoryEngineBatchMixin:
     async def _update_access_times_internal(
         self, doc_ids: list[int], atom_ids=None
     ) -> bool:
-        """Atomically bump access time and count for multiple memories in one UPDATE.
-
-        Args:
-            doc_ids: Document ids to update.
-
-        Returns:
-            bool: True if at least one row was updated.
-        """
-        unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
-        if not unique_ids:
+        """Coalesce access time and count increments through the debounce window."""
+        unique_ids = [
+            int(doc_id)
+            for doc_id in doc_ids
+            if isinstance(doc_id, int) and not isinstance(doc_id, bool) and doc_id > 0
+        ]
+        if not unique_ids or self.db_connection is None:
             return False
 
-        current_time = time.time()
-
-        try:
-            if self.db_connection is None:
-                return False
-
-            async with self._write_db() as db:
-                # 单条原子 SQL，避免并发召回任务对同一记忆产生丢失更新，
-                # 同时将多条结果合并为一次 commit 以降低写放大。
-                placeholders = ",".join("?" * len(unique_ids))
-                cursor = await db.execute(
-                    f"""
-                    UPDATE documents
-                    SET metadata = CASE
-                        WHEN json_valid(metadata) THEN json_set(
-                            json_set(metadata, '$.last_access_time', ?),
-                            '$.access_count',
-                            MIN(
-                                COALESCE(
-                                    CAST(json_extract(metadata, '$.access_count') AS INTEGER),
-                                    0
-                                ) + 1,
-                                1000000
-                            )
-                        )
-                        ELSE json_set('{{}}', '$.last_access_time', ?, '$.access_count', 1)
-                    END
-                    WHERE id IN ({placeholders})
-                    """,
-                    (current_time, current_time, *unique_ids),
-                )
-                if atom_ids and self.atom_store is not None:
-                    unique_atoms = list(dict.fromkeys(atom_ids))
-                    await db.execute(
-                        f"UPDATE memory_atoms SET last_accessed_at = ? "
-                        f"WHERE id IN ({','.join('?' for _ in unique_atoms)}) "
-                        "AND status = 'active' AND expires_at > ?",
-                        (current_time, *unique_atoms, current_time),
-                    )
-
-                return cursor.rowcount > 0
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # 记录错误但不影响查询流程
-            logger.warning(
-                f"批量更新访问时间失败 (doc_ids={unique_ids}): {e}",
-                exc_info=True,
+        self._access_update_pending.update(unique_ids)
+        if atom_ids:
+            self._access_atom_update_pending.update(
+                int(atom_id)
+                for atom_id in atom_ids
+                if isinstance(atom_id, int)
+                and not isinstance(atom_id, bool)
+                and atom_id > 0
             )
-            return False
+
+        flush_task = self._access_flush_task
+        if flush_task is not None and not flush_task.done():
+            await asyncio.shield(flush_task)
+            return True
+
+        current_task = asyncio.current_task()
+        self._access_flush_task = current_task
+        try:
+            await self._deferred_flush_access_updates()
+            return True
+        finally:
+            if self._access_flush_task is current_task:
+                self._access_flush_task = None
 
     async def _deferred_flush_access_updates(self) -> None:
         await asyncio.sleep(self._ACCESS_UPDATE_DEBOUNCE_SECONDS)
-        await self._flush_access_updates()
+        while self._access_update_pending:
+            if not await self._flush_access_updates():
+                break
 
-    async def _flush_access_updates(self) -> None:
+    async def _flush_access_updates(self) -> bool:
         """把挂起的访问统计写入数据库（失败时保留挂起项，下次重试）。"""
         doc_ids = sorted(self._access_update_pending)
         atom_ids = sorted(self._access_atom_update_pending)
-        if not doc_ids and not atom_ids:
-            return
+        if not doc_ids:
+            self._access_atom_update_pending.clear()
+            return False
         written = await self._write_access_updates(doc_ids, atom_ids)
         if written:
             self._access_update_pending.difference_update(doc_ids)
             self._access_atom_update_pending.difference_update(atom_ids)
+        return written
 
     async def _write_access_updates(
         self, doc_ids: list[int], atom_ids: list[int]
@@ -1165,7 +1134,7 @@ class MemoryEngineBatchMixin:
                 "",
                 ":memory:",
             ):
-                reader = await aiosqlite.connect(str(db_path), isolation_level=None)
+                reader = await open_connection(str(db_path), isolation_level=None)
                 reader.row_factory = aiosqlite.Row
                 close_reader = True
             else:

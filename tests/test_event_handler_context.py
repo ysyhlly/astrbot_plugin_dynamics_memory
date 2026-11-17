@@ -18,17 +18,15 @@ from tests.event_handler_support import (
     _make_resp,
     _recalled,
     _seed_turns,
-    conversation_manager,
-    handler,
-    memory_engine,
-    memory_processor,
 )
 
 # ==================== system_prompt 自动回退测试 ====================
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_auto_falls_back_to_extra_user_content(handler, memory_engine):
+async def test_system_prompt_auto_falls_back_to_extra_user_content(
+    handler, memory_engine
+):
     config = ConfigManager({"recall_engine": {"injection_method": "system_prompt"}})
     handler._memory_recall.config_manager = config
     memory_engine.search_memories.return_value = [_recalled("mem_fallback")]
@@ -96,7 +94,9 @@ async def test_recall_ignores_recent_stale_and_undated_history(
         ]
     )
 
-    await handler.handle_memory_recall(_make_event(text="当前消息"), _make_req("前轮重写请求"))
+    await handler.handle_memory_recall(
+        _make_event(text="当前消息"), _make_req("前轮重写请求")
+    )
     await handler.shutdown()
 
     memory_engine.search_memories.assert_awaited_once()
@@ -105,10 +105,14 @@ async def test_recall_ignores_recent_stale_and_undated_history(
 
 
 @pytest.mark.asyncio
-async def test_recall_with_no_history_uses_original_text(handler, memory_engine, conversation_manager):
+async def test_recall_with_no_history_uses_original_text(
+    handler, memory_engine, conversation_manager
+):
     conversation_manager.get_context = AsyncMock(return_value=[])
 
-    await handler.handle_memory_recall(_make_event(text="唯一一条消息"), _make_req("generated envelope"))
+    await handler.handle_memory_recall(
+        _make_event(text="唯一一条消息"), _make_req("generated envelope")
+    )
     await handler.shutdown()
 
     memory_engine.search_memories.assert_awaited_once()
@@ -130,14 +134,21 @@ async def test_exhausted_legacy_window_with_no_matching_start_does_not_advance_c
     try:
         await _seed_turns(manager, session_id, ("C1", "C2", "C3"))
         await manager.update_session_metadata(
-            session_id, "pending_summary", {"start_index": 2, "end_index": 6, "retry_count": 3}
+            session_id,
+            "pending_summary",
+            {"start_index": 2, "end_index": 6, "retry_count": 3},
         )
 
         await handler.handle_memory_reflection(event, _make_resp())
         await handler.shutdown()
 
-        assert await manager.get_session_metadata(session_id, "last_summarized_index", 0) == 0
-        pending = await manager.get_session_metadata(session_id, "pending_summary", None)
+        assert (
+            await manager.get_session_metadata(session_id, "last_summarized_index", 0)
+            == 0
+        )
+        pending = await manager.get_session_metadata(
+            session_id, "pending_summary", None
+        )
         assert pending["failure_stage"] == "retry_exhausted"
         assert pending["retry_after"] > time.time()
         assert pending["start_index"] == 0
@@ -150,7 +161,9 @@ async def test_exhausted_legacy_window_with_no_matching_start_does_not_advance_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_without_end", [False, True])
 async def test_pending_summary_retry_keeps_exact_range_or_uses_bounded_legacy_fallback(
-    handler, conversation_manager, legacy_without_end,
+    handler,
+    conversation_manager,
+    legacy_without_end,
 ):
     """Retry exact known bounds; a legacy start-only range uses one bounded window."""
     pending = {"start_index": 2, "retry_count": 1}
@@ -280,5 +293,3 @@ async def test_reflection_window_split_chooses_oldest_segment(
     assert storage_call.args[3] == 0  # start_index 不变
     assert storage_call.args[4] == expected_end
     assert len(storage_call.args[1]) == expected_end
-
-

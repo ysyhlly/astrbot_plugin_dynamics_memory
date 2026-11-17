@@ -4,7 +4,9 @@ import builtins
 from unittest.mock import Mock
 
 import pytest
-from astrbot_plugin_dynamics_memory.core.schedulers.decay_scheduler import DecayScheduler
+from astrbot_plugin_dynamics_memory.core.schedulers.decay_scheduler import (
+    DecayScheduler,
+)
 
 
 @pytest.mark.asyncio

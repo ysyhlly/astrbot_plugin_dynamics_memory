@@ -11,6 +11,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
+from ...storage.sqlite_connection import open_connection
 from ..memory_scope import (
     adapter_sql,
 )
@@ -303,10 +304,20 @@ class MemoryEngineStatsMixin:
                         exc_info=True,
                     )
 
-            await self.db_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            checkpoint_cursor = await self.db_connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            )
+            await checkpoint_cursor.fetchall()
+            await checkpoint_cursor.close()
 
             if vacuum:
+                if self.db_connection.in_transaction:
+                    await self.db_connection.commit()
                 await self.db_connection.execute("VACUUM")
+
+            cleanup_ops = getattr(self, "cleanup_write_ops", None)
+            if callable(cleanup_ops):
+                await cleanup_ops()
 
             after_size = db_path.stat().st_size if db_path.exists() else 0
             after_wal_size = wal_path.stat().st_size if wal_path.exists() else 0
@@ -595,11 +606,11 @@ class MemoryEngineStatsMixin:
         before_db = db_path.stat().st_size
         before_wal = wal_path.stat().st_size if wal_path.is_file() else 0
         logger.info("[Diag] 开始 VACUUM 压缩数据库: %s", db_path)
-        async with aiosqlite.connect(str(db_path), isolation_level=None) as connection:
+        connection = await open_connection(str(db_path), isolation_level=None)
+        try:
             # PRAGMA 的结果必须取回并关闭游标，否则游标仍在执行中，VACUUM 会报
             # "cannot VACUUM - SQL statements in progress"。
             for statement in (
-                "PRAGMA busy_timeout = 10000",
                 "PRAGMA wal_checkpoint(TRUNCATE)",
                 "PRAGMA incremental_vacuum",
             ):
@@ -607,6 +618,8 @@ class MemoryEngineStatsMixin:
                 await cursor.fetchall()
                 await cursor.close()
             await connection.execute("VACUUM")
+        finally:
+            await connection.close()
         after_db = db_path.stat().st_size
         after_wal = wal_path.stat().st_size if wal_path.is_file() else 0
         return {

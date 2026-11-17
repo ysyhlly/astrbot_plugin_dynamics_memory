@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
 
+from ...storage.sqlite_connection import open_connection
 from ..memory_scope import infer_adapter_id
 from ..utils.json_utils import safe_json_dict
 
@@ -20,9 +22,17 @@ class AdapterMigrator:
         self.graph_path = Path(graph_path) if graph_path else None
         self.instances = instances or {}
 
+    @asynccontextmanager
+    async def _open_db(self, db_path: Path):
+        db = await open_connection(str(db_path))
+        try:
+            yield db
+        finally:
+            await db.close()
+
     async def migrate(self):
         """Backfill once at startup, retaining unknown and mixed source records."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(self.db_path) as db:
             done = await (
                 await db.execute(
                     "SELECT value FROM migration_status WHERE key = 'adapter_ownership_v1'"
@@ -74,11 +84,11 @@ class AdapterMigrator:
 
     async def survey(self):
         """List ownership and original scopes for explicit legacy assignment."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(self.db_path) as db:
             rows = await (
                 await db.execute(
-                    "SELECT json_extract(metadata, '$.adapter_id'), "
-                    "CASE WHEN json_extract(metadata, '$.adapter_id') IS NULL THEN json_extract(metadata, '$.session_id') END, COUNT(*) "
+                    "SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.adapter_id') END, "
+                    "CASE WHEN json_valid(metadata) AND json_extract(metadata, '$.adapter_id') IS NULL THEN json_extract(metadata, '$.session_id') END, COUNT(*) "
                     "FROM documents GROUP BY 1, 2 ORDER BY 1, 2"
                 )
             ).fetchall()
@@ -98,7 +108,7 @@ class AdapterMigrator:
         """
         backup_dir = None
         graph_exists = self.graph_path is not None and self.graph_path.exists()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(self.db_path) as db:
             if assignments:
                 backup_dir = (
                     self.db_path.parent
@@ -109,76 +119,89 @@ class AdapterMigrator:
                     )
                 )
                 backup_dir.mkdir(parents=True)
-                async with aiosqlite.connect(
-                    backup_dir / self.db_path.name
-                ) as snapshot:
+                async with self._open_db(backup_dir / self.db_path.name) as snapshot:
                     await db.backup(snapshot)
                 if graph_exists:
-                    async with aiosqlite.connect(self.graph_path) as graph:
-                        async with aiosqlite.connect(
+                    async with self._open_db(self.graph_path) as graph:
+                        async with self._open_db(
                             backup_dir / self.graph_path.name
                         ) as snapshot:
                             await graph.backup(snapshot)
+            attached_graph = False
             if graph_exists:
                 await db.execute(
                     "ATTACH DATABASE ? AS adapter_graph", (str(self.graph_path),)
                 )
-            tables = {
-                row[0]
-                for row in await (
-                    await db.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    )
-                ).fetchall()
-            }
-            await db.execute("BEGIN IMMEDIATE")
-            updated = 0
+                attached_graph = True
             try:
-                updates = [
-                    (adapter_id, memory_id)
-                    for memory_id, adapter_id in assignments.items()
-                ]
-                cursor = await db.executemany(
-                    "UPDATE documents SET metadata = json_set(metadata, '$.adapter_id', ?) WHERE id = ?",
-                    updates,
-                )
-                updated = cursor.rowcount
-                for table, parent in (
-                    ("memory_atoms", "parent_memory_id"),
-                    ("graph_entries", "source_memory_id"),
-                ):
-                    if table in tables:
-                        await db.executemany(
-                            f"UPDATE {table} SET metadata = json_set(COALESCE(metadata, '{{}}'), '$.adapter_id', ?) WHERE {parent} = ?",
-                            updates,
+                tables = {
+                    row[0]
+                    for row in await (
+                        await db.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
                         )
-                if graph_exists:
-                    await db.execute(
-                        "CREATE INDEX IF NOT EXISTS adapter_graph.idx_graph_adapter ON documents(json_extract(metadata, '$.adapter_id'))"
-                    )
-                    await db.execute(
-                        "CREATE INDEX IF NOT EXISTS adapter_graph.idx_graph_parent ON documents(CAST(json_extract(metadata, '$.source_memory_id') AS INTEGER))"
-                    )
-                    await db.executemany(
-                        "UPDATE adapter_graph.documents SET metadata = json_set(metadata, '$.adapter_id', ?) "
-                        "WHERE CAST(json_extract(metadata, '$.source_memory_id') AS INTEGER) = ?",
+                    ).fetchall()
+                }
+                await db.execute("BEGIN IMMEDIATE")
+                updated = 0
+                try:
+                    updates = [
+                        (adapter_id, memory_id)
+                        for memory_id, adapter_id in assignments.items()
+                    ]
+                    cursor = await db.executemany(
+                        "UPDATE documents SET metadata = json_set("
+                        "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, "
+                        "'$.adapter_id', ?) WHERE id = ?",
                         updates,
                     )
-                await db.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_doc_adapter ON documents(json_extract(metadata, '$.adapter_id'))"
-                )
-                if mark_migrated:
+                    updated = cursor.rowcount
+                    for table, parent in (
+                        ("memory_atoms", "parent_memory_id"),
+                        ("graph_entries", "source_memory_id"),
+                    ):
+                        if table in tables:
+                            await db.executemany(
+                                f"UPDATE {table} SET metadata = json_set("
+                                "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, "
+                                f"'$.adapter_id', ?) WHERE {parent} = ?",
+                                updates,
+                            )
+                    if graph_exists:
+                        await db.execute(
+                            "CREATE INDEX IF NOT EXISTS adapter_graph.idx_graph_adapter ON documents(json_extract(metadata, '$.adapter_id'))"
+                        )
+                        await db.execute(
+                            "CREATE INDEX IF NOT EXISTS adapter_graph.idx_graph_parent ON documents(CAST(json_extract(metadata, '$.source_memory_id') AS INTEGER))"
+                        )
+                        await db.executemany(
+                            "UPDATE adapter_graph.documents SET metadata = json_set("
+                            "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, "
+                            "'$.adapter_id', ?) "
+                            "WHERE json_valid(metadata) AND CAST(json_extract(metadata, '$.source_memory_id') AS INTEGER) = ?",
+                            updates,
+                        )
                     await db.execute(
-                        "INSERT INTO migration_status(key, value, updated_at) VALUES ('adapter_ownership_v1', '1', datetime('now'))"
+                        "CREATE INDEX IF NOT EXISTS idx_doc_adapter ON documents(json_extract(metadata, '$.adapter_id'))"
                     )
-                if mark_graph:
-                    await db.execute(
-                        "INSERT INTO migration_status(key, value, updated_at) VALUES ('adapter_graph_ownership_v1', '1', datetime('now'))"
-                    )
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
+                    if mark_migrated:
+                        await db.execute(
+                            "INSERT INTO migration_status(key, value, updated_at) VALUES ('adapter_ownership_v1', '1', datetime('now'))"
+                        )
+                    if mark_graph:
+                        await db.execute(
+                            "INSERT INTO migration_status(key, value, updated_at) VALUES ('adapter_graph_ownership_v1', '1', datetime('now'))"
+                        )
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+            finally:
+                if attached_graph:
+                    try:
+                        await db.execute("DETACH DATABASE adapter_graph")
+                    except aiosqlite.Error:
+                        pass
         return {
             "updated": updated,
             "backup_path": str(backup_dir) if backup_dir else None,

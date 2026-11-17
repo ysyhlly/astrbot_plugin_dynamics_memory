@@ -161,13 +161,9 @@ async def test_forget_tool_rejects_invalid_memory_ids(memory_ids):
 @pytest.mark.asyncio
 async def test_forget_tool_rejects_too_many_ids():
     engine = _make_engine({index: _memory(index) for index in range(1, 5)})
-    tool = _tool(
-        engine, config=_config(agent_tools={"forget_tool_max_memories": 3})
-    )
+    tool = _tool(engine, config=_config(agent_tools={"forget_tool_max_memories": 3}))
 
-    result = json.loads(
-        await tool.call(_make_run_context(), memory_ids=[1, 2, 3, 4])
-    )
+    result = json.loads(await tool.call(_make_run_context(), memory_ids=[1, 2, 3, 4]))
 
     assert result == {
         "forgotten": False,
@@ -198,9 +194,7 @@ async def test_forget_tool_rejects_scope_mismatch_all_or_nothing(
     engine = _make_engine(memories)
     tool = _tool(engine)
 
-    result = json.loads(
-        await tool.call(_make_run_context(), memory_ids=memory_ids)
-    )
+    result = json.loads(await tool.call(_make_run_context(), memory_ids=memory_ids))
 
     assert result["forgotten"] is False
     assert result["invalid_ids"] == invalid_ids

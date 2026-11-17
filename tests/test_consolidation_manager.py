@@ -8,7 +8,9 @@ from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManage
 from astrbot_plugin_dynamics_memory.core.managers.consolidation_manager import (
     MemoryConsolidationManager,
 )
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 
 
 def _make_cfg(**overrides) -> ConfigManager:

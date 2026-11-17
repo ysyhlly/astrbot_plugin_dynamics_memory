@@ -89,7 +89,9 @@ class TestTimeBudget:
         assert budget.remaining_seconds == pytest.approx(0.8)
 
     def test_time_exhausted_flag(self):
-        budget = RecallBudget(max_calls=4, time_budget_seconds=0.5, max_result_chars=100)
+        budget = RecallBudget(
+            max_calls=4, time_budget_seconds=0.5, max_result_chars=100
+        )
         assert not budget.time_exhausted
         charge_elapsed(budget, 0.6)
         assert budget.time_exhausted
@@ -113,7 +115,9 @@ class TestTimeBudget:
 
     @pytest.mark.asyncio
     async def test_run_within_budget_timeout_cancels_work(self):
-        budget = RecallBudget(max_calls=4, time_budget_seconds=0.05, max_result_chars=100)
+        budget = RecallBudget(
+            max_calls=4, time_budget_seconds=0.05, max_result_chars=100
+        )
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
@@ -150,7 +154,9 @@ class TestTimeBudget:
 
     @pytest.mark.asyncio
     async def test_run_within_budget_zero_remaining(self):
-        budget = RecallBudget(max_calls=4, time_budget_seconds=0.1, max_result_chars=100)
+        budget = RecallBudget(
+            max_calls=4, time_budget_seconds=0.1, max_result_chars=100
+        )
         charge_elapsed(budget, 1.0)
         created = False
 

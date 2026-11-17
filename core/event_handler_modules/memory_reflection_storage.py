@@ -1,22 +1,15 @@
 """记忆反思的后台存储任务：LLM 总结、游标提交、回滚补偿与修订号校验。"""
 
 import inspect
-import json
 import time
-import secrets
-from collections import OrderedDict
-import math
-from dataclasses import dataclass
-from datetime import datetime
-from typing import TYPE_CHECKING
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.platform import MessageType
-from astrbot.api.provider import LLMResponse
-from ..memory_scope import classify_umo, is_event_memory_allowed, is_suspicious_session_id, resolve_memory_write_scope
+from ..memory_scope import classify_umo
 from ..memory_source import build_source_row_refs_v1, summary_window_fingerprint
-from ...storage.conversation_summary_progress import SUMMARY_COOLDOWN_SECONDS, SUMMARY_RETRY_LIMIT, TERMINAL_SUMMARY_STAGES
+from ...storage.conversation_summary_progress import (
+    SUMMARY_COOLDOWN_SECONDS,
+    SUMMARY_RETRY_LIMIT,
+    TERMINAL_SUMMARY_STAGES,
+)
 from ..models.conversation_models import Message
-from ..utils import get_persona_id
 
 
 import asyncio
@@ -46,7 +39,8 @@ class MemoryReflectionStorageMixin:
         importance: float,
         atoms: list,
         source_messages: list[dict[str, Any]] | None,
-        source_validator=None, source_publish_lease=None,
+        source_validator=None,
+        source_publish_lease=None,
     ) -> tuple[int | None, bool, float | None]:
         """Store a summary memory, merging into a near-duplicate when configured.
 
@@ -108,7 +102,8 @@ class MemoryReflectionStorageMixin:
                     )
                     if duplicate is not None:
                         merge = (
-                            engine.merge_duplicate_memory if source_validator is None
+                            engine.merge_duplicate_memory
+                            if source_validator is None
                             else engine.merge_guarded_summary_memory
                         )
                         merged_id = await merge(
@@ -118,12 +113,16 @@ class MemoryReflectionStorageMixin:
                             metadata=metadata,
                             atoms=atoms,
                             source_messages=source_messages,
-                            **({
-                                "source_validator": source_validator,
-                                "source_publish_lease": source_publish_lease,
-                                "session_id": memory_scope,
-                                "persona_id": persona_id,
-                            } if source_validator is not None else {}),
+                            **(
+                                {
+                                    "source_validator": source_validator,
+                                    "source_publish_lease": source_publish_lease,
+                                    "session_id": memory_scope,
+                                    "persona_id": persona_id,
+                                }
+                                if source_validator is not None
+                                else {}
+                            ),
                         )
                         if type(merged_id) is int and merged_id > 0:
                             return (
@@ -150,10 +149,15 @@ class MemoryReflectionStorageMixin:
                 atoms=atoms,
                 source_messages=source_messages,
                 embedding=embedding,
-                **({
-                    "source_validator": source_validator, "source_publish_lease": source_publish_lease,
-                    "source_session_id": session_id,
-                } if source_validator is not None else {}),
+                **(
+                    {
+                        "source_validator": source_validator,
+                        "source_publish_lease": source_publish_lease,
+                        "source_session_id": session_id,
+                    }
+                    if source_validator is not None
+                    else {}
+                ),
             )
             return memory_id, True, None
 
@@ -179,7 +183,11 @@ class MemoryReflectionStorageMixin:
         return current is not None and current == expected_revision
 
     async def _compensate_rolled_back_memory(
-        self, session_id: str, memory_id: int, *, merged_snapshot: str | None = None,
+        self,
+        session_id: str,
+        memory_id: int,
+        *,
+        merged_snapshot: str | None = None,
     ) -> None:
         """回滚后补偿删除刚落库的记忆（关闭"校验通过 -> 写入完成"之间的窗口）。
 
@@ -199,7 +207,8 @@ class MemoryReflectionStorageMixin:
                     removed = await self.memory_engine.delete_memory(memory_id)
                 else:
                     removed = await self.memory_engine.rollback_guarded_summary_merge(
-                        memory_id, merged_snapshot,
+                        memory_id,
+                        merged_snapshot,
                     )
             except Exception as exc:
                 logger.error(
@@ -237,7 +246,10 @@ class MemoryReflectionStorageMixin:
         if not history_messages:
             return False
         window_last_message = history_messages[-1]
-        if type(getattr(window_last_message, "id", None)) is not int or window_last_message.id <= 0:
+        if (
+            type(getattr(window_last_message, "id", None)) is not int
+            or window_last_message.id <= 0
+        ):
             return False
         window_fingerprint = summary_window_fingerprint(history_messages)
         window_messages = history_messages
@@ -256,17 +268,30 @@ class MemoryReflectionStorageMixin:
         async def commit_progress():
             if managed_scope:
                 return await self.conversation_manager.write_managed_summary_progress(
-                    session_id, window_messages, None, expected_revision, retry_refused=retry_refused,
+                    session_id,
+                    window_messages,
+                    None,
+                    expected_revision,
+                    retry_refused=retry_refused,
                 )
             return await self.conversation_manager.commit_summary_cursor(
-                session_id, window_last_message, expected_revision, window_messages=window_messages,
+                session_id,
+                window_last_message,
+                expected_revision,
+                window_messages=window_messages,
             )
 
         async def record_failure(*, failure_stage="model", error_code=None):
             return await self._record_pending_summary(
-                session_id, start_index, end_index, retry_count, expected_revision,
-                failure_stage=failure_stage, error_code=error_code,
-                window_messages=window_messages, retry_refused=retry_refused,
+                session_id,
+                start_index,
+                end_index,
+                retry_count,
+                expected_revision,
+                failure_stage=failure_stage,
+                error_code=error_code,
+                window_messages=window_messages,
+                retry_refused=retry_refused,
             )
 
         # 记忆 id 在 try 外初始化：取消可能发生在赋值之前，异常分支需要它
@@ -293,12 +318,19 @@ class MemoryReflectionStorageMixin:
                     return
                 if not await self._revision_still_valid(session_id, expected_revision):
                     return False
-                finder=getattr(self.memory_engine,'stored_summary_window',None)
+                finder = getattr(self.memory_engine, "stored_summary_window", None)
                 if inspect.iscoroutinefunction(finder):
-                    existing=await finder(session_id,start_index,end_index,snapshot_fingerprint=window_fingerprint)
+                    existing = await finder(
+                        session_id,
+                        start_index,
+                        end_index,
+                        snapshot_fingerprint=window_fingerprint,
+                    )
                     if type(existing) is int and existing > 0:
                         committed = await commit_progress()
-                        logger.info('Summary snapshot already stored; reused without another API call')
+                        logger.info(
+                            "Summary snapshot already stored; reused without another API call"
+                        )
                         return committed
 
                 # A previously generated assistant row is eligible only while
@@ -309,10 +341,15 @@ class MemoryReflectionStorageMixin:
                 history_messages = self._eligible_reflection_messages(history_messages)
                 if not history_messages:
                     return False if managed_scope else await commit_progress()
-                if (not await self._history_rows_current(session_id, history_messages)
-                        or not await self._owned_source_lineages_current(history_messages)):
-                    logger.warning("[LMReflection] route=source_revalidate outcome=skip")
-                    await record_failure(failure_stage="source_unavailable", error_code="source_changed")
+                if not await self._history_rows_current(
+                    session_id, history_messages
+                ) or not await self._owned_source_lineages_current(history_messages):
+                    logger.warning(
+                        "[LMReflection] route=source_revalidate outcome=skip"
+                    )
+                    await record_failure(
+                        failure_stage="source_unavailable", error_code="source_changed"
+                    )
                     return
 
                 # 判断是否为群聊
@@ -351,7 +388,9 @@ class MemoryReflectionStorageMixin:
                         and pending.get("end_index") == end_index
                         and pending.get("error_code") == "summary_generic_reference"
                     ):
-                        quality_options["quality_feedback"] = "summary_generic_reference"
+                        quality_options["quality_feedback"] = (
+                            "summary_generic_reference"
+                        )
                     (
                         content,
                         metadata,
@@ -402,10 +441,12 @@ class MemoryReflectionStorageMixin:
                         # Preserve evidence types through compression. A model
                         # summary remains an interpretation, never a new fact.
                         metadata["narrative_provenance"] = [
-                            {"source_id": message.metadata.get("source_event_id"),
-                             "scope": message.metadata.get("scope"),
-                             "fact_kind": message.metadata.get("fact_kind"),
-                             "occurred_at": message.timestamp}
+                            {
+                                "source_id": message.metadata.get("source_event_id"),
+                                "scope": message.metadata.get("scope"),
+                                "fact_kind": message.metadata.get("fact_kind"),
+                                "occurred_at": message.timestamp,
+                            }
                             for message in history_messages
                         ]
                         metadata["fact_kind"] = "subjective"
@@ -445,12 +486,18 @@ class MemoryReflectionStorageMixin:
                         exc_info=True,
                     )
                     from ..utils.api_failure import terminal_provider_failure
+
                     terminal_code = terminal_provider_failure(e)
                     recorded = await record_failure(
-                        failure_stage='provider_terminal' if terminal_code else 'model',
+                        failure_stage="provider_terminal" if terminal_code else "model",
                         error_code=terminal_code or type(e).__name__,
                     )
-                    if managed_scope and terminal_code and recorded and not retry_refused:
+                    if (
+                        managed_scope
+                        and terminal_code
+                        and recorded
+                        and not retry_refused
+                    ):
                         return MANAGED_WINDOW_REFUSED
                     return False
 
@@ -470,12 +517,18 @@ class MemoryReflectionStorageMixin:
                     # changed. Re-read each exact stored row immediately before
                     # committing derived memory; missing or changed input cannot
                     # be replaced by prompt text or a new timestamp.
-                    if (not await self._history_rows_current(session_id, history_messages)
-                            or not await self._owned_source_lineages_current(history_messages)):
+                    if not await self._history_rows_current(
+                        session_id, history_messages
+                    ) or not await self._owned_source_lineages_current(
+                        history_messages
+                    ):
                         logger.warning(
                             "[LMReflection] route=source_revalidate outcome=skip"
                         )
-                        await record_failure(failure_stage="source_unavailable", error_code="source_changed")
+                        await record_failure(
+                            failure_stage="source_unavailable",
+                            error_code="source_changed",
+                        )
                         return
                     source_threshold = float(
                         self.config_manager.get(
@@ -485,25 +538,42 @@ class MemoryReflectionStorageMixin:
                     )
                     source_messages = (
                         serialize_source_messages(history_messages)
-                        if importance >= source_threshold or session_id.startswith("narrative:v1:")
+                        if importance >= source_threshold
+                        or session_id.startswith("narrative:v1:")
                         else None
                     )
+
                     async def source_snapshot_current_at_commit():
                         # The cursor covers every stored row in the window.
                         # Only messages sent to the model require live lineage.
-                        if (not await self._revision_still_valid(session_id, expected_revision)
-                                or not await self._history_rows_current(session_id, window_messages)):
+                        if not await self._revision_still_valid(
+                            session_id, expected_revision
+                        ) or not await self._history_rows_current(
+                            session_id, window_messages
+                        ):
                             return False
                         if not managed_scope:
                             store = self.conversation_manager.store
                             session = await store.get_session(session_id)
-                            if session is None or await store.native_summary_window_start(
-                                session_id, window_messages, session.metadata,
-                            ) is None:
+                            if (
+                                session is None
+                                or await store.native_summary_window_start(
+                                    session_id,
+                                    window_messages,
+                                    session.metadata,
+                                )
+                                is None
+                            ):
                                 return False
-                        return await self._owned_source_lineages_current(history_messages)
+                        return await self._owned_source_lineages_current(
+                            history_messages
+                        )
 
-                    memory_id, memory_created, dedup_similarity = await self._persist_summary_memory(
+                    (
+                        memory_id,
+                        memory_created,
+                        dedup_similarity,
+                    ) = await self._persist_summary_memory(
                         session_id=session_id,
                         memory_scope=memory_scope,
                         persona_id=persona_id,
@@ -513,8 +583,11 @@ class MemoryReflectionStorageMixin:
                         atoms=atoms,
                         source_messages=source_messages,
                         source_validator=source_snapshot_current_at_commit,
-                        source_publish_lease=lambda: self.conversation_manager.source_publication_lease(
-                            source_snapshot_current_at_commit, session_id=session_id,
+                        source_publish_lease=lambda: (
+                            self.conversation_manager.source_publication_lease(
+                                source_snapshot_current_at_commit,
+                                session_id=session_id,
+                            )
                         ),
                     )
                     if memory_id is not None and not memory_created:
@@ -530,7 +603,9 @@ class MemoryReflectionStorageMixin:
                 # 成功：更新已总结的位置，清除待处理记录（原子校验修订号，
                 # 避免把游标写回回滚前的旧位置）
                 if self.conversation_manager is None or memory_id is None:
-                    await record_failure(failure_stage="storage", error_code="no_memory_receipt")
+                    await record_failure(
+                        failure_stage="storage", error_code="no_memory_receipt"
+                    )
                     return False
 
                 try:
@@ -542,8 +617,13 @@ class MemoryReflectionStorageMixin:
                         return True
                     if memory_id is not None:
                         await self._compensate_rolled_back_memory(
-                            session_id, memory_id,
-                            **({} if memory_created else {"merged_snapshot": window_fingerprint}),
+                            session_id,
+                            memory_id,
+                            **(
+                                {}
+                                if memory_created
+                                else {"merged_snapshot": window_fingerprint}
+                            ),
                         )
                     return False
                 except Exception as meta_err:
@@ -570,22 +650,36 @@ class MemoryReflectionStorageMixin:
                 # A valid publication survives ordinary task cancellation.
                 # Keep its snapshot for restart, or compensate if the source
                 # was revoked between publication and the progress commit.
-                published_id = memory_id or getattr(cancellation, "published_memory_id", None)
-                if published_id is not None and not await self._revision_still_valid(session_id, expected_revision):
-                    was_merge = not memory_created if memory_id is not None else bool(
-                        getattr(cancellation, "published_as_merge", False)
+                published_id = memory_id or getattr(
+                    cancellation, "published_memory_id", None
+                )
+                if published_id is not None and not await self._revision_still_valid(
+                    session_id, expected_revision
+                ):
+                    was_merge = (
+                        not memory_created
+                        if memory_id is not None
+                        else bool(getattr(cancellation, "published_as_merge", False))
                     )
                     await asyncio.shield(
                         self._compensate_rolled_back_memory(
-                            session_id, published_id,
-                            **({"merged_snapshot": window_fingerprint} if was_merge else {}),
+                            session_id,
+                            published_id,
+                            **(
+                                {"merged_snapshot": window_fingerprint}
+                                if was_merge
+                                else {}
+                            ),
                         )
                     )
                 raise
             except Exception as e:
                 logger.error(f"[{session_id}] 存储记忆失败: {e}", exc_info=True)
                 await record_failure(
-                    failure_stage='storage', error_code='sqlite_busy' if 'database is locked' in str(e).lower() else type(e).__name__
+                    failure_stage="storage",
+                    error_code="sqlite_busy"
+                    if "database is locked" in str(e).lower()
+                    else type(e).__name__,
                 )
                 return False
 
@@ -596,8 +690,11 @@ class MemoryReflectionStorageMixin:
         end_index: int,
         current_retry_count: int,
         expected_revision: int | None = None,
-        *, failure_stage: str = 'model', error_code: str | None = None,
-        window_messages: list[Message], retry_refused: bool = False,
+        *,
+        failure_stage: str = "model",
+        error_code: str | None = None,
+        window_messages: list[Message],
+        retry_refused: bool = False,
     ):
         """记录待处理的失败总结信息（回滚后不得复活旧范围）。"""
         if not self.conversation_manager:
@@ -612,7 +709,11 @@ class MemoryReflectionStorageMixin:
             "error_code": error_code,
         }
         managed_scope = session_id.startswith("narrative:v1:")
-        if managed_scope and not retry_refused and failure_stage not in TERMINAL_SUMMARY_STAGES:
+        if (
+            managed_scope
+            and not retry_refused
+            and failure_stage not in TERMINAL_SUMMARY_STAGES
+        ):
             pending_summary["recovery_after"] = time.time() + 60
         if failure_stage == "retry_exhausted" or (
             new_retry_count >= SUMMARY_RETRY_LIMIT
@@ -632,11 +733,18 @@ class MemoryReflectionStorageMixin:
 
         if managed_scope:
             committed = await self.conversation_manager.write_managed_summary_progress(
-                session_id, window_messages, pending_summary, expected_revision, retry_refused=retry_refused,
+                session_id,
+                window_messages,
+                pending_summary,
+                expected_revision,
+                retry_refused=retry_refused,
             )
         else:
             committed = await self.conversation_manager.write_native_pending_summary(
-                session_id, window_messages, pending_summary, expected_revision,
+                session_id,
+                window_messages,
+                pending_summary,
+                expected_revision,
             )
         if not committed:
             # 会话已被回滚/清空：该范围的消息已不存在，记录待重试会造成

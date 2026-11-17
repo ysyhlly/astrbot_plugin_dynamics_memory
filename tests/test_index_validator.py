@@ -12,7 +12,9 @@ import faiss
 import numpy as np
 import pytest
 
-from astrbot_plugin_dynamics_memory.core.validators.index_maintenance import IndexValidator
+from astrbot_plugin_dynamics_memory.core.validators.index_maintenance import (
+    IndexValidator,
+)
 
 
 class _DummyTextProcessor:

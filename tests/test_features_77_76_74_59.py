@@ -20,8 +20,12 @@ from astrbot_plugin_dynamics_memory.core.managers.conversation_manager import (
 )
 from astrbot_plugin_dynamics_memory.core.base.exceptions import LowQualityMemoryError
 from astrbot_plugin_dynamics_memory.core.models.conversation_models import Message
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorRetriever
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
+    VectorRetriever,
+)
 from astrbot_plugin_dynamics_memory.storage.conversation_store import ConversationStore
 
 from astrbot.api.platform import MessageType

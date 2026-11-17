@@ -273,7 +273,9 @@ class GraphVectorRetriever:
             raise RuntimeError("graph FAISS index does not expose an ID map")
         return {int(value) for value in faiss.vector_to_array(id_map)}
 
-    async def get_index_document_inventory(self) -> tuple[list[dict[str, Any]], set[int]]:
+    async def get_index_document_inventory(
+        self,
+    ) -> tuple[list[dict[str, Any]], set[int]]:
         """Return local document metadata and current indexed IDs for a dry-run.
 
         Document text remains in memory only so the maintenance planner can
@@ -282,7 +284,9 @@ class GraphVectorRetriever:
         document_storage = getattr(self.faiss_db, "document_storage", None)
         get_documents = getattr(document_storage, "get_documents", None)
         if not callable(get_documents):
-            raise RuntimeError("graph document storage cannot enumerate local documents")
+            raise RuntimeError(
+                "graph document storage cannot enumerate local documents"
+            )
         documents = await get_documents(
             metadata_filters={},
             ids=None,
@@ -291,7 +295,9 @@ class GraphVectorRetriever:
         )
         return list(documents), self._indexed_ids()
 
-    async def get_documents_by_ids(self, document_ids: list[int]) -> list[dict[str, Any]]:
+    async def get_documents_by_ids(
+        self, document_ids: list[int]
+    ) -> list[dict[str, Any]]:
         """Read selected local graph-document rows without exposing their text."""
         if not document_ids:
             return []
@@ -308,7 +314,9 @@ class GraphVectorRetriever:
             )
         )
 
-    async def delete_vector_ids_atomically(self, document_ids: list[int]) -> tuple[int, ...]:
+    async def delete_vector_ids_atomically(
+        self, document_ids: list[int]
+    ) -> tuple[int, ...]:
         """Remove vector IDs while preserving graph-document rows.
 
         This uses the existing index persister's mutation lock and atomic file
@@ -341,9 +349,7 @@ class GraphVectorRetriever:
             old_index = faiss.clone_index(embedding_storage.index)
             cancellation_requested = False
             try:
-                embedding_storage.index.remove_ids(
-                    np.asarray(pending, dtype=np.int64)
-                )
+                embedding_storage.index.remove_ids(np.asarray(pending, dtype=np.int64))
                 writer = asyncio.create_task(
                     asyncio.to_thread(
                         _write_index_atomic,

@@ -43,9 +43,6 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.passive_group_capture import (
-    SESSION_PLUGIN_NAMES as _SESSION_PLUGIN_NAMES,
-)
-from ..core.passive_group_capture import (
     get_active_plugin as _get_active_plugin_impl,
 )
 
@@ -73,7 +70,11 @@ __all__ = [
 ]
 
 #: 插件注册身份的唯一真源。消费方不要再各自硬编码别名元组。
-ALIASES: tuple[str, ...] = ("astrbot_plugin_dynamics_memory", "DynamicsMemory", "群间记忆")
+ALIASES: tuple[str, ...] = (
+    "astrbot_plugin_dynamics_memory",
+    "DynamicsMemory",
+    "群间记忆",
+)
 
 #: 本门面契约版本。破坏性变更时必须 +1。
 API_VERSION: int = 1
@@ -214,6 +215,8 @@ def _find_plugin_via_context(context: Any) -> Any | None:
         stars = scanner() or []
     except Exception:
         return None
+    if isinstance(stars, dict):
+        stars = stars.values()
 
     wanted = {alias.casefold() for alias in ALIASES}
     for star in stars:
@@ -515,7 +518,10 @@ def require_engine(context: Any) -> Any:
         raise Unavailable(STAGE_NOT_READY)
     return engine
 
-async def record_activity_experience(context: Any, payload: dict[str, Any]) -> dict[str, Any]:
+
+async def record_activity_experience(
+    context: Any, payload: dict[str, Any]
+) -> dict[str, Any]:
     """向群间记忆写入经过核实的群间游戏协作活动经历（幂等）。"""
     plugin = find_plugin(context)
     if plugin is None:
@@ -524,4 +530,3 @@ async def record_activity_experience(context: Any, payload: dict[str, Any]) -> d
     if not callable(fn):
         return {"schema_version": 1, "recorded": False, "reason": "unsupported"}
     return await fn(payload)
-

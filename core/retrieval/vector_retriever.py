@@ -118,8 +118,12 @@ class VectorRetriever:
         return content[:head_chars] + _TRUNCATED_CONTENT_MARKER + content[-tail_chars:]
 
     async def add_document(
-        self, content: str, metadata: dict[str, Any] | None = None,
-        *, source_validator=None, embedding: list[float] | None = None,
+        self,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        source_validator=None,
+        embedding: list[float] | None = None,
     ) -> int:
         """
         添加文档到向量库
@@ -450,7 +454,6 @@ class VectorRetriever:
         for doc_id in deleted_ids:
             self._id_cache.pop(doc_id, None)
         return deleted_ids
-
 
     async def find_similar_pairs(
         self,

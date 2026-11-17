@@ -9,7 +9,9 @@ import pytest
 
 from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManager
 from astrbot_plugin_dynamics_memory.core.memory_scope import GLOBAL_MEMORY_SCOPE
-from astrbot_plugin_dynamics_memory.core.tools.memory_search_tool import MemorySearchTool
+from astrbot_plugin_dynamics_memory.core.tools.memory_search_tool import (
+    MemorySearchTool,
+)
 
 
 SESSION_ID = "test:private:session-1"
@@ -78,12 +80,15 @@ def _tool_seams(memory_engine):
     async def _valid():
         return True
 
-    with patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_active_plugin",
-        return_value=_fake_plugin(memory_engine),
-    ), patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.make_memory_source_validator",
-        return_value=_valid,
+    with (
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_active_plugin",
+            return_value=_fake_plugin(memory_engine),
+        ),
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.make_memory_source_validator",
+            return_value=_valid,
+        ),
     ):
         yield
 
@@ -310,10 +315,13 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
     )
     memory_engine.get_memory_source = AsyncMock()
 
-    with _tool_seams(memory_engine), patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
-        new_callable=AsyncMock,
-    ) as get_persona:
+    with (
+        _tool_seams(memory_engine),
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
+            new_callable=AsyncMock,
+        ) as get_persona,
+    ):
         get_persona.return_value = "persona_a"
         raw_result = await tool.call(_make_run_context(), query="游戏偏好")
 
@@ -378,20 +386,22 @@ async def test_memory_search_tool_includes_retained_source_on_request(
             "timestamp": 100.0,
         }
     )
-    with patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_active_plugin",
-        return_value=plugin,
-    ), patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.make_memory_source_validator",
-        return_value=AsyncMock(return_value=True),
-    ), patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
-        new=AsyncMock(return_value="persona_a"),
+    with (
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_active_plugin",
+            return_value=plugin,
+        ),
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.make_memory_source_validator",
+            return_value=AsyncMock(return_value=True),
+        ),
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
+            new=AsyncMock(return_value="persona_a"),
+        ),
     ):
         result = json.loads(
-            await tool.call(
-                _make_run_context(), query="details", include_source=True
-            )
+            await tool.call(_make_run_context(), query="details", include_source=True)
         )
 
     assert result["results"][0]["source_messages"][0]["content"] == "exact detail"
@@ -420,10 +430,13 @@ async def test_memory_search_tool_serializes_non_dict_metadata(
         ]
     )
 
-    with _tool_seams(memory_engine), patch(
-        "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
-        new_callable=AsyncMock,
-    ) as get_persona:
+    with (
+        _tool_seams(memory_engine),
+        patch(
+            "astrbot_plugin_dynamics_memory.core.tools.memory_search_tool.get_persona_id",
+            new_callable=AsyncMock,
+        ) as get_persona,
+    ):
         get_persona.return_value = "persona_a"
         raw_result = await tool.call(_make_run_context(), query="摄影")
 
@@ -560,7 +573,11 @@ async def test_memory_search_tool_returns_not_initialized_error(memory_engine):
     assert result["count"] == 0
     assert result["results"] == []
     assert result["error"] == "memory search tool is not initialized"
-    assert set(result["diagnostics"]) == {"elapsed_ms", "route_states", "inflight_count"}
+    assert set(result["diagnostics"]) == {
+        "elapsed_ms",
+        "route_states",
+        "inflight_count",
+    }
     memory_engine.search_memories.assert_not_called()
 
 

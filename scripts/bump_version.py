@@ -70,8 +70,13 @@ def main() -> None:
         count = replace_in_file(path, pattern, replacement, flags)
         if count:
             changed.append(f"{path.relative_to(ROOT).as_posix()} ({count} 处)")
-        elif path.name == "backup_manager.py" and "_read_plugin_version()" in path.read_text("utf-8"):
-            changed.append(f"{path.relative_to(ROOT).as_posix()} (动态读取 metadata.yaml)")
+        elif (
+            path.name == "backup_manager.py"
+            and "_read_plugin_version()" in path.read_text("utf-8")
+        ):
+            changed.append(
+                f"{path.relative_to(ROOT).as_posix()} (动态读取 metadata.yaml)"
+            )
         else:
             raise SystemExit(f"未在 {path.relative_to(ROOT)} 找到版本号 {old}")
 

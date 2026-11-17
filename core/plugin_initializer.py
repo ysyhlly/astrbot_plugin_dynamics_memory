@@ -3,11 +3,8 @@
 负责插件的初始化逻辑
 """
 
-from .plugin_initializer_finalize import InitializerFinalizeMixin
-import inspect
-
-
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from typing import Any
@@ -18,7 +15,7 @@ from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
-from ..storage.sqlite_connection import resolve_journal_mode
+from ..storage.sqlite_connection import open_connection, resolve_journal_mode
 from .astrbot_compat import get_using_provider
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
@@ -672,7 +669,9 @@ class PluginInitializer(InitializerFaissMixin):
             self.context,
             llm_provider=llm_id if llm_id else None,
             config={
-                **self._build_memory_processor_config(self._build_memory_engine_config(storage)),
+                **self._build_memory_processor_config(
+                    self._build_memory_engine_config(storage)
+                ),
                 "atom_enabled": self.config_manager.get(
                     "graph_memory.atom_enabled", True
                 ),
@@ -784,11 +783,15 @@ class PluginInitializer(InitializerFaissMixin):
     async def _restore_db_backup(self, backup_path: str) -> bool:
         """用迁移前备份覆盖当前数据库（SQLite backup API，兼容已打开的连接）。"""
         try:
-            import aiosqlite
-
-            async with aiosqlite.connect(backup_path) as source:
-                async with aiosqlite.connect(self.db_migration.db_path) as dest:
+            source = await open_connection(backup_path)
+            try:
+                dest = await open_connection(self.db_migration.db_path)
+                try:
                     await source.backup(dest)
+                finally:
+                    await dest.close()
+            finally:
+                await source.close()
             logger.warning(f"已从迁移前备份恢复数据库: {backup_path}")
             return True
         except Exception as e:
@@ -1047,7 +1050,9 @@ class PluginInitializer(InitializerFaissMixin):
                 logger.warning("关闭 FaissVecDB 失败", exc_info=True)
             self.db = None
 
-    def _build_memory_processor_config(self, memory_engine_config: dict[str, Any]) -> dict[str, Any]:
+    def _build_memory_processor_config(
+        self, memory_engine_config: dict[str, Any]
+    ) -> dict[str, Any]:
         return {
             "atom_enabled": memory_engine_config["atom_enabled"],
             "background_llm_provider_id": self.config_manager.get(

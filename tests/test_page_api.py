@@ -1954,7 +1954,9 @@ class TestConsolidationHandler:
         from astrbot_plugin_dynamics_memory.core.page_api_modules.consolidation_handler import (
             ConsolidationHandler,
         )
-        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import PageApiUtils
+        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import (
+            PageApiUtils,
+        )
 
         handler = ConsolidationHandler(PageApiUtils())
         manager = AsyncMock()
@@ -1971,7 +1973,9 @@ class TestConsolidationHandler:
         from astrbot_plugin_dynamics_memory.core.page_api_modules.consolidation_handler import (
             ConsolidationHandler,
         )
-        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import PageApiUtils
+        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import (
+            PageApiUtils,
+        )
 
         handler = ConsolidationHandler(PageApiUtils())
         result = await handler.run(None)
@@ -1979,12 +1983,18 @@ class TestConsolidationHandler:
 
     @pytest.mark.asyncio
     async def test_get_status_returns_counts(self, tmp_path):
-        from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManager
-        from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
+        from astrbot_plugin_dynamics_memory.core.base.config_manager import (
+            ConfigManager,
+        )
+        from astrbot_plugin_dynamics_memory.core.managers.memory_engine import (
+            MemoryEngine,
+        )
         from astrbot_plugin_dynamics_memory.core.page_api_modules.consolidation_handler import (
             ConsolidationHandler,
         )
-        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import PageApiUtils
+        from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import (
+            PageApiUtils,
+        )
 
         db_path = str(tmp_path / "cons.db")
         engine = MemoryEngine.__new__(MemoryEngine)

@@ -49,9 +49,7 @@ def test_dashboard_supports_japanese_locale() -> None:
     ja_block = source.split("const MSG_JA = {", 1)[1].split("  };", 1)[0]
     msg_keys = set(re.findall(r'"([A-Za-z0-9_.]+)":\s*\{', msg_block))
     ja_keys = set(re.findall(r'"([A-Za-z0-9_.]+)":\s*"', ja_block))
-    ja_keys.update(
-        re.findall(r'"([A-Za-z0-9_.]+)":\s*\{[^\n]*\bja:\s*"', msg_block)
-    )
+    ja_keys.update(re.findall(r'"([A-Za-z0-9_.]+)":\s*\{[^\n]*\bja:\s*"', msg_block))
     assert ja_keys == msg_keys, "Japanese must cover all dashboard messages"
 
 

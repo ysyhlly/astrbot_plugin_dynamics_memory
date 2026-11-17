@@ -340,6 +340,7 @@ class MemoryReadScope:
     source_session_id: str | None = None
     read_only: bool = False
 
+
 @dataclass(frozen=True)
 class MemoryAccessPolicy:
     """Trusted event-derived read/write boundaries for one memory turn."""
@@ -349,6 +350,7 @@ class MemoryAccessPolicy:
     write_interaction_type: str
     write_visibility: str
     read_scopes: tuple[MemoryReadScope, ...]
+
 
 def classify_umo(umo: str | None) -> str:
     """Classify only explicit AstrBot message types; unknown origins fail closed."""
@@ -362,14 +364,17 @@ def classify_umo(umo: str | None) -> str:
         return "private"
     return "unknown"
 
+
 def _umo_platform(umo: str) -> str:
     return str(umo or "").split(":", 1)[0].strip().casefold()
+
 
 def _event_platform_identity(event: Any) -> str:
     platform_id = _event_value(event, "get_platform_id", "platform_id")
     if platform_id:
         return platform_id.casefold()
     return _event_value(event, "get_platform_name", "platform").casefold()
+
 
 def memory_metadata_matches_policy(
     metadata: Any,
@@ -381,7 +386,10 @@ def memory_metadata_matches_policy(
     """Fail closed on private, unknown, or cross-platform derived records."""
     if not isinstance(metadata, dict):
         return False
-    if interaction_type is not None and metadata.get("interaction_type") != interaction_type:
+    if (
+        interaction_type is not None
+        and metadata.get("interaction_type") != interaction_type
+    ):
         return False
     if (
         source_session_id is not None
@@ -407,6 +415,7 @@ def memory_metadata_matches_policy(
             return False
     return True
 
+
 def resolve_memory_access_policy(
     config: Any,
     event: Any,
@@ -423,9 +432,7 @@ def resolve_memory_access_policy(
     session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
     kind = classify_umo(session_id)
     share_enabled = bool(
-        _config_get(
-            config, "filtering_settings.enable_group_to_private_recall", False
-        )
+        _config_get(config, "filtering_settings.enable_group_to_private_recall", False)
     )
     write_scope = resolve_memory_write_scope(config, event)
     interaction_type = {
@@ -485,9 +492,7 @@ def resolve_memory_access_policy(
         if str(source).strip()
     }
     configured_instance = str(
-        _config_get(
-            config, "filtering_settings.private_shared_group_instance_id", ""
-        )
+        _config_get(config, "filtering_settings.private_shared_group_instance_id", "")
         or ""
     ).strip()
     if not persona_id or not configured_instance or persona_id != configured_instance:
@@ -518,17 +523,16 @@ def resolve_memory_access_policy(
         kind, write_scope, interaction_type, visibility, tuple(scopes)
     )
 
+
 def resolve_memory_write_scope(config: Any, event: Any) -> str:
     """Keep private writes session-local whenever one-way sharing is enabled."""
     session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
-    if (
-        classify_umo(session_id) == "private"
-        and _config_get(
-            config, "filtering_settings.enable_group_to_private_recall", False
-        )
+    if classify_umo(session_id) == "private" and _config_get(
+        config, "filtering_settings.enable_group_to_private_recall", False
     ):
         return session_id
     return resolve_memory_scope(config, event) or session_id
+
 
 async def resolve_verified_group_sessions(
     config: Any,
@@ -559,6 +563,9 @@ async def resolve_verified_group_sessions(
         ):
             continue
         session = await conversation_manager.get_session_info(source)
-        if session is not None and str(session.platform or "").casefold() == platform_name:
+        if (
+            session is not None
+            and str(session.platform or "").casefold() == platform_name
+        ):
             verified.append(source)
     return tuple(sorted(set(verified)))

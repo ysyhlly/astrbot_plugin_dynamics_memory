@@ -31,15 +31,18 @@ class GraphStoreReadMixin:
     # initialize() 之后按需探测：只有宿主 documents 表存在时才过滤 archived 记忆；
     # 独立图谱库（重建 shadow / 单元测试）没有该表，退化为不过滤。
     _documents_table_available: bool = False
+    _documents_status_index_available: bool = False
 
     async def _documents_table_exists(self, db: aiosqlite.Connection) -> bool:
         """Return whether the shared database carries the host ``documents`` table."""
         if getattr(self, "_documents_table_available", False):
             return True
         cursor = await db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents' LIMIT 1"
+            "SELECT name FROM sqlite_master WHERE name IN ('documents', 'idx_doc_status')"
         )
-        self._documents_table_available = await cursor.fetchone() is not None
+        names = {row[0] for row in await cursor.fetchall()}
+        self._documents_table_available = "documents" in names
+        self._documents_status_index_available = "idx_doc_status" in names
         return self._documents_table_available
 
     # Non-active sources in the host ``documents`` table. Malformed JSON counts
@@ -50,6 +53,18 @@ class GraphStoreReadMixin:
         "COALESCE(json_extract(d.metadata, '$.status'), 'active') "
         "ELSE 'active' END <> 'active'"
     )
+
+    # Indexed range OR uses idx_doc_status once documents table enforces json_valid.
+    _INDEXED_NON_ACTIVE_DOCUMENTS_SQL: str = (
+        "SELECT d.id FROM documents d WHERE "
+        "COALESCE(json_extract(d.metadata, '$.status'), 'active') < 'active' "
+        "OR COALESCE(json_extract(d.metadata, '$.status'), 'active') > 'active'"
+    )
+
+    def _non_active_documents_sql(self) -> str:
+        if getattr(self, "_documents_status_index_available", False):
+            return self._INDEXED_NON_ACTIVE_DOCUMENTS_SQL
+        return self._NON_ACTIVE_DOCUMENTS_SQL
 
     async def _archived_memory_exclusion(
         self, db: aiosqlite.Connection, column: str
@@ -71,7 +86,7 @@ class GraphStoreReadMixin:
         """
         if not await self._documents_table_exists(db):
             return None
-        return f"{column} NOT IN ({self._NON_ACTIVE_DOCUMENTS_SQL})"
+        return f"{column} NOT IN ({self._non_active_documents_sql()})"
 
     @staticmethod
     def _hub_penalty(degree: int) -> float:
@@ -312,7 +327,7 @@ class GraphStoreReadMixin:
                     "id NOT IN ("
                     "SELECT gen.node_id FROM graph_entry_nodes gen "
                     "JOIN graph_entries ge ON ge.id = gen.entry_id "
-                    f"WHERE ge.source_memory_id IN ({self._NON_ACTIVE_DOCUMENTS_SQL}))"
+                    f"WHERE ge.source_memory_id IN ({self._non_active_documents_sql()}))"
                 )
             node_filter = " AND ".join(node_filters) if node_filters else "1"
             for start in range(

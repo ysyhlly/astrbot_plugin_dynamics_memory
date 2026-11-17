@@ -415,38 +415,75 @@ async def test_summary_quality_accepts_non_anonymous_compounds(summary):
     [
         pytest.param(
             "先是有人在说天气，后来张三提到彩排。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="anonymous",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="anonymous",
         ),
         pytest.param(
             "我和张三确认，所有人参加彩排，有人迟到了。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="mixed",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="mixed",
         ),
         pytest.param(
             "我接到派出所有人打来的电话。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="police-station",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="police-station",
         ),
         pytest.param(
             "研究所有人提议调整实验日期。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="research-institute",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="research-institute",
         ),
         pytest.param(
             "船沉没有人在岸边发出求救信号。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="unseparated-sinking",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="unseparated-sinking",
         ),
         pytest.param(
             "我记得张三推荐了《有人在等你》。",
-            ["候选事实"], 0.6, "summary_generic_reference", ("有人",), id="quoted",
+            ["候选事实"],
+            0.6,
+            "summary_generic_reference",
+            ("有人",),
+            id="quoted",
         ),
         pytest.param(
-            "偏短摘要", ["候选事实"], 0.6, "summary_too_short", (), id="short",
+            "偏短摘要",
+            ["候选事实"],
+            0.6,
+            "summary_too_short",
+            (),
+            id="short",
         ),
         pytest.param(
             "张三确认周五下午三点开会。",
-            {"fact": "候选事实"}, 0.6, "missing_key_facts", (), id="invalid-facts",
+            {"fact": "候选事实"},
+            0.6,
+            "missing_key_facts",
+            (),
+            id="invalid-facts",
         ),
         pytest.param(
             "张三确认周五下午三点开会。",
-            ["候选事实"], 1.8, "invalid_importance", (), id="invalid-importance",
+            ["候选事实"],
+            1.8,
+            "invalid_importance",
+            (),
+            id="invalid-importance",
         ),
     ],
 )
@@ -939,7 +976,9 @@ async def test_connection_reset_is_returned_to_queue_then_next_attempt_succeeds(
 
     assert raised.value is failure
     assert provider.calls == 1
-    assert await processor._call_llm_with_retry("prompt", "system") == '{"summary":"ok"}'
+    assert (
+        await processor._call_llm_with_retry("prompt", "system") == '{"summary":"ok"}'
+    )
     assert provider.calls == 2
 
 
@@ -1057,12 +1096,19 @@ async def test_stream_call_records_final_chunk_usage(monkeypatch):
 async def test_quality_retry_uses_source_and_keeps_rejection_gate():
     from unittest.mock import AsyncMock
 
-    bad = json.dumps({"summary": "有人提到周五下午三点开会", "key_facts": ["开会"], "importance": 0.5})
+    bad = json.dumps(
+        {
+            "summary": "有人提到周五下午三点开会",
+            "key_facts": ["开会"],
+            "importance": 0.5,
+        }
+    )
     processor = MemoryProcessor(llm_provider=_DummyLLMProvider(bad))
     processor._call_llm_with_retry = AsyncMock(return_value=bad)
     with pytest.raises(LowQualityMemoryError):
         await processor.process_conversation(
-            _make_group_messages(), is_group_chat=True,
+            _make_group_messages(),
+            is_group_chat=True,
             quality_feedback="summary_generic_reference",
         )
     processor._call_llm_with_retry.assert_awaited_once()

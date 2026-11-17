@@ -21,7 +21,6 @@ import json
 
 import pytest
 
-from astrbot_plugin_dynamics_memory.core.models.conversation_models import Message
 
 from tests.event_handler_support import _make_real_handler, _seed_turns
 
@@ -485,7 +484,9 @@ async def test_trim_keeps_inflight_summary_memory(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoke_source", [False, True])
-async def test_cancel_after_memory_write_reuses_receipt_or_compensates_revoked_source(tmp_path, revoke_source):
+async def test_cancel_after_memory_write_reuses_receipt_or_compensates_revoked_source(
+    tmp_path, revoke_source
+):
     """Task cancellation preserves a valid receipt; rollback withdraws a revoked one."""
     from unittest.mock import AsyncMock
 
@@ -512,11 +513,16 @@ async def test_cancel_after_memory_write_reuses_receipt_or_compensates_revoked_s
     try:
         await _seed_turns(manager, sid, ("C1", "C2"))
 
-        async def slow_conditional(session_id, last_message, expected_revision, *, window_messages=None):
+        async def slow_conditional(
+            session_id, last_message, expected_revision, *, window_messages=None
+        ):
             committing.set()
             await asyncio.sleep(30)  # 停在游标提交处，等待被取消
             return await original_conditional(
-                session_id, last_message, expected_revision, window_messages=window_messages,
+                session_id,
+                last_message,
+                expected_revision,
+                window_messages=window_messages,
             )
 
         manager.commit_summary_cursor = slow_conditional
@@ -527,7 +533,14 @@ async def test_cancel_after_memory_write_reuses_receipt_or_compensates_revoked_s
 
         async def run_storage():
             return await handler._memory_reflection._storage_task(
-                sid, history, "p1", 0, 4, 0, memory_scope="livingmemory:test", expected_revision=0,
+                sid,
+                history,
+                "p1",
+                0,
+                4,
+                0,
+                memory_scope="livingmemory:test",
+                expected_revision=0,
             )
 
         task = asyncio.create_task(run_storage())

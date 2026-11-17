@@ -6,10 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-from astrbot.api import logger
-from .schema import GRAPH_SCHEMA_STATEMENTS
-
 
 import aiosqlite
 

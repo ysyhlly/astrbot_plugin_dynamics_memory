@@ -5,9 +5,7 @@ from pathlib import Path
 
 from astrbot_plugin_dynamics_memory.core.base.config_validator import AgentToolsConfig
 
-SCHEMA_PATH = (
-    Path(__file__).resolve().parents[1] / "_conf_schema.json"
-)
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "_conf_schema.json"
 
 
 def test_schema_places_beta_immediately_after_recall_tool():

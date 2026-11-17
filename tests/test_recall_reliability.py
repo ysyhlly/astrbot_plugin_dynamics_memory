@@ -9,11 +9,15 @@ from unittest.mock import AsyncMock
 import aiosqlite
 import pytest
 import pytest_asyncio
-from astrbot_plugin_dynamics_memory.core.faiss_async_persist import install_async_persist
+from astrbot_plugin_dynamics_memory.core.faiss_async_persist import (
+    install_async_persist,
+)
 from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
 from astrbot_plugin_dynamics_memory.core.models.graph_models import GraphNode
 from astrbot_plugin_dynamics_memory.core.models.memory_atom import MemoryAtom
-from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import GraphExtractor
+from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
+    GraphExtractor,
+)
 from astrbot_plugin_dynamics_memory.core.processors.text_processor import TextProcessor
 from astrbot_plugin_dynamics_memory.core.retrieval.bm25_retriever import BM25Retriever
 from astrbot_plugin_dynamics_memory.core.retrieval.dual_route_retriever import (
@@ -25,7 +29,9 @@ from astrbot_plugin_dynamics_memory.core.retrieval.graph_keyword_retriever impor
 from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import GraphRetriever
 from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import HybridResult
 from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import RRFFusion
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
+    VectorRetriever,
+)
 from astrbot_plugin_dynamics_memory.storage.graph_store import GraphStore
 
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
@@ -342,7 +348,9 @@ async def test_atom_parent_policy_filters_before_candidate_limit(engine):
 
 
 @pytest.mark.asyncio
-async def test_recent_private_derived_parents_do_not_crowd_shared_group_candidate(engine):
+async def test_recent_private_derived_parents_do_not_crowd_shared_group_candidate(
+    engine,
+):
     group_umo = "bot-instance:GroupMessage:room-B"
     now = time.time()
     denied_count = 2001
@@ -465,7 +473,9 @@ async def test_inherited_group_recall_is_read_only_on_cache_miss_and_hit(engine)
     miss_doc = await engine.get_memory(memory_id)
     miss_metadata = json.loads(miss_doc["metadata"])
     miss_atom = (await engine.atom_store.get_by_parent(memory_id))[0]
-    assert miss_metadata.get("access_count", 0) == before_metadata.get("access_count", 0)
+    assert miss_metadata.get("access_count", 0) == before_metadata.get(
+        "access_count", 0
+    )
     assert miss_metadata["last_access_time"] == before_metadata["last_access_time"]
     assert miss_atom.last_accessed_at == before_atom.last_accessed_at
     assert await engine.search_memories(**kwargs)
@@ -580,7 +590,9 @@ async def test_atom_route_recovers_a_live_fact_when_document_routes_miss(
 
 @pytest.mark.asyncio
 async def test_graph_only_results_use_one_batch_document_read():
-    from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import GraphResult
+    from astrbot_plugin_dynamics_memory.core.retrieval.graph_retriever import (
+        GraphResult,
+    )
 
     graph_results = [GraphResult(i, 0.8, 0.1, 0.8, None, "fact", {}) for i in (1, 2, 3)]
     batch_loader = AsyncMock(

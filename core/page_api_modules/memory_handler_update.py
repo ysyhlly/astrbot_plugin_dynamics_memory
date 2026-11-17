@@ -16,6 +16,21 @@ from ..memory_revision import MemoryRevisionConflict, memory_revision
 class MemoryHandlerUpdateMixin:
     """MemoryHandler 拆分模块：MemoryHandlerUpdateMixin"""
 
+    @staticmethod
+    def _parse_positive_memory_id(raw_id: Any) -> int | None:
+        """Strictly parse a positive integer memory ID, rejecting booleans and floats."""
+        if isinstance(raw_id, bool):
+            return None
+        if isinstance(raw_id, int):
+            return raw_id if raw_id > 0 else None
+        if isinstance(raw_id, str):
+            text = raw_id.strip()
+            if not text or not text.isdigit():
+                return None
+            value = int(text)
+            return value if value > 0 else None
+        return None
+
     def _revision_conflict(self):
         conflict = MemoryRevisionConflict()
         return {**self.utils.error(str(conflict)), "code": conflict.code}
@@ -52,10 +67,9 @@ class MemoryHandlerUpdateMixin:
         from ..utils.number_utils import clamp_float
 
         payload = await request.get_json(silent=True) or {}
-        try:
-            memory_id = int(payload.get("memory_id"))
-        except (TypeError, ValueError):
-            return self.utils.error("memory_id 必须是整数")
+        memory_id = self._parse_positive_memory_id(payload.get("memory_id"))
+        if memory_id is None:
+            return self.utils.error("memory_id 必须是正整数")
 
         field = str(payload.get("field", "")).strip()
         value = payload.get("value")
@@ -370,11 +384,12 @@ class MemoryHandlerUpdateMixin:
 
         valid_ids: list[int] = []
         for raw_id in memory_ids:
-            try:
-                valid_ids.append(int(raw_id))
-            except Exception:
+            parsed_id = self._parse_positive_memory_id(raw_id)
+            if parsed_id is None:
                 failed_count += 1
                 failed_ids.append(raw_id)
+                continue
+            valid_ids.append(parsed_id)
 
         if valid_ids:
             deleted_count = await memory_engine.batch_delete_memories(valid_ids)
@@ -423,9 +438,8 @@ class MemoryHandlerUpdateMixin:
         failed_ids: list[Any] = []
 
         for raw_id in memory_ids:
-            try:
-                memory_id = int(raw_id)
-            except (TypeError, ValueError):
+            memory_id = self._parse_positive_memory_id(raw_id)
+            if memory_id is None:
                 failed_ids.append(raw_id)
                 continue
 

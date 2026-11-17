@@ -113,20 +113,22 @@ class MemoryConsolidationManager:
         self, candidates: list[dict[str, Any]], cfg: dict[str, Any]
     ) -> list[list[dict[str, Any]]]:
         granularity = cfg.get("granularity", "session")
+        min_per = int(cfg.get("min_memories_per_group", 3))
         if granularity == "semantic":
-            # 语义聚类可能跨会话：合并前必须按 (session_id, persona_id) 拆分，
-            # 否则合并记忆要么无作用域（任何会话都召回不到），要么把 A 会话
-            # 的内容写进 B 会话的作用域。
-            semantic_groups = await self._group_semantic(candidates, cfg)
-            groups = [
-                scope_group
-                for semantic_group in semantic_groups
-                for scope_group in self._split_by_scope(semantic_group)
-            ]
+            # 先按写作作用域分桶并剪枝，避免无意义的跨会话向量成对聚类。
+            groups = []
+            for scope_candidates in self._split_by_scope(candidates):
+                if len(scope_candidates) < min_per:
+                    continue
+                semantic_groups = await self._group_semantic(scope_candidates, cfg)
+                groups.extend(
+                    scope_group
+                    for semantic_group in semantic_groups
+                    for scope_group in self._split_by_scope(semantic_group)
+                )
         else:
             groups = self._split_by_scope(candidates)
 
-        min_per = int(cfg.get("min_memories_per_group", 3))
         groups = [g for g in groups if len(g) >= min_per]
         groups.sort(key=len, reverse=True)
         return groups
@@ -263,7 +265,8 @@ class MemoryConsolidationManager:
                     await self.memory_engine.delete_memory(new_id)
                 except Exception:
                     logger.error(
-                        f"[记忆整合] 归档失败后回滚新记忆 {new_id} 也失败", exc_info=True
+                        f"[记忆整合] 归档失败后回滚新记忆 {new_id} 也失败",
+                        exc_info=True,
                     )
                 raise
 
@@ -308,12 +311,15 @@ class MemoryConsolidationManager:
             # Preserve the existing cross-session semantic consolidation for
             # group memories, but keep it within the same bot instance/persona.
             origin = str(
-                metadata.get("source_session_id")
-                or metadata.get("session_id")
-                or ""
+                metadata.get("source_session_id") or metadata.get("session_id") or ""
             )
             instance_id = origin.split(":", 1)[0]
-            return (f"group-instance:{instance_id}", str(metadata.get("persona_id") or ""), interaction_type, visibility)
+            return (
+                f"group-instance:{instance_id}",
+                str(metadata.get("persona_id") or ""),
+                interaction_type,
+                visibility,
+            )
         return (
             session_id,
             str(metadata.get("persona_id") or ""),

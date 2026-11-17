@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -21,6 +22,7 @@ JOURNAL_MODE_WAL = "WAL"
 JOURNAL_MODE_DELETE = "DELETE"
 
 BUSY_TIMEOUT_MS = 10000
+_UNSET = object()
 
 # 插件管理的 SQLite 库；判定不支持 WAL 时这些库都要转回 rollback journal。
 _PLUGIN_DB_FILES = (
@@ -75,7 +77,10 @@ async def _close_unreturned_connection(connect_task) -> None:
 
 
 async def open_connection(
-    db_path: str, *, apply_journal_mode: bool = False
+    db_path: str,
+    *,
+    apply_journal_mode: bool = False,
+    isolation_level: Any = _UNSET,
 ) -> aiosqlite.Connection:
     """打开插件统一配置的 SQLite 连接。
 
@@ -87,12 +92,18 @@ async def open_connection(
     Args:
         db_path: 数据库文件路径。
         apply_journal_mode: 是否为该库写入进程级 journal mode（仅启动期）。
+        isolation_level: 可选覆写 ``aiosqlite.connect`` 的事务隔离级别（如 ``None``）。
 
     Returns:
         已设置 ``busy_timeout`` 的连接。
     """
     # The SQLite worker may finish opening even after its caller is cancelled.
-    connect_task = asyncio.ensure_future(aiosqlite.connect(db_path))
+    connect_coro = (
+        aiosqlite.connect(db_path)
+        if isolation_level is _UNSET
+        else aiosqlite.connect(db_path, isolation_level=isolation_level)
+    )
+    connect_task = asyncio.ensure_future(connect_coro)
     try:
         db = await asyncio.shield(connect_task)
         cursor = await db.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")

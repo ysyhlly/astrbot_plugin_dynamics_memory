@@ -15,7 +15,9 @@ from astrbot_plugin_dynamics_memory.core.page_api_modules.settings_handler impor
     SettingsHandler,
 )
 from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import PageApiUtils
-from astrbot_plugin_dynamics_memory.core.managers.adapter_migrator import AdapterMigrator
+from astrbot_plugin_dynamics_memory.core.managers.adapter_migrator import (
+    AdapterMigrator,
+)
 
 
 class _WritableConfig(dict):

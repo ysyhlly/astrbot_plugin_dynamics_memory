@@ -378,7 +378,9 @@ async def test_atom_store_delete_by_parent(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_atom_retriever_search(tmp_path: Path) -> None:
-    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import AtomRetriever
+    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import (
+        AtomRetriever,
+    )
 
     db_path = str(tmp_path / "test_atoms_retriever.db")
     store = AtomStore(db_path)
@@ -417,7 +419,9 @@ async def test_atom_retriever_search(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_atom_retriever_session_filter(tmp_path: Path) -> None:
-    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import AtomRetriever
+    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import (
+        AtomRetriever,
+    )
 
     db_path = str(tmp_path / "test_atoms_filter.db")
     store = AtomStore(db_path)
@@ -599,7 +603,9 @@ async def test_lifecycle_manager_logs_and_backs_off_on_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_atom_retriever_touch(tmp_path: Path) -> None:
-    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import AtomRetriever
+    from astrbot_plugin_dynamics_memory.core.retrieval.atom_retriever import (
+        AtomRetriever,
+    )
 
     db_path = str(tmp_path / "test_atoms_retriever_touch.db")
     store = AtomStore(db_path)
@@ -784,7 +790,10 @@ def test_graph_extractor_empty_atoms_falls_back_to_legacy() -> None:
 
 
 def test_graph_extractor_atoms_with_entities() -> None:
-    from astrbot_plugin_dynamics_memory.core.models.memory_atom import AtomType, MemoryAtom
+    from astrbot_plugin_dynamics_memory.core.models.memory_atom import (
+        AtomType,
+        MemoryAtom,
+    )
     from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
         GraphExtractor,
     )
@@ -809,7 +818,10 @@ def test_graph_extractor_atoms_with_entities() -> None:
 
 
 def test_graph_extractor_atoms_no_entities_fallback() -> None:
-    from astrbot_plugin_dynamics_memory.core.models.memory_atom import AtomType, MemoryAtom
+    from astrbot_plugin_dynamics_memory.core.models.memory_atom import (
+        AtomType,
+        MemoryAtom,
+    )
     from astrbot_plugin_dynamics_memory.core.processors.graph_extractor import (
         GraphExtractor,
     )
@@ -845,7 +857,9 @@ def test_graph_extractor_atoms_no_entities_fallback() -> None:
 
 def test_classify_atoms_from_metadata_default_config() -> None:
     """MemoryProcessor initializes atom config for direct construction."""
-    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
 
     processor = MemoryProcessor()
     atoms = processor.classify_atoms_from_metadata(metadata={"key_facts": []})
@@ -866,7 +880,9 @@ def test_classify_atoms_from_metadata_atom_disabled() -> None:
 
 
 def test_classify_atoms_from_metadata_atom_enabled_returns_atoms() -> None:
-    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+    from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+        MemoryProcessor,
+    )
 
     processor = MemoryProcessor(config={"atom_enabled": True})
     atoms = processor.classify_atoms_from_metadata(

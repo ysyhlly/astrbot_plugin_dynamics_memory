@@ -167,9 +167,7 @@ def test_invalid_entry_is_reported_without_rejecting_valid_items():
     entries, errors = parse_transfer_content(json.dumps(payload), "json")
 
     assert [entry.content for entry in entries] == ["valid"]
-    assert errors == [
-        {"index": 1, "error": "缺少可导入的摘要文本或至少 2 条原始消息"}
-    ]
+    assert errors == [{"index": 1, "error": "缺少可导入的摘要文本或至少 2 条原始消息"}]
 
 
 def test_duplicate_key_normalizes_whitespace_but_preserves_scope():
@@ -187,18 +185,24 @@ def test_duplicate_key_normalizes_whitespace_but_preserves_scope():
 
 
 def test_plan_session_remap_rewrites_retired_platform_prefix():
-    from astrbot_plugin_dynamics_memory.core.memory_transfer import plan_session_id_remap
+    from astrbot_plugin_dynamics_memory.core.memory_transfer import (
+        plan_session_id_remap,
+    )
 
     mapping = plan_session_id_remap(
         ["了了:FriendMessage:1163018485"],
         current_platforms={"default"},
     )
 
-    assert mapping == {"了了:FriendMessage:1163018485": "default:FriendMessage:1163018485"}
+    assert mapping == {
+        "了了:FriendMessage:1163018485": "default:FriendMessage:1163018485"
+    }
 
 
 def test_plan_session_remap_uses_existing_session_suffix_when_ambiguous():
-    from astrbot_plugin_dynamics_memory.core.memory_transfer import plan_session_id_remap
+    from astrbot_plugin_dynamics_memory.core.memory_transfer import (
+        plan_session_id_remap,
+    )
 
     mapping = plan_session_id_remap(
         ["old:FriendMessage:42", "old:GroupMessage:99"],
@@ -211,7 +215,9 @@ def test_plan_session_remap_uses_existing_session_suffix_when_ambiguous():
 
 
 def test_plan_session_remap_rewrites_user_scope_platform():
-    from astrbot_plugin_dynamics_memory.core.memory_transfer import plan_session_id_remap
+    from astrbot_plugin_dynamics_memory.core.memory_transfer import (
+        plan_session_id_remap,
+    )
 
     mapping = plan_session_id_remap(
         ["livingmemory:user:了了:1163018485"],
@@ -224,7 +230,9 @@ def test_plan_session_remap_rewrites_user_scope_platform():
 
 
 def test_plan_session_remap_keeps_current_and_unknown_ids():
-    from astrbot_plugin_dynamics_memory.core.memory_transfer import plan_session_id_remap
+    from astrbot_plugin_dynamics_memory.core.memory_transfer import (
+        plan_session_id_remap,
+    )
 
     mapping = plan_session_id_remap(
         [
@@ -240,6 +248,8 @@ def test_plan_session_remap_keeps_current_and_unknown_ids():
 
 
 def test_plan_session_remap_without_platform_context_does_nothing():
-    from astrbot_plugin_dynamics_memory.core.memory_transfer import plan_session_id_remap
+    from astrbot_plugin_dynamics_memory.core.memory_transfer import (
+        plan_session_id_remap,
+    )
 
     assert plan_session_id_remap(["了了:FriendMessage:1"]) == {}

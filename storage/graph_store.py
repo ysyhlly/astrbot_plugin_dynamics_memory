@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from .graph_store_snapshot import GraphStoreSnapshotMixin
-from .sqlite_pool import SQLiteConnectionPool
-
-
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -38,6 +35,12 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
         # store 与短生命周期测试不需要多占一条连接。
         self._cache_reads = cache_reads
         self._read_conn: aiosqlite.Connection | None = None
+        self._read_lock: asyncio.Lock | None = None
+
+    def _get_read_lock(self) -> asyncio.Lock:
+        if self._read_lock is None:
+            self._read_lock = asyncio.Lock()
+        return self._read_lock
 
     async def initialize(self) -> None:
         """Create tables used by the graph-memory layer."""
@@ -119,20 +122,22 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
 
     @asynccontextmanager
     async def _read_connect(self):
-        """复用长期只读连接；未开启缓存时退回按操作建连。"""
+        """复用长期只读连接并加锁保护并发查询；未开启缓存时按操作建连。"""
         if not self._cache_reads:
             async with self._connect() as db:
                 yield db
             return
-        if self._read_conn is None:
-            self._read_conn = await open_connection(self.db_path)
-        yield self._read_conn
+        async with self._get_read_lock():
+            if self._read_conn is None:
+                self._read_conn = await open_connection(self.db_path)
+            yield self._read_conn
 
     async def close(self) -> None:
         """关闭复用的只读连接（插件卸载 / 临时 shadow store 清理时调用）。"""
-        if self._read_conn is not None:
-            await self._read_conn.close()
-            self._read_conn = None
+        async with self._get_read_lock():
+            if self._read_conn is not None:
+                await self._read_conn.close()
+                self._read_conn = None
 
     @staticmethod
     def _now_iso() -> str:

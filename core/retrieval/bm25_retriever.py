@@ -3,9 +3,7 @@ BM25检索器 - 基于SQLite FTS5的稀疏检索
 实现简洁的BM25检索功能,用于MemoryEngine的混合检索
 """
 
-from ...storage.sqlite_pool import SQLiteConnectionPool
-
-
+import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
@@ -89,6 +87,12 @@ class BM25Retriever:
         # 长生命周期实例（MemoryEngine）复用一条只读连接，写路径仍独立建连。
         self._cache_reads = cache_reads
         self._read_conn: aiosqlite.Connection | None = None
+        self._read_lock: asyncio.Lock | None = None
+
+    def _get_read_lock(self) -> asyncio.Lock:
+        if self._read_lock is None:
+            self._read_lock = asyncio.Lock()
+        return self._read_lock
 
     @asynccontextmanager
     async def _connect(self, *, discard: bool = False):
@@ -101,20 +105,22 @@ class BM25Retriever:
 
     @asynccontextmanager
     async def _read_connect(self):
-        """复用长期只读连接；未开启缓存时退回按操作建连。"""
+        """复用长期只读连接并加锁保护并发查询；未开启缓存时按操作建连。"""
         if not self._cache_reads:
             async with self._connect() as db:
                 yield db
             return
-        if self._read_conn is None:
-            self._read_conn = await open_connection(self.db_path)
-        yield self._read_conn
+        async with self._get_read_lock():
+            if self._read_conn is None:
+                self._read_conn = await open_connection(self.db_path)
+            yield self._read_conn
 
     async def close(self) -> None:
         """关闭复用的只读连接（插件卸载 / 重新初始化前调用，幂等）。"""
-        if self._read_conn is not None:
-            await self._read_conn.close()
-            self._read_conn = None
+        async with self._get_read_lock():
+            if self._read_conn is not None:
+                await self._read_conn.close()
+                self._read_conn = None
 
     async def initialize(self):
         """
@@ -249,21 +255,21 @@ class BM25Retriever:
             filters.append(f"json_extract({metadata_sql}, '$.persona_id') = ?")
             params.append(persona_id)
         if interaction_type is not None:
-            filters.append(
-                f"json_extract({metadata_sql}, '$.interaction_type') = ?"
-            )
+            filters.append(f"json_extract({metadata_sql}, '$.interaction_type') = ?")
             params.append(interaction_type)
         if source_session_id is not None:
-            filters.append(
-                f"json_extract({metadata_sql}, '$.source_session_id') = ?"
-            )
+            filters.append(f"json_extract({metadata_sql}, '$.source_session_id') = ?")
             params.append(source_session_id)
         if source_platform:
             platform_prefix = source_platform.casefold() + ":groupmessage:"
             filters.append(
                 "(lower(json_extract(" + metadata_sql + ", '$.source_platform')) = ? "
-                "OR substr(lower(json_extract(" + metadata_sql + ", '$.source_session_id')), 1, length(?)) = ? "
-                "OR substr(lower(json_extract(" + metadata_sql + ", '$.session_id')), 1, length(?)) = ?)"
+                "OR substr(lower(json_extract("
+                + metadata_sql
+                + ", '$.source_session_id')), 1, length(?)) = ? "
+                "OR substr(lower(json_extract("
+                + metadata_sql
+                + ", '$.session_id')), 1, length(?)) = ?)"
             )
             params.extend(
                 [
@@ -363,7 +369,7 @@ class BM25Retriever:
             tokens = await self.text_processor.tokenize_async(
                 content, remove_stopwords=True
             )
-            processed_content = " ".join(tokens)
+            processed_content = " ".join(with_cjk_bigrams(tokens, content))
 
             async with self._connect() as db:
                 # 先删除旧索引

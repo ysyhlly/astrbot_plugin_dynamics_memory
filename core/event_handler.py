@@ -111,10 +111,14 @@ class EventHandler:
             return
         await self._group_capture.handle_all_group_messages(event)
 
-    async def handle_memory_recall(self, event: AstrMessageEvent, req: ProviderRequest, *, budget=None):
+    async def handle_memory_recall(
+        self, event: AstrMessageEvent, req: ProviderRequest, *, budget=None
+    ):
         """Query and inject long-term memory before LLM request"""
         with adapter_access(self.config_manager, event):
-            return await self._memory_recall.handle_memory_recall(event, req, budget=budget)
+            return await self._memory_recall.handle_memory_recall(
+                event, req, budget=budget
+            )
 
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
@@ -158,10 +162,16 @@ class EventHandler:
 
     async def reflect_recorded_scope(self, scope: dict) -> None:
         """Schedule consolidation after actual evidence was already stored."""
-        with adapter_access(self.config_manager, scope["umo"].partition(":")[0], write=True):
+        with adapter_access(
+            self.config_manager, scope["umo"].partition(":")[0], write=True
+        ):
             await self._memory_reflection.schedule_recorded_scope(scope)
 
     async def retry_refused_scope(self, scope: dict) -> bool:
         """Schedule an explicit retry of one exact refused reflection window."""
-        with adapter_access(self.config_manager, scope["umo"].partition(":")[0], write=True):
-            return await self._memory_reflection.schedule_recorded_scope(scope, retry_refused=True)
+        with adapter_access(
+            self.config_manager, scope["umo"].partition(":")[0], write=True
+        ):
+            return await self._memory_reflection.schedule_recorded_scope(
+                scope, retry_refused=True
+            )

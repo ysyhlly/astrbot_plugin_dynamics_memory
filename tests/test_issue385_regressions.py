@@ -142,11 +142,20 @@ async def test_partial_summary_requires_its_message_anchor_after_head_trim(
     snapshot = await manager.get_messages_range(sid, cursor, 6)
     revision = await manager.get_session_revision(sid)
     try:
-        assert await manager.trim_session_messages(sid, deleted, delete_unsummarized=force) == deleted
-        assert await manager.commit_summary_cursor(sid, snapshot[-1], revision) is committed
+        assert (
+            await manager.trim_session_messages(sid, deleted, delete_unsummarized=force)
+            == deleted
+        )
+        assert (
+            await manager.commit_summary_cursor(sid, snapshot[-1], revision)
+            is committed
+        )
         witness = await manager.get_session_metadata(sid, "last_summary_message_v1")
         if committed:
-            assert witness == {"id": snapshot[-1].id, "timestamp": snapshot[-1].timestamp}
+            assert witness == {
+                "id": snapshot[-1].id,
+                "timestamp": snapshot[-1].timestamp,
+            }
         else:
             assert witness is None
             assert await store.get_message_by_id(sid, snapshot[-1].id) is None
@@ -161,7 +170,9 @@ async def test_partial_summary_requires_its_message_anchor_after_head_trim(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retries", [1, 3])
-async def test_pending_retry_never_skips_unsummarized_chunks(tmp_path, retries, monkeypatch):
+async def test_pending_retry_never_skips_unsummarized_chunks(
+    tmp_path, retries, monkeypatch
+):
     handler, manager, store = await _make_real_handler(tmp_path)
     handler._memory_reflection.config_manager = ConfigManager(
         {"reflection_engine": {"max_messages_per_segment": 4}}
@@ -173,7 +184,13 @@ async def test_pending_retry_never_skips_unsummarized_chunks(tmp_path, retries, 
     await manager.update_session_metadata(sid, "pending_summary", initial_pending)
     try:
         plan = await reflection._build_reflection_plan_for_cursor(
-            sid, 10, 0, initial_pending, None, None, sid,
+            sid,
+            10,
+            0,
+            initial_pending,
+            None,
+            None,
+            sid,
         )
         if retries == 3:
             assert plan is None
@@ -182,20 +199,38 @@ async def test_pending_retry_never_skips_unsummarized_chunks(tmp_path, retries, 
             assert pending["retry_count"] == 0
             assert pending["exhausted_retry_count"] == 3
             assert pending["failure_stage"] == "retry_exhausted"
-            assert await reflection._build_reflection_plan_for_cursor(
-                sid, 10, 0, pending, None, None, sid,
-            ) is None
+            assert (
+                await reflection._build_reflection_plan_for_cursor(
+                    sid,
+                    10,
+                    0,
+                    pending,
+                    None,
+                    None,
+                    sid,
+                )
+                is None
+            )
             monkeypatch.setattr(
                 "astrbot_plugin_dynamics_memory.core.event_handler_modules.memory_reflection.time",
                 SimpleNamespace(time=lambda: pending["retry_after"] + 1),
             )
             plan = await reflection._build_reflection_plan_for_cursor(
-                sid, 10, 0, pending, None, None, sid,
+                sid,
+                10,
+                0,
+                pending,
+                None,
+                None,
+                sid,
             )
             assert plan.retry_count == 0
         assert (plan.start_index, plan.end_index) == (0, 4)
         assert [message.content for message in plan.history_messages] == [
-            "message-0", "message-1", "message-2", "message-3",
+            "message-0",
+            "message-1",
+            "message-2",
+            "message-3",
         ]
         assert await manager.get_session_metadata(sid, "last_summarized_index", 0) == 0
         assert await store.get_message_count(sid) == 10
@@ -243,10 +278,19 @@ async def test_native_retry_keeps_failed_rows_after_trim_while_model_runs(tmp_pa
     try:
         revision = await manager.get_session_revision(sid)
         plan = await reflection._build_reflection_plan_for_cursor(
-            sid, 10, 4, None, revision, None, sid,
+            sid,
+            10,
+            4,
+            None,
+            revision,
+            None,
+            sid,
         )
         assert [message.content for message in plan.history_messages] == [
-            "message-4", "message-5", "message-6", "message-7",
+            "message-4",
+            "message-5",
+            "message-6",
+            "message-7",
         ]
         assert await reflection._schedule_reflection(plan)
         await asyncio.wait_for(entered.wait(), 2)
@@ -254,13 +298,23 @@ async def test_native_retry_keeps_failed_rows_after_trim_while_model_runs(tmp_pa
         release.set()
         await asyncio.gather(*list(handler._storage_tasks))
         pending = await manager.get_session_metadata(sid, "pending_summary")
-        assert (pending["start_index"], pending["end_index"], pending["retry_count"]) == (0, 4, 1)
+        assert (
+            pending["start_index"],
+            pending["end_index"],
+            pending["retry_count"],
+        ) == (0, 4, 1)
         assert await manager.get_session_metadata(sid, "last_summarized_index") == 0
         handler.memory_processor.process_conversation.assert_awaited_once()
         handler.memory_engine.add_memory.assert_not_awaited()
 
         retry = await reflection._build_reflection_plan_for_cursor(
-            sid, 6, 0, pending, revision, None, sid,
+            sid,
+            6,
+            0,
+            pending,
+            revision,
+            None,
+            sid,
         )
         assert retry.history_messages == plan.history_messages
         _configure_processor(handler)
@@ -282,13 +336,20 @@ async def test_native_retry_keeps_failed_rows_after_trim_while_model_runs(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_cancelled_native_pending_write_rolls_back_and_releases_sqlite(tmp_path, monkeypatch):
+async def test_cancelled_native_pending_write_rolls_back_and_releases_sqlite(
+    tmp_path, monkeypatch
+):
     handler, manager, store = await _make_real_handler(tmp_path)
     sid = "test:group:pending-cancel"
     await _seed_messages(manager, sid, [1_780_000_000.0, 1_780_000_001.0])
     revision = await manager.get_session_revision(sid)
     messages = await manager.get_messages_range(sid, 0, 2)
-    pending = {"start_index": 0, "end_index": 2, "retry_count": 1, "failure_stage": "model"}
+    pending = {
+        "start_index": 0,
+        "end_index": 2,
+        "retry_count": 1,
+        "failure_stage": "model",
+    }
     entered = asyncio.Event()
 
     async def wait_before_commit():
@@ -298,7 +359,9 @@ async def test_cancelled_native_pending_write_rolls_back_and_releases_sqlite(tmp
     try:
         with monkeypatch.context() as patch:
             patch.setattr(store, "_commit_write_transaction", wait_before_commit)
-            task = asyncio.create_task(manager.write_native_pending_summary(sid, messages, pending, revision))
+            task = asyncio.create_task(
+                manager.write_native_pending_summary(sid, messages, pending, revision)
+            )
             await asyncio.wait_for(entered.wait(), 2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -308,7 +371,9 @@ async def test_cancelled_native_pending_write_rolls_back_and_releases_sqlite(tmp
         assert await manager.get_session_metadata(sid, "last_summarized_index", 0) == 0
 
         await store.update_message_metadata(messages[0].id, {"edited": True})
-        assert not await manager.write_native_pending_summary(sid, messages, pending, revision)
+        assert not await manager.write_native_pending_summary(
+            sid, messages, pending, revision
+        )
         assert await manager.get_session_metadata(sid, "pending_summary") is None
         fresh = await manager.get_messages_range(sid, 0, 2)
         assert await manager.write_native_pending_summary(sid, fresh, pending, revision)
@@ -320,7 +385,9 @@ async def test_cancelled_native_pending_write_rolls_back_and_releases_sqlite(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backfill_at", ["model", "after_publication"])
-async def test_native_summary_cannot_advance_past_a_backfilled_row(tmp_path, backfill_at):
+async def test_native_summary_cannot_advance_past_a_backfilled_row(
+    tmp_path, backfill_at
+):
     handler, manager, store = await _make_real_handler(tmp_path)
     reflection = handler._memory_reflection
     sid = "test:group:backfill-in-reflection"
@@ -332,7 +399,9 @@ async def test_native_summary_cannot_advance_past_a_backfilled_row(tmp_path, bac
     validation = []
     engine = handler.memory_engine
     engine.find_similar_memory = AsyncMock(return_value=None)
-    engine.delete_memory = AsyncMock(side_effect=lambda memory_id: publications.remove(memory_id) is None)
+    engine.delete_memory = AsyncMock(
+        side_effect=lambda memory_id: publications.remove(memory_id) is None
+    )
 
     async def summarize(*, messages, **kwargs):
         model_inputs.append([message.content for message in messages])
@@ -372,7 +441,10 @@ async def test_native_summary_cannot_advance_past_a_backfilled_row(tmp_path, bac
             engine.delete_memory.assert_not_awaited()
 
         await _run_scheduled(handler, await _build_plan(handler, sid, 3))
-        assert model_inputs == [["message-0", "message-1"], ["message-0", "backfilled", "message-1"]]
+        assert model_inputs == [
+            ["message-0", "message-1"],
+            ["message-0", "backfilled", "message-1"],
+        ]
         assert await manager.get_session_metadata(sid, "last_summarized_index") == 3
         assert await manager.get_session_metadata(sid, "pending_summary") is None
         assert publications == [1]
@@ -384,13 +456,17 @@ async def test_native_summary_cannot_advance_past_a_backfilled_row(tmp_path, bac
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at", ["after_delete", "after_commit"])
-async def test_native_trim_keeps_transaction_and_cache_consistent_on_cancellation(tmp_path, monkeypatch, cancel_at):
+async def test_native_trim_keeps_transaction_and_cache_consistent_on_cancellation(
+    tmp_path, monkeypatch, cancel_at
+):
     handler, manager, store = await _make_real_handler(tmp_path)
     sid = "test:group:trim-cancel"
     start = 1_780_000_000.0
     await _seed_messages(manager, sid, [start + i for i in range(4)])
     await manager.update_session_metadata(sid, "last_summarized_index", 2)
-    await manager.update_session_metadata(sid, "pending_summary", {"start_index": 2, "end_index": 4})
+    await manager.update_session_metadata(
+        sid, "pending_summary", {"start_index": 2, "end_index": 4}
+    )
     assert len(await manager.get_messages(sid)) == 4
     entered, release = asyncio.Event(), asyncio.Event()
     execute = store.connection.execute
@@ -446,9 +522,14 @@ async def test_native_trim_keeps_transaction_and_cache_consistent_on_cancellatio
         ]
         await manager.add_message(sid, "user", "next message", timestamp=start + 10)
         session = await store.get_session(sid)
-        assert session.message_count == await store.get_message_count(sid) == 5 - kept_from
+        assert (
+            session.message_count == await store.get_message_count(sid) == 5 - kept_from
+        )
         assert session.metadata["last_summarized_index"] == 2 - kept_from
-        assert session.metadata["pending_summary"] == {"start_index": 2 - kept_from, "end_index": 4 - kept_from}
+        assert session.metadata["pending_summary"] == {
+            "start_index": 2 - kept_from,
+            "end_index": 4 - kept_from,
+        }
     finally:
         release.set()
         rollback_release.set()

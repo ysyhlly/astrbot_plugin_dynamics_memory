@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Awaitable, Callable, Sequence
 from astrbot.api import logger
 
@@ -46,7 +45,8 @@ class GraphRetriever:
         vector_retriever: GraphVectorRetriever,
         rrf_fusion: RRFFusion,
         config: dict[str, Any] | None = None,
-        source_validity_checker: Callable[[Sequence[int]], Awaitable[set[int]]] | None = None,
+        source_validity_checker: Callable[[Sequence[int]], Awaitable[set[int]]]
+        | None = None,
     ):
         self.keyword_retriever = keyword_retriever
         self.vector_retriever = vector_retriever
@@ -81,7 +81,9 @@ class GraphRetriever:
         if getattr(execution_context, "remote_deadline", None) is not None:
             budget = execution_context.budget
             reserve = min(0.15, budget.search_remaining() * 0.20)
-            retrieval_context = execution_context.with_deadline(budget.search_deadline - reserve)
+            retrieval_context = execution_context.with_deadline(
+                budget.search_deadline - reserve
+            )
         keyword_filters = {}
         if source_platform is not None:
             keyword_filters["source_platform"] = source_platform
@@ -90,39 +92,56 @@ class GraphRetriever:
         if source_session_id is not None:
             keyword_filters["source_session_id"] = source_session_id
         vector_filters = (
-            {"source_platform": source_platform}
-            if source_platform is not None
-            else {}
+            {"source_platform": source_platform} if source_platform is not None else {}
         )
+
         async def run_route(route_name, method, args, kwargs):
             if execution_context is None:
                 return await search_route(route_name, method(*args, **kwargs), timeout)
             outcome = await retrieval_context.run(
-                route_name.replace(" ", "_"), method, *args,
+                route_name.replace(" ", "_"),
+                method,
+                *args,
                 remote=route_name == "graph vector",
                 discriminator={
-                    "session_id": session_id, "persona_id": persona_id,
+                    "session_id": session_id,
+                    "persona_id": persona_id,
                     "candidate_limit": args[1],
                     "source_platform": source_platform,
                     "interaction_type": interaction_type,
                     "source_session_id": source_session_id,
-                }, **kwargs,
+                },
+                **kwargs,
             )
             if outcome.get("state") == "completed":
                 return outcome.get("value", []), None
-            return [], RuntimeError("retrieval_route_" + str(outcome.get("state", "error")))
+            return [], RuntimeError(
+                "retrieval_route_" + str(outcome.get("state", "error"))
+            )
 
         keyword_task = run_route(
-            "graph keyword", self.keyword_retriever.search,
-            (query, k, session_id, persona_id), keyword_filters,
+            "graph keyword",
+            self.keyword_retriever.search,
+            (query, k, session_id, persona_id),
+            keyword_filters,
         )
         vector_task = (
-            run_route("graph vector", self.vector_retriever.search,
-                      (query, k, session_id, persona_id), vector_filters)
-            if source_session_id is None and getattr(execution_context,"local_only",False) is not True else asyncio.sleep(0, result=([], None))
+            run_route(
+                "graph vector",
+                self.vector_retriever.search,
+                (query, k, session_id, persona_id),
+                vector_filters,
+            )
+            if source_session_id is None
+            and getattr(execution_context, "local_only", False) is not True
+            else asyncio.sleep(0, result=([], None))
         )
-        (keyword_results, keyword_error), (vector_results, vector_error) = await asyncio.gather(
-            keyword_task, vector_task,
+        (
+            (keyword_results, keyword_error),
+            (vector_results, vector_error),
+        ) = await asyncio.gather(
+            keyword_task,
+            vector_task,
         )
         record_route(diagnostics, "keyword", keyword_error)
         record_route(diagnostics, "vector", vector_error)
@@ -142,8 +161,7 @@ class GraphRetriever:
 
         if self.source_validity_checker is not None:
             source_ids = {
-                int(item.doc_id)
-                for item in (*keyword_results, *vector_results)
+                int(item.doc_id) for item in (*keyword_results, *vector_results)
             }
             try:
                 if execution_context is None:
@@ -152,7 +170,8 @@ class GraphRetriever:
                     )
                 else:
                     outcome = await execution_context.run(
-                        "graph_source_validity", self.source_validity_checker,
+                        "graph_source_validity",
+                        self.source_validity_checker,
                         tuple(sorted(source_ids)),
                         discriminator={"source_ids": sorted(source_ids)},
                     )
@@ -166,7 +185,9 @@ class GraphRetriever:
                 )
                 return []
             keyword_results = [
-                item for item in keyword_results if int(item.doc_id) in active_source_ids
+                item
+                for item in keyword_results
+                if int(item.doc_id) in active_source_ids
             ]
             vector_results = [
                 item for item in vector_results if int(item.doc_id) in active_source_ids

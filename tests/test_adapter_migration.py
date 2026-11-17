@@ -6,7 +6,9 @@ import sqlite3
 import aiosqlite
 import pytest
 
-from astrbot_plugin_dynamics_memory.core.managers.adapter_migrator import AdapterMigrator
+from astrbot_plugin_dynamics_memory.core.managers.adapter_migrator import (
+    AdapterMigrator,
+)
 from astrbot_plugin_dynamics_memory.core.memory_scope import infer_adapter_id
 
 

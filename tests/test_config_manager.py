@@ -128,9 +128,7 @@ def test_validate_config_accepts_merged_model_shape() -> None:
 
 
 def test_validate_config_accepts_retrieval_importance_threshold() -> None:
-    config = validate_config(
-        {"recall_engine": {"min_importance_for_retrieval": 0.65}}
-    )
+    config = validate_config({"recall_engine": {"min_importance_for_retrieval": 0.65}})
 
     assert config.recall_engine.min_importance_for_retrieval == 0.65
 

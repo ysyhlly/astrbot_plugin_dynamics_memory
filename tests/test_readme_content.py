@@ -32,13 +32,13 @@ def test_readmes_link_languages_and_project_resources() -> None:
         "953245617",
         "1129994749",
         "`lxfight`",
-        "astrbot_plugin_livingmemory",
+        "astrbot_plugin_dynamics_memory",
     )
     for name, content in _read_readmes().items():
         if name == "README.md":
             assert "群间记忆" in content and "NOTICE.md" in content
             continue
-        assert "<h1>LivingMemory</h1>" in content or "![LivingMemory" in content
+        assert "<h1>Dynamics Memory</h1>" in content or "![Dynamics Memory" in content
         for language_link in LANGUAGE_LINKS:
             if language_link != name:
                 assert language_link in content

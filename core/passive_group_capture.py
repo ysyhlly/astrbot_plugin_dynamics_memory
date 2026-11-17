@@ -14,7 +14,13 @@ from astrbot.api.platform import MessageType
 
 from .memory_scope import is_event_memory_allowed
 
-SESSION_PLUGIN_NAMES = ("群间记忆", "DynamicsMemory", "astrbot_plugin_dynamics_memory", "LivingMemory", "astrbot_plugin_livingmemory")
+SESSION_PLUGIN_NAMES = (
+    "群间记忆",
+    "DynamicsMemory",
+    "astrbot_plugin_dynamics_memory",
+    "LivingMemory",
+    "astrbot_plugin_livingmemory",
+)
 _ACTIVE_PLUGIN_REF: weakref.ReferenceType | None = None
 
 
@@ -170,6 +176,7 @@ class PassiveGroupCaptureFilter(CustomFilter):
 
 _PLUGIN_REF_ATTR = "_lm_active_plugin_ref"
 
+
 def _plugin_ref_holder() -> Any:
     """返回热重载后仍然稳定的 weakref holder；取不到时返回 None。
 
@@ -199,6 +206,7 @@ def _plugin_ref_holder() -> Any:
         if module is not None:
             return module
     return None
+
 
 def _publish_plugin_ref(ref: "weakref.ReferenceType | None") -> None:
     """把 weakref 副本写到稳定 holder 上（写不进去也不影响主路径）。"""

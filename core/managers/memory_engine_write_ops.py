@@ -4,7 +4,6 @@ MemoryEngine 的 MemoryEngineWriteOpsMixin 拆分模块
 """
 
 import asyncio
-import copy
 import json
 import time
 from typing import Any
@@ -13,14 +12,10 @@ from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
 from ...storage.schema import WRITE_OPS_SCHEMA_STATEMENTS
-from ..memory_scope import memory_metadata_matches_policy
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
-from ..retrieval.hybrid_retriever import HybridResult
 from ..utils.json_utils import safe_json_dict
-from ..utils.number_utils import clamp_float
 
 import aiosqlite
-from collections import OrderedDict
 
 
 class MemoryEngineWriteOpsMixin:
@@ -39,11 +34,6 @@ class MemoryEngineWriteOpsMixin:
     hybrid_retriever: Any | None
     dual_route_retriever: Any | None
     graph_memory_manager: Any | None
-    _search_cache_enabled: bool
-    _search_cache_ttl: float
-    _search_cache_max_size: int
-    _search_cache_generation: int
-    _search_cache: OrderedDict[tuple[Any, ...], tuple[float, list[HybridResult]]]
     _write_op_max_retries: int
 
     def _write_db(self):
@@ -66,11 +56,11 @@ class MemoryEngineWriteOpsMixin:
         for row in rows:
             metadata = json.loads(row["metadata"])
             try:
-                source=await loader(metadata)
+                source = await loader(metadata)
             except (ValueError, TypeError, KeyError):
-                source=None
+                source = None
             if not source:
-                unavailable+=1
+                unavailable += 1
                 continue
             async with self._write_db() as db:
                 current = await (
@@ -84,9 +74,11 @@ class MemoryEngineWriteOpsMixin:
                 if current_metadata.get("narrative_provenance") != metadata.get(
                     "narrative_provenance"
                 ):
-                    unavailable+=1
+                    unavailable += 1
                     continue
-                current_metadata.update(has_source=True, source_message_count=len(source))
+                current_metadata.update(
+                    has_source=True, source_message_count=len(source)
+                )
                 await db.execute(
                     "INSERT OR IGNORE INTO memory_sources(memory_id,source_json,created_at,updated_at) VALUES(?,?,?,?)",
                     (
@@ -113,26 +105,36 @@ class MemoryEngineWriteOpsMixin:
 
     async def requeue_sqlite_failures(self):
         async with self._write_db() as db:
-            cursor=await db.execute("UPDATE memory_write_ops SET status='needs_repair',retry_count=0,updated_at=? "
-                "WHERE status='failed' AND lower(error) LIKE '%database is locked%'",(time.time(),))
+            cursor = await db.execute(
+                "UPDATE memory_write_ops SET status='needs_repair',retry_count=0,updated_at=? "
+                "WHERE status='failed' AND lower(error) LIKE '%database is locked%'",
+                (time.time(),),
+            )
         return int(cursor.rowcount or 0)
 
-    async def stored_summary_window(self, session_id, start, end, *, snapshot_fingerprint=None):
+    async def stored_summary_window(
+        self, session_id, start, end, *, snapshot_fingerprint=None
+    ):
         if self.db_connection is None:
             return None
         window_predicate = (
             "(json_extract(d.metadata,'$.source_window.snapshot_fingerprint')=? OR EXISTS ("
             "SELECT 1 FROM json_each(d.metadata,'$.source_windows') w "
             "WHERE json_extract(w.value,'$.snapshot_fingerprint')=?)) "
-            if snapshot_fingerprint else
-            "json_extract(d.metadata,'$.source_window.start_index')=? AND json_extract(d.metadata,'$.source_window.end_index')=? "
+            if snapshot_fingerprint
+            else "json_extract(d.metadata,'$.source_window.start_index')=? AND json_extract(d.metadata,'$.source_window.end_index')=? "
         )
-        window_params = (snapshot_fingerprint, snapshot_fingerprint) if snapshot_fingerprint else (start, end)
+        window_params = (
+            (snapshot_fingerprint, snapshot_fingerprint)
+            if snapshot_fingerprint
+            else (start, end)
+        )
         cursor = await self.db_connection.execute(
             "SELECT d.id FROM documents d LEFT JOIN memory_sources s ON s.memory_id=d.id "
             "WHERE json_valid(d.metadata) AND json_extract(d.metadata,'$.source_session_id')=? "
-            "AND " + window_predicate +
-            "AND COALESCE(json_extract(d.metadata,'$.status'),'active')='active' "
+            "AND "
+            + window_predicate
+            + "AND COALESCE(json_extract(d.metadata,'$.status'),'active')='active' "
             "AND json_extract(d.metadata,'$.superseded_by') IS NULL "
             "AND (COALESCE(json_extract(d.metadata,'$.has_source'),0)=0 OR s.memory_id IS NOT NULL) ORDER BY d.id LIMIT 2",
             (session_id, *window_params),
@@ -186,7 +188,8 @@ class MemoryEngineWriteOpsMixin:
         except Exception as exc:
             logger.error(
                 "[MemoryEngine] 写操作日志创建失败，未开始修改记忆 sqlite_code=%s sqlite_name=%s",
-                getattr(exc, "sqlite_errorcode", None), getattr(exc, "sqlite_errorname", None),
+                getattr(exc, "sqlite_errorcode", None),
+                getattr(exc, "sqlite_errorname", None),
                 exc_info=True,
             )
             raise
@@ -257,267 +260,11 @@ class MemoryEngineWriteOpsMixin:
         except Exception as exc:
             logger.error(
                 "[MemoryEngine] 写操作日志更新失败 sqlite_code=%s sqlite_name=%s",
-                getattr(exc, "sqlite_errorcode", None), getattr(exc, "sqlite_errorname", None),
+                getattr(exc, "sqlite_errorcode", None),
+                getattr(exc, "sqlite_errorname", None),
                 exc_info=True,
             )
             raise
-
-    def _normalize_cache_query(self, query: str) -> str:
-        return " ".join(query.casefold().split())
-
-    def _search_cache_key(
-        self,
-        query: str,
-        k: int,
-        session_id: str | None,
-        persona_id: str | None,
-        interaction_type: str | None = None,
-        source_platform: str | None = None,
-        source_session_id: str | None = None,
-        touch_access: bool = True,
-    ) -> tuple[Any, ...]:
-        return (
-            self._search_cache_generation,
-            self._normalize_cache_query(query),
-            int(k),
-            session_id or "",
-            persona_id or "",
-            interaction_type or "",
-            source_platform or "",
-            source_session_id or "",
-            bool(touch_access),
-            bool(self.dual_route_retriever is not None),
-            round(float(self.config.get("document_route_weight", 0.65)), 4),
-            round(float(self.config.get("graph_route_weight", 0.35)), 4),
-            int(self.config.get("graph_expansion_hops", 1)),
-            round(float(self.config.get("min_importance_for_retrieval", 0.0)), 4),
-            round(float(self.config.get("min_similarity_for_retrieval", 0.0)), 4),
-            int(self.config.get("recent_memory_count", 2)),
-            int(self.config.get("recent_memory_max_age_hours", 72)),
-            str(self.config.get("memory_type_filter", "all")),
-            bool(self.config.get("rerank_enabled", False)),
-            int(self.config.get("rerank_candidates", 20)),
-        )
-
-    def _filter_by_retrieval_policy(
-        self, results: list[HybridResult]
-    ) -> list[HybridResult]:
-        importance_threshold = clamp_float(
-            self.config.get("min_importance_for_retrieval"), default=0.0
-        )
-        similarity_threshold = clamp_float(
-            self.config.get("min_similarity_for_retrieval"), default=0.0
-        )
-        event_only = self.config.get("memory_type_filter", "all") == "event_only"
-        event_atom_types = {"episodic", "planned", "factual"}
-        filtered: list[HybridResult] = []
-
-        for result in results:
-            metadata = getattr(result, "metadata", {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            if str(metadata.get("status") or "active") != "active":
-                continue
-            if (
-                importance_threshold > 0
-                and clamp_float(metadata.get("importance"), default=0.5)
-                < importance_threshold
-            ):
-                continue
-
-            signals: list[float] = []
-            vector_score = getattr(result, "vector_score", None)
-            if vector_score is not None:
-                signals.append(clamp_float(vector_score, default=0.0))
-            breakdown = getattr(result, "score_breakdown", None)
-            if isinstance(breakdown, dict):
-                for key in ("document_vector_score", "graph_vector_score"):
-                    if key in breakdown:
-                        signals.append(clamp_float(breakdown[key], default=0.0))
-            if (
-                similarity_threshold > 0
-                and signals
-                and max(signals) < similarity_threshold
-            ):
-                continue
-
-            atom_types = metadata.get("atom_types")
-            if event_only and isinstance(atom_types, list) and atom_types:
-                normalized_types = {str(value).casefold() for value in atom_types}
-                if normalized_types.isdisjoint(event_atom_types):
-                    continue
-            filtered.append(result)
-        return filtered
-
-    async def _get_recent_memory_results(
-        self,
-        count: int,
-        session_id: str | None,
-        persona_id: str | None,
-        interaction_type: str | None = None,
-        source_platform: str | None = None,
-        source_session_id: str | None = None,
-    ) -> list[HybridResult]:
-        if count <= 0 or self.db_connection is None:
-            return []
-
-        conditions = [
-            "COALESCE(json_extract(metadata, '$.status'), 'active') = 'active'"
-        ]
-        params: list[Any] = []
-        if session_id is not None:
-            conditions.append("json_extract(metadata, '$.session_id') = ?")
-            params.append(session_id)
-        if persona_id is not None:
-            conditions.append("json_extract(metadata, '$.persona_id') = ?")
-            params.append(persona_id)
-        if interaction_type is not None:
-            conditions.append("json_extract(metadata, '$.interaction_type') = ?")
-            params.append(interaction_type)
-            if interaction_type in {"group_chat", "unknown"}:
-                conditions.append(
-                    "COALESCE(json_extract(metadata, '$.memory_visibility'), '') != 'private'"
-                )
-        if source_session_id is not None:
-            conditions.append("json_extract(metadata, '$.source_session_id') = ?")
-            params.append(source_session_id)
-        if source_platform:
-            prefix = source_platform.casefold() + ":groupmessage:"
-            conditions.append(
-                "(lower(json_extract(metadata, '$.source_platform')) = ? "
-                "OR substr(lower(json_extract(metadata, '$.source_session_id')), 1, length(?)) = ? "
-                "OR substr(lower(json_extract(metadata, '$.session_id')), 1, length(?)) = ?)"
-            )
-            params.extend([source_platform.casefold(), prefix, prefix, prefix, prefix])
-        max_age_hours = max(0, int(self.config.get("recent_memory_max_age_hours", 72)))
-        if max_age_hours > 0:
-            # 表达式与 idx_doc_create_time 逐字匹配，可走索引范围扫描
-            conditions.append(
-                "COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) >= ?"
-            )
-            params.append(time.time() - max_age_hours * 3600)
-        params.append(max(count * 3, count))
-
-        cursor = await self.db_connection.execute(
-            "SELECT id, text, metadata FROM documents INDEXED BY idx_doc_create_time WHERE "
-            + " AND ".join(conditions)
-            + " ORDER BY COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) DESC, id DESC LIMIT ?",
-            params,
-        )
-        rows = await cursor.fetchall()
-        recent = [
-            HybridResult(
-                doc_id=int(row["id"]),
-                final_score=1.0,
-                rrf_score=0.0,
-                bm25_score=None,
-                vector_score=None,
-                content=str(row["text"] or ""),
-                metadata=safe_json_dict(row["metadata"]),
-                score_breakdown={"recent_memory": 1.0},
-            )
-            for row in rows
-        ]
-        return self._filter_by_retrieval_policy(recent)[:count]
-
-    async def _merge_recent_memories(
-        self,
-        results: list[HybridResult],
-        k: int,
-        session_id: str | None,
-        persona_id: str | None,
-        interaction_type: str | None = None,
-        source_platform: str | None = None,
-        source_session_id: str | None = None,
-    ) -> list[HybridResult]:
-        recent_count = min(max(0, int(self.config.get("recent_memory_count", 2))), k)
-        if recent_count <= 0:
-            return results[:k]
-
-        recent = await self._get_recent_memory_results(
-            recent_count,
-            session_id,
-            persona_id,
-            interaction_type=interaction_type,
-            source_platform=source_platform,
-            source_session_id=source_session_id,
-        )
-        if (
-            interaction_type is not None
-            or source_platform is not None
-            or source_session_id is not None
-        ):
-            recent = [
-                result
-                for result in recent
-                if memory_metadata_matches_policy(
-                    result.metadata,
-                    interaction_type=interaction_type,
-                    source_platform=source_platform,
-                    source_session_id=source_session_id,
-                )
-            ]
-        if not recent:
-            return results[:k]
-
-        selected = list(results[: max(0, k - recent_count)])
-        selected_ids = {result.doc_id for result in selected}
-        for result in recent:
-            if result.doc_id not in selected_ids:
-                selected.append(result)
-                selected_ids.add(result.doc_id)
-        for result in results:
-            if len(selected) >= k:
-                break
-            if result.doc_id not in selected_ids:
-                selected.append(result)
-                selected_ids.add(result.doc_id)
-        return selected[:k]
-
-    def _get_cached_search_results(
-        self,
-        cache_key: tuple[Any, ...],
-    ) -> list[HybridResult] | None:
-        if (
-            not self._search_cache_enabled
-            or self._search_cache_ttl <= 0
-            or self._search_cache_max_size <= 0
-        ):
-            return None
-
-        cached = self._search_cache.get(cache_key)
-        if cached is None:
-            return None
-
-        cached_at, results = cached
-        if time.time() - cached_at > self._search_cache_ttl:
-            self._search_cache.pop(cache_key, None)
-            return None
-
-        self._search_cache.move_to_end(cache_key)
-        return copy.deepcopy(results)
-
-    def _set_cached_search_results(
-        self,
-        cache_key: tuple[Any, ...],
-        results: list[HybridResult],
-    ) -> None:
-        if (
-            not self._search_cache_enabled
-            or self._search_cache_ttl <= 0
-            or self._search_cache_max_size <= 0
-        ):
-            return
-
-        self._search_cache[cache_key] = (time.time(), copy.deepcopy(results))
-        self._search_cache.move_to_end(cache_key)
-        while len(self._search_cache) > self._search_cache_max_size:
-            self._search_cache.popitem(last=False)
-
-    def _invalidate_search_cache(self) -> None:
-        """Invalidate cached retrieval results after memory writes."""
-        self._search_cache_generation += 1
-        self._search_cache.clear()
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
@@ -690,12 +437,15 @@ class MemoryEngineWriteOpsMixin:
                         AND json_extract(metadata, '$.status') = 'pending_source_validation'
                         AND json_type(metadata, '$.source_publication_verified_v1') IS NULL
                     END LIMIT 2
-                    """, (op_id,),
+                    """,
+                    (op_id,),
                 ) as cursor:
                     candidates = await cursor.fetchall()
                 if len(candidates) > 1:
                     await self._advance_write_op(
-                        op_id, "source_document_operation_ambiguous", status="failed",
+                        op_id,
+                        "source_document_operation_ambiguous",
+                        status="failed",
                         error="multiple unpublished documents reference this operation",
                     )
                     return False
@@ -712,21 +462,31 @@ class MemoryEngineWriteOpsMixin:
                 if row is not None:
                     metadata = safe_json_dict(row["metadata"])
                     write_op_id = metadata.get("write_op_id")
-                    if write_op_id is not None and (type(write_op_id) is not int or write_op_id != op_id):
+                    if write_op_id is not None and (
+                        type(write_op_id) is not int or write_op_id != op_id
+                    ):
                         await self._advance_write_op(
-                            op_id, "source_document_operation_mismatch", status="failed",
-                            memory_id=memory_id, error="source document belongs to another write operation",
+                            op_id,
+                            "source_document_operation_mismatch",
+                            status="failed",
+                            memory_id=memory_id,
+                            error="source document belongs to another write operation",
                         )
                         return False
                     witness = metadata.get("source_publication_verified_v1")
                     if (
-                        type(write_op_id) is int and write_op_id == op_id
+                        type(write_op_id) is int
+                        and write_op_id == op_id
                         and isinstance(witness, dict)
-                        and type(witness.get("write_op_id")) is int and witness["write_op_id"] == op_id
-                        and type(witness.get("memory_id")) is int and witness["memory_id"] == memory_id
+                        and type(witness.get("write_op_id")) is int
+                        and witness["write_op_id"] == op_id
+                        and type(witness.get("memory_id")) is int
+                        and witness["memory_id"] == memory_id
                         and metadata.get("status") in {"active", "archived"}
                     ):
-                        return await self._repair_published_source_write(op_id, memory_id, row["text"], metadata)
+                        return await self._repair_published_source_write(
+                            op_id, memory_id, row["text"], metadata
+                        )
 
             # Only unpublished candidates are discarded. A fresh runtime
             # lease cannot be recreated from a serialized source payload.
@@ -747,12 +507,17 @@ class MemoryEngineWriteOpsMixin:
                     )
                 if not await self.delete_memory(memory_id):
                     await self._advance_write_op(
-                        op_id, "source_cleanup_pending", status="needs_repair",
-                        memory_id=memory_id, error="unpublished source document deletion failed",
+                        op_id,
+                        "source_cleanup_pending",
+                        status="needs_repair",
+                        memory_id=memory_id,
+                        error="unpublished source document deletion failed",
                     )
                     return False
             await self._advance_write_op(
-                op_id, "source_lease_unavailable_after_restart", status="failed",
+                op_id,
+                "source_lease_unavailable_after_restart",
+                status="failed",
                 memory_id=memory_id,
                 error="fresh source publication lease is unavailable after restart",
             )
@@ -780,16 +545,25 @@ class MemoryEngineWriteOpsMixin:
         metadata = memory.get("metadata") or payload.get("metadata") or {}
         if not isinstance(metadata, dict):
             metadata = safe_json_dict(metadata)
-        if metadata.get("has_source") and not await self.get_memory_source(int(memory_id)):
+        if metadata.get("has_source") and not await self.get_memory_source(
+            int(memory_id)
+        ):
             retained_sources = payload.get("source_messages")
             loader = getattr(self, "source_loader", None)
             if not retained_sources and callable(loader):
                 retained_sources = await loader(metadata)
             if not isinstance(retained_sources, list) or not retained_sources:
-                await self._advance_write_op(op_id, "source_pending", status="needs_repair", memory_id=int(memory_id))
+                await self._advance_write_op(
+                    op_id,
+                    "source_pending",
+                    status="needs_repair",
+                    memory_id=int(memory_id),
+                )
                 return False
             await self.save_memory_source(int(memory_id), retained_sources)
-            await self._advance_write_op(op_id, "source_repaired", memory_id=int(memory_id))
+            await self._advance_write_op(
+                op_id, "source_repaired", memory_id=int(memory_id)
+            )
         content = str(memory.get("text") or "")
         session_id = metadata.get("session_id") or payload.get("session_id")
         persona_id = metadata.get("persona_id") or payload.get("persona_id")
@@ -866,11 +640,15 @@ class MemoryEngineWriteOpsMixin:
         ):
             atoms = (
                 await self.atom_store.get_by_parent(memory_id)
-                if self.atom_store is not None and self.atom_enabled else None
+                if self.atom_store is not None and self.atom_enabled
+                else None
             )
             try:
                 indexed = await self.graph_memory_manager.index_memory(
-                    memory_id, content, metadata, atoms or None,
+                    memory_id,
+                    content,
+                    metadata,
+                    atoms or None,
                 )
             except asyncio.CancelledError:
                 raise
@@ -881,7 +659,10 @@ class MemoryEngineWriteOpsMixin:
                 await self._record_published_graph_error(op_id, "graph repair deferred")
                 return False
         await self._advance_write_op(
-            op_id, "completed", status="completed", memory_id=memory_id,
+            op_id,
+            "completed",
+            status="completed",
+            memory_id=memory_id,
         )
         return True
 
@@ -923,7 +704,9 @@ class MemoryEngineWriteOpsMixin:
                 await self.hybrid_retriever.delete_memory(int(memory_id))
 
             async with self._write_db() as db:
-                await db.execute("DELETE FROM memory_sources WHERE memory_id = ?", (int(memory_id),))
+                await db.execute(
+                    "DELETE FROM memory_sources WHERE memory_id = ?", (int(memory_id),)
+                )
         if self.graph_memory_manager is not None:
             await self.graph_memory_manager.delete_memory(int(memory_id))
         if self.atom_store is not None:
@@ -983,10 +766,14 @@ class MemoryEngineWriteOpsMixin:
             return 0
         placeholders = ",".join("?" * len(memory_ids))
         cursor = await self.db_connection.execute(
-            f"SELECT id, doc_id FROM documents WHERE id IN ({placeholders})", memory_ids)
+            f"SELECT id, doc_id FROM documents WHERE id IN ({placeholders})", memory_ids
+        )
         rows = await cursor.fetchall()
         async with self._write_db() as db:
-            await db.execute(f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})", memory_ids)
+            await db.execute(
+                f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})",
+                memory_ids,
+            )
         # The SQLite transaction is finished before the SDK opens its writer.
         # A failed vector delete must retain the repair operation, not claim success.
         for row in rows:
@@ -995,31 +782,30 @@ class MemoryEngineWriteOpsMixin:
                 if deleted is False:
                     raise RuntimeError("Vector deletion was not confirmed")
         async with self._write_db() as db:
-            await db.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", memory_ids)
-            await db.execute(f"DELETE FROM memory_sources WHERE memory_id IN ({placeholders})", memory_ids)
+            await db.execute(
+                f"DELETE FROM documents WHERE id IN ({placeholders})", memory_ids
+            )
+            await db.execute(
+                f"DELETE FROM memory_sources WHERE memory_id IN ({placeholders})",
+                memory_ids,
+            )
         return len(rows)
 
-    async def _delete_graph_and_atoms_for_batch(self, memory_ids: list[int]) -> None:
-        if not memory_ids:
-            return
-        if self.graph_memory_manager is not None:
-            deleted = await self.graph_memory_manager.batch_delete_memories(memory_ids)
-            if deleted is False:
-                raise RuntimeError("Graph deletion deferred until rebuild completes")
-        if self.atom_store is not None:
-            await self.atom_store.batch_delete_by_parent(memory_ids)
-
-    async def _drop_legacy_documents_fts_triggers(self, connection=None):
+    async def cleanup_write_ops(self, retention_days: int = 14) -> int:
+        """Prune aged terminal rows from ``memory_write_ops`` to prevent unbounded growth."""
         if self.db_connection is None:
-            return
-
-        cursor = await self.db_connection.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='trigger' AND tbl_name='documents'
-              AND sql LIKE '%documents_fts%'
-        """)
-        rows = await cursor.fetchall()
-        for row in rows:
-            trigger_name = row[0]
-            await self.db_connection.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
-            logger.warning(f"已清理旧 LivingMemory FTS 触发器: {trigger_name}")
+            return 0
+        cutoff = time.time() - max(1, int(retention_days)) * 86400
+        async with self._write_db() as db:
+            table_check = await db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_write_ops' LIMIT 1"
+            )
+            exists = await table_check.fetchone() is not None
+            await table_check.close()
+            if not exists:
+                return 0
+            cursor = await db.execute(
+                "DELETE FROM memory_write_ops WHERE status IN ('completed', 'failed') AND updated_at < ?",
+                (cutoff,),
+            )
+            return max(0, int(cursor.rowcount or 0))

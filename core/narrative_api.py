@@ -9,15 +9,19 @@ def scope_key(scope: dict) -> str:
     """Partition managed conversations by full origin and character instance."""
     if not isinstance(scope, dict):
         raise ValueError("scope must be an object")
-    values = {key: scope.get(key, "") for key in (
-        "platform", "umo", "persona_id", "instance_id"
-    )}
+    values = {
+        key: scope.get(key, "")
+        for key in ("platform", "umo", "persona_id", "instance_id")
+    }
     if not all(isinstance(value, str) and value.strip() for value in values.values()):
         raise ValueError("scope requires platform, umo, persona_id and instance_id")
     values = {key: value.strip() for key, value in values.items()}
-    return "narrative:v1:" + hashlib.sha256(
-        json.dumps(values, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
+    return (
+        "narrative:v1:"
+        + hashlib.sha256(
+            json.dumps(values, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+    )
 
 
 def timestamp(value) -> float:
@@ -53,8 +57,17 @@ class ScopeEvent:
         return self.scope["platform"]
 
     def get_group_id(self):
-        return self.unified_msg_origin.rsplit(":", 1)[-1] if ":GroupMessage:" in self.unified_msg_origin else ""
+        return (
+            self.unified_msg_origin.rsplit(":", 1)[-1]
+            if ":GroupMessage:" in self.unified_msg_origin
+            else ""
+        )
 
     def get_message_type(self):
         from astrbot.api.platform import MessageType
-        return MessageType.GROUP_MESSAGE if self.get_group_id() else MessageType.FRIEND_MESSAGE
+
+        return (
+            MessageType.GROUP_MESSAGE
+            if self.get_group_id()
+            else MessageType.FRIEND_MESSAGE
+        )

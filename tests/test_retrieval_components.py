@@ -13,7 +13,9 @@ from unittest.mock import AsyncMock, call
 
 import aiosqlite
 import pytest
-from astrbot_plugin_dynamics_memory.core.models.default_stopwords import DEFAULT_STOPWORDS
+from astrbot_plugin_dynamics_memory.core.models.default_stopwords import (
+    DEFAULT_STOPWORDS,
+)
 from astrbot_plugin_dynamics_memory.core.processors.text_processor import TextProcessor
 from astrbot_plugin_dynamics_memory.core.retrieval.bm25_retriever import BM25Retriever
 from astrbot_plugin_dynamics_memory.core.retrieval.dual_route_retriever import (
@@ -37,7 +39,9 @@ from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import (
     RRFFusion,
     VectorResult,
 )
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
+    VectorRetriever,
+)
 from astrbot_plugin_dynamics_memory.core.utils.stopwords_manager import StopwordsManager
 
 
@@ -216,9 +220,7 @@ def test_rrf_fusion_orders_combined_results():
 
 
 class _DummyBM25:
-    async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+    async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
         now = time.time()
         return [
             RRFBM25Result(
@@ -237,9 +239,7 @@ class _DummyBM25:
 
 
 class _DummyVector:
-    async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+    async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
         now = time.time()
         return [
             VectorResult(
@@ -298,9 +298,7 @@ async def test_hybrid_retriever_fallback_when_one_channel_fails():
 @pytest.mark.asyncio
 async def test_dual_route_retriever_dynamic_weighting_promotes_relationship_query():
     class _DocRoute:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 HybridResult(
                     doc_id=1,
@@ -323,9 +321,7 @@ async def test_dual_route_retriever_dynamic_weighting_promotes_relationship_quer
             ]
 
     class _GraphRoute:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 GraphResult(
                     doc_id=2,
@@ -371,9 +367,7 @@ async def test_weighted_sum_scoring_does_not_zero_out_old_important_memory():
     now = time.time()
 
     class _OldImportantBM25:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 RRFBM25Result(
                     doc_id=1,
@@ -398,9 +392,7 @@ async def test_weighted_sum_scoring_does_not_zero_out_old_important_memory():
             ]
 
     class _OldImportantVector:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 VectorResult(
                     doc_id=1,
@@ -467,9 +459,7 @@ async def test_last_access_time_slows_decay():
     recent_access = now - 86400 * 1  # 1天前访问
 
     class _AccessedBM25:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 RRFBM25Result(
                     doc_id=10,
@@ -494,9 +484,7 @@ async def test_last_access_time_slows_decay():
             ]
 
     class _AccessedVector:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 VectorResult(
                     doc_id=10,
@@ -578,9 +566,7 @@ async def test_mmr_dedup_reduces_semantic_duplicates():
     now = time.time()
 
     class _DuplicateBM25:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 RRFBM25Result(
                     doc_id=i,
@@ -592,9 +578,7 @@ async def test_mmr_dedup_reduces_semantic_duplicates():
             ]
 
     class _DuplicateVector:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 VectorResult(
                     doc_id=i,
@@ -628,7 +612,9 @@ async def test_mmr_dedup_reduces_semantic_duplicates():
 
 def test_apply_mmr_returns_k_results():
     """_apply_mmr 应精确返回 k 条结果（当候选数 > k 时）。"""
-    from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import HybridResult
+    from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import (
+        HybridResult,
+    )
 
     retriever = HybridRetriever(
         bm25_retriever=cast(BM25Retriever, _DummyBM25()),
@@ -806,9 +792,7 @@ async def test_hybrid_retriever_metadata_missing_fields_no_crash():
     """metadata 缺少 importance/create_time 等字段时，评分不应崩溃。"""
 
     class _MinimalBM25:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 RRFBM25Result(
                     doc_id=1,
@@ -819,9 +803,7 @@ async def test_hybrid_retriever_metadata_missing_fields_no_crash():
             ]
 
     class _MinimalVector:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 VectorResult(
                     doc_id=1,
@@ -1021,9 +1003,7 @@ async def test_graph_retriever_non_numeric_numeric_metadata_no_crash():
     """Graph route should tolerate old string values in vector/entry metadata."""
 
     class _GraphKeyword:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 RRFBM25Result(
                     doc_id=1,
@@ -1040,9 +1020,7 @@ async def test_graph_retriever_non_numeric_numeric_metadata_no_crash():
             ]
 
     class _GraphVector:
-        async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+        async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
             return [
                 VectorResult(
                     doc_id=1,
@@ -1303,9 +1281,7 @@ def test_add_custom_words_jieba_add_word_fails():
 class _RerankDocBM25:
     """BM25 route returning 4 docs in RRF-favorable order (doc 1 best)."""
 
-    async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+    async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
         now = time.time()
         return [
             RRFBM25Result(
@@ -1321,9 +1297,7 @@ class _RerankDocBM25:
 class _RerankDocVector:
     """Vector route returning 4 docs in opposite order (doc 4 best)."""
 
-    async def search(
-        self, query, k, session_id=None, persona_id=None, **kwargs
-    ):
+    async def search(self, query, k, session_id=None, persona_id=None, **kwargs):
         now = time.time()
         return [
             VectorResult(

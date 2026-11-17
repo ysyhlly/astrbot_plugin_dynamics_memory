@@ -3,12 +3,9 @@
 负责管理会话和消息的持久化存储,使用 SQLite 数据库
 """
 
-import contextvars
-from .conversation_store_messages import ConversationStoreMessagesMixin
-from .conversation_summary_progress import ConversationSummaryProgress
-
-
 import asyncio
+import contextlib
+import contextvars
 import json
 import time
 from pathlib import Path
@@ -19,10 +16,13 @@ import aiosqlite
 from astrbot.api import logger
 
 from ..core.models.conversation_models import Message, Session, serialize_to_json
+from .conversation_summary_progress import ConversationSummaryProgress
+from .series_conflicts import SeriesConflictStore, valid_event
 from .sqlite_connection import open_connection
 
-
-from .series_conflicts import SeriesConflictStore, valid_event
+_CONVERSATION_STORE_IN_WRITE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_conversation_store_in_write", default=False
+)
 
 
 class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
@@ -44,15 +44,49 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         """
         self.db_path = db_path
         self.connection: aiosqlite.Connection | None = None
+        self._opened_connection: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
+        self._read_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
 
         # 确保数据库目录存在
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+    @contextlib.asynccontextmanager
+    async def _read_session(self):
+        """Return a serialized read connection isolated from uncommitted writes."""
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        if (
+            self.db_path == ":memory:"
+            or self.connection is not getattr(self, "_opened_connection", None)
+            or _CONVERSATION_STORE_IN_WRITE.get()
+        ):
+            yield self.connection
+            return
+        async with self._read_lock:
+            if self._read_conn is None:
+                self._read_conn = await open_connection(
+                    self.db_path, apply_journal_mode=False
+                )
+                self._read_conn.row_factory = aiosqlite.Row
+            yield self._read_conn
+
+    @contextlib.asynccontextmanager
+    async def _write_section(self):
+        """Acquire ``_write_lock`` while allowing nested reads to see active writes."""
+        token = _CONVERSATION_STORE_IN_WRITE.set(True)
+        try:
+            async with self._write_lock:
+                yield
+        finally:
+            _CONVERSATION_STORE_IN_WRITE.reset(token)
+
     async def initialize(self) -> None:
         """初始化数据库连接并创建表结构"""
         self.connection = await open_connection(self.db_path, apply_journal_mode=True)
         self.connection.row_factory = aiosqlite.Row
+        self._opened_connection = self.connection
         await self._create_tables()
         await self._create_indexes()
         await self.initialize_series_conflicts()
@@ -76,9 +110,14 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
 
     async def close(self) -> None:
         """关闭数据库连接"""
+        async with self._read_lock:
+            if self._read_conn is not None:
+                await self._read_conn.close()
+                self._read_conn = None
         if self.connection:
             await self.connection.close()
             self.connection = None
+            self._opened_connection = None
             logger.info("[ConversationStore] 数据库连接已关闭")
 
     async def _create_tables(self) -> None:
@@ -205,16 +244,17 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             Optional[Session]: 会话对象,不存在则返回 None
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT id, session_id, platform, created_at, last_active_at,
                    message_count, participants, metadata
             FROM sessions
             WHERE session_id = ?
         """,
-            (session_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
 
         if not row:
             return None
@@ -262,17 +302,18 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             List[Session]: 会话列表
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT id, session_id, platform, created_at, last_active_at,
                    message_count, participants, metadata
             FROM sessions
             ORDER BY last_active_at DESC
             LIMIT ?
         """,
-            (limit,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
 
         sessions = []
         for row in rows:
@@ -315,8 +356,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
 
     async def list_session_ids(self) -> list[str]:
         """Return every known session id for import session-id remapping."""
-        async with self.connection.execute("SELECT session_id FROM sessions") as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute("SELECT session_id FROM sessions") as cursor:
+                rows = await cursor.fetchall()
         return [str(row["session_id"]) for row in rows if row["session_id"]]
 
     async def add_message(self, message: Message) -> int:
@@ -457,8 +499,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             """
             params = (session_id, limit)
 
-        async with self.connection.execute(query, params) as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
 
         messages = []
         for row in rows:
@@ -478,29 +521,34 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             int: 消息数量
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT COUNT(*) as count
             FROM messages
             WHERE session_id = ?
         """,
-            (session_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
         return int(row["count"])
 
     async def native_summary_window_start(
-        self, session_id: str, messages: list[Message], metadata: dict[str, Any],
+        self,
+        session_id: str,
+        messages: list[Message],
+        metadata: dict[str, Any],
     ) -> int | None:
         """Locate an unchanged window covering the first unsummarized row."""
         if not messages:
             return None
         first = messages[0]
-        async with self.connection.execute(
-            "SELECT COUNT(*) FROM messages WHERE session_id=? AND (timestamp,id) < (?,?)",
-            (session_id, first.timestamp, first.id),
-        ) as cursor:
-            start = (await cursor.fetchone())[0]
+        async with self._read_session() as conn:
+            async with conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=? AND (timestamp,id) < (?,?)",
+                (session_id, first.timestamp, first.id),
+            ) as cursor:
+                start = (await cursor.fetchone())[0]
         progress = int(metadata.get("last_summarized_index", 0) or 0)
         if not start <= progress < start + len(messages):
             return None
@@ -508,23 +556,30 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         return start if current == messages else None
 
     async def write_native_pending_summary(
-        self, session_id: str, messages: list[Message], pending: dict[str, Any],
+        self,
+        session_id: str,
+        messages: list[Message],
+        pending: dict[str, Any],
     ) -> bool:
         """Persist the failed rows at their current offsets after a summarized-head trim."""
         if len(messages) < 2:
             return False
-        async with self._write_lock:
+        async with self._write_section():
             committed = False
             try:
                 await self.connection.execute("BEGIN IMMEDIATE")
                 session = await self.get_session(session_id)
                 if session is None:
                     return False
-                start = await self.native_summary_window_start(session_id, messages, session.metadata)
+                start = await self.native_summary_window_start(
+                    session_id, messages, session.metadata
+                )
                 if start is None:
                     return False
                 session.metadata["pending_summary"] = {
-                    **pending, "start_index": start, "end_index": start + len(messages),
+                    **pending,
+                    "start_index": start,
+                    "end_index": start + len(messages),
                 }
                 await self.connection.execute(
                     "UPDATE sessions SET metadata=? WHERE session_id=?",
@@ -538,13 +593,17 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                     await self._settle_write(self.connection.rollback())
 
     async def commit_summary_cursor(
-        self, session_id: str, timestamp: float, message_id: int, *,
+        self,
+        session_id: str,
+        timestamp: float,
+        message_id: int,
+        *,
         window_messages: list[Message] | None = None,
     ) -> bool:
         """Commit the final row after verifying that the summary covers the current prefix."""
         if self.connection is None or type(message_id) is not int or message_id <= 0:
             return False
-        async with self._write_lock:
+        async with self._write_section():
             try:
                 await self.connection.execute("BEGIN IMMEDIATE")
                 async with self.connection.execute(
@@ -567,24 +626,45 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                     return False
                 metadata = json.loads(row["metadata"] or "{}")
                 if window_messages is not None:
-                    start = await self.native_summary_window_start(session_id, window_messages, metadata)
+                    start = await self.native_summary_window_start(
+                        session_id, window_messages, metadata
+                    )
                     if start is None or start + len(window_messages) != row["position"]:
                         await self.connection.rollback()
                         return False
-                metadata["last_summarized_index"] = max(int(metadata.get("last_summarized_index", 0) or 0), int(row["position"]))
+                metadata["last_summarized_index"] = max(
+                    int(metadata.get("last_summarized_index", 0) or 0),
+                    int(row["position"]),
+                )
                 metadata["pending_summary"] = None
-                metadata["last_summary_message_v1"] = {"id": message_id, "timestamp": timestamp}
-                await self.connection.execute("UPDATE sessions SET metadata=? WHERE session_id=?",
-                    (json.dumps(metadata, ensure_ascii=False), session_id))
+                metadata["last_summary_message_v1"] = {
+                    "id": message_id,
+                    "timestamp": timestamp,
+                }
+                await self.connection.execute(
+                    "UPDATE sessions SET metadata=? WHERE session_id=?",
+                    (json.dumps(metadata, ensure_ascii=False), session_id),
+                )
                 try:
                     await self._commit_write_transaction()
                 except asyncio.CancelledError as exc:
                     # The shared helper drains the SQLite commit before raising.
                     # Preserve a durable cursor receipt for reflection cleanup.
-                    async with self.connection.execute("SELECT metadata FROM sessions WHERE session_id=?", (session_id,)) as cursor:
+                    async with self.connection.execute(
+                        "SELECT metadata FROM sessions WHERE session_id=?",
+                        (session_id,),
+                    ) as cursor:
                         saved = await cursor.fetchone()
-                    if saved and json.loads(saved[0]).get("last_summary_message_v1") == metadata["last_summary_message_v1"]:
-                        exc.summary_cursor_committed = (session_id, message_id, timestamp)
+                    if (
+                        saved
+                        and json.loads(saved[0]).get("last_summary_message_v1")
+                        == metadata["last_summary_message_v1"]
+                    ):
+                        exc.summary_cursor_committed = (
+                            session_id,
+                            message_id,
+                            timestamp,
+                        )
                     raise
                 return True
             except BaseException:
@@ -750,8 +830,14 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
 
             deleted_count = cursor.rowcount
             if session_id.startswith("narrative:v1:"):
-                await self.connection.execute("DELETE FROM managed_summary_progress WHERE session_id=?", (session_id,))
-                await self.connection.execute("DELETE FROM managed_summary_refusals WHERE session_id=?", (session_id,))
+                await self.connection.execute(
+                    "DELETE FROM managed_summary_progress WHERE session_id=?",
+                    (session_id,),
+                )
+                await self.connection.execute(
+                    "DELETE FROM managed_summary_refusals WHERE session_id=?",
+                    (session_id,),
+                )
 
             await self.connection.execute(
                 """
@@ -796,8 +882,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             query += " LIMIT ?"
             params = (session_id, limit)
 
-        async with self.connection.execute(query, params) as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
 
         messages = []
         for row in rows:
@@ -825,8 +912,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             ORDER BY timestamp ASC, id ASC
         """
         refs: list[dict[str, Any]] = []
-        async with self.connection.execute(query, (session_id,)) as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute(query, (session_id,)) as cursor:
+                rows = await cursor.fetchall()
         for row in rows:
             metadata = row["metadata"] or "{}"
             try:
@@ -851,8 +939,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             Message 或 None
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT id, session_id, role, content, sender_id, sender_name,
                    group_id, platform, timestamp, metadata
             FROM messages
@@ -860,9 +949,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             ORDER BY timestamp DESC, id DESC
             LIMIT 1
         """,
-            (session_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
 
         if not row:
             return None
@@ -947,7 +1036,7 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             dict: 实际被修正的键（无修正时为空字典）
         """
-        async with self._write_lock:
+        async with self._write_section():
             kept_count = await self.get_message_count(session_id)
             repaired = self._clamp_summary_metadata(metadata, kept_count)
             await self.connection.execute(
@@ -988,7 +1077,7 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         if not ids and position < 0:
             return 0
 
-        async with self._write_lock:
+        async with self._write_section():
             if ids:
                 # 精确按 id 删除：并发新增的消息不受影响
                 placeholders = ",".join("?" for _ in ids)
@@ -1096,16 +1185,17 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             Dict[str, int]: {sender_id: message_count}
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT sender_id, COUNT(*) as count
             FROM messages
             WHERE session_id = ? AND role = 'user'
             GROUP BY sender_id
         """,
-            (session_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
+                (session_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
 
         stats = {}
         for row in rows:
@@ -1155,8 +1245,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         Returns:
             List[Message]: 匹配的消息列表
         """
-        async with self.connection.execute(
-            """
+        async with self._read_session() as conn:
+            async with conn.execute(
+                """
             SELECT id, session_id, role, content, sender_id, sender_name,
                    group_id, platform, timestamp, metadata
             FROM messages
@@ -1164,9 +1255,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
         """,
-            (session_id, f"%{keyword}%", limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+                (session_id, f"%{keyword}%", limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
 
         messages = []
         for row in rows:
@@ -1198,10 +1289,9 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             LIMIT ? OFFSET ?
         """
 
-        async with self.connection.execute(
-            query, (session_id, limit, offset)
-        ) as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute(query, (session_id, limit, offset)) as cursor:
+                rows = await cursor.fetchall()
 
         messages = []
         for row in rows:
@@ -1317,15 +1407,23 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         actor = str(event.get("actor_id") or "bot")
         outgoing = event["type"] == "delivery.success"
         metadata = {
-            "schema_version": 1, "source_event_id": event_id, "scope": scope,
+            "schema_version": 1,
+            "source_event_id": event_id,
+            "scope": scope,
             "fact_kind": "receipt" if outgoing else "observation",
             "is_bot_message": outgoing,
         }
-        async with self._write_lock:
+        async with self._write_section():
             try:
                 cursor = await self.connection.execute(
                     "INSERT OR IGNORE INTO narrative_events VALUES (?, ?, ?, ?, ?)",
-                    (event_key, session_id, event_id, json.dumps(event, ensure_ascii=False), occurred_at),
+                    (
+                        event_key,
+                        session_id,
+                        event_id,
+                        json.dumps(event, ensure_ascii=False),
+                        occurred_at,
+                    ),
                 )
                 if cursor.rowcount == 0:
                     await self.record_series_collision(event_key, event)
@@ -1337,9 +1435,17 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 )
                 await self.connection.execute(
                     "INSERT INTO messages (session_id, role, content, sender_id, sender_name, group_id, platform, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, "assistant" if outgoing else "user", text, actor, actor,
-                     scope["umo"] if ":GroupMessage:" in scope["umo"] else None,
-                     scope["platform"], occurred_at, json.dumps(metadata, ensure_ascii=False)),
+                    (
+                        session_id,
+                        "assistant" if outgoing else "user",
+                        text,
+                        actor,
+                        actor,
+                        scope["umo"] if ":GroupMessage:" in scope["umo"] else None,
+                        scope["platform"],
+                        occurred_at,
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
                 )
                 await self.connection.execute(
                     "UPDATE sessions SET message_count=message_count+1, last_active_at=MAX(last_active_at, ?) WHERE session_id=?",
@@ -1348,8 +1454,12 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 session = await self.get_session(session_id)
                 if session.metadata.get("managed_summary_progress_v1"):
                     # A delayed receipt can sort before the previous cursor.
-                    await self._update_managed_summary_cursor(session_id, session.metadata)
-                    await self._save_managed_summary_metadata(session_id, session.metadata)
+                    await self._update_managed_summary_cursor(
+                        session_id, session.metadata
+                    )
+                    await self._save_managed_summary_metadata(
+                        session_id, session.metadata
+                    )
                 await self.connection.commit()
             except BaseException:
                 await self.connection.rollback()
@@ -1371,15 +1481,20 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         from ..core.memory_scope import classify_umo
         from ..core.narrative_api import scope_key, timestamp
 
-        if (not isinstance(event, dict) or event.get("schema_version") != 1
-                or event.get("type") != "message.received"):
+        if (
+            not isinstance(event, dict)
+            or event.get("schema_version") != 1
+            or event.get("type") != "message.received"
+        ):
             return False
         scope = event.get("scope")
         if not isinstance(scope, dict):
             return False
         try:
-            canonical_scope = {key: scope[key] for key in
-                               ("platform", "umo", "persona_id", "instance_id")}
+            canonical_scope = {
+                key: scope[key]
+                for key in ("platform", "umo", "persona_id", "instance_id")
+            }
             narrative_session = scope_key(canonical_scope)
         except (KeyError, TypeError, ValueError):
             return False
@@ -1389,10 +1504,16 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         event_id = event.get("event_id")
         actor_id = event.get("actor_id")
         text = event.get("text")
-        if (not isinstance(event_id, str) or not event_id.startswith("cd-original-input-v1:")
-                or not isinstance(actor_id, str) or not actor_id.strip()
-                or not isinstance(text, str) or not text.strip()
-                or not isinstance(source_platform, str) or not source_platform.strip()):
+        if (
+            not isinstance(event_id, str)
+            or not event_id.startswith("cd-original-input-v1:")
+            or not isinstance(actor_id, str)
+            or not actor_id.strip()
+            or not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(source_platform, str)
+            or not source_platform.strip()
+        ):
             return False
         try:
             occurred_at = timestamp(event.get("occurred_at"))
@@ -1423,13 +1544,20 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 ) as cursor:
                     existing = await cursor.fetchone()
                     if existing is not None:
-                        await self.record_series_collision(existing["event_key"], envelope)
+                        await self.record_series_collision(
+                            existing["event_key"], envelope
+                        )
                         await self.connection.commit()
                         return False
                 await self.connection.execute(
                     "INSERT INTO narrative_events VALUES (?, ?, ?, ?, ?)",
-                    (archive_key, narrative_session, event_id,
-                     json.dumps(envelope, ensure_ascii=False), occurred_at),
+                    (
+                        archive_key,
+                        narrative_session,
+                        event_id,
+                        json.dumps(envelope, ensure_ascii=False),
+                        occurred_at,
+                    ),
                 )
                 await self.connection.execute(
                     "INSERT INTO sessions (session_id, platform, created_at, last_active_at, message_count, participants, metadata) "
@@ -1439,8 +1567,15 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 await self.connection.execute(
                     "INSERT INTO messages (session_id, role, content, sender_id, sender_name, group_id, platform, timestamp, metadata) "
                     "VALUES (?, 'user', ?, ?, ?, NULL, ?, ?, ?)",
-                    (umo, text, actor_id, actor_id, source_platform.strip(), occurred_at,
-                     json.dumps(metadata, ensure_ascii=False)),
+                    (
+                        umo,
+                        text,
+                        actor_id,
+                        actor_id,
+                        source_platform.strip(),
+                        occurred_at,
+                        json.dumps(metadata, ensure_ascii=False),
+                    ),
                 )
                 await self.connection.execute(
                     "UPDATE sessions SET message_count=message_count+1, last_active_at=MAX(last_active_at, ?), "
@@ -1455,25 +1590,40 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 raise
         return True
 
-    async def recall_narrative_events(self, scope: dict, query: str, limit: int = 5) -> list[dict]:
+    async def recall_narrative_events(
+        self, scope: dict, query: str, limit: int = 5
+    ) -> list[dict]:
         """Recall exact-scope evidence without promoting user statements to fact."""
         from ..core.narrative_api import scope_key
 
-        async with self.connection.execute(
-            "SELECT envelope FROM narrative_events WHERE session_id=? ORDER BY timestamp DESC LIMIT 200",
-            (scope_key(scope),),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        async with self._read_session() as conn:
+            async with conn.execute(
+                "SELECT envelope FROM narrative_events WHERE session_id=? ORDER BY timestamp DESC LIMIT 200",
+                (scope_key(scope),),
+            ) as cursor:
+                rows = await cursor.fetchall()
         events = [json.loads(row[0]) for row in rows]
         terms = set(str(query).casefold().split())
-        events.sort(key=lambda ev: sum(term in ev["text"].casefold() for term in terms), reverse=True)
-        return [{
-            "text": ("用户发言：" if ev["type"] == "message.received" else "已发送：") + ev["text"],
-            "source_id": ev["event_id"], "occurred_at": ev["occurred_at"],
-            "scope": dict(ev["scope"]),
-            "fact_kind": "observation" if ev["type"] == "message.received" else "receipt",
-            "confidence": 1.0,
-        } for ev in events[:limit]]
+        events.sort(
+            key=lambda ev: sum(term in ev["text"].casefold() for term in terms),
+            reverse=True,
+        )
+        return [
+            {
+                "text": (
+                    "用户发言：" if ev["type"] == "message.received" else "已发送："
+                )
+                + ev["text"],
+                "source_id": ev["event_id"],
+                "occurred_at": ev["occurred_at"],
+                "scope": dict(ev["scope"]),
+                "fact_kind": "observation"
+                if ev["type"] == "message.received"
+                else "receipt",
+                "confidence": 1.0,
+            }
+            for ev in events[:limit]
+        ]
 
     async def _read_narrative_event_rows(self, event_keys: list[str]) -> dict:
         """Read each exact primary key once; callers still verify scope/type/author."""
@@ -1482,50 +1632,78 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         unique = list(dict.fromkeys(event_keys))
         rows = {}
         for offset in range(0, len(unique), 200):
-            chunk = unique[offset:offset + 200]
+            chunk = unique[offset : offset + 200]
             placeholders = ",".join("?" for _ in chunk)
-            async with self.connection.execute(
-                f"SELECT event_key,session_id,envelope FROM narrative_events WHERE event_key IN ({placeholders})", chunk,
-            ) as cursor:
-                for key, session_id, raw in await cursor.fetchall():
-                    try:
-                        event = json.loads(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(event, dict):
-                        rows[key] = (session_id, event)
+            async with self._read_session() as conn:
+                async with conn.execute(
+                    f"SELECT event_key,session_id,envelope FROM narrative_events WHERE event_key IN ({placeholders})",
+                    chunk,
+                ) as cursor:
+                    fetched = await cursor.fetchall()
+            for key, session_id, raw in fetched:
+                try:
+                    event = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(event, dict):
+                    rows[key] = (session_id, event)
         return rows
 
-    async def load_narrative_events(self, scope: dict, source_event_ids: list[str]) -> dict:
+    async def load_narrative_events(
+        self, scope: dict, source_event_ids: list[str]
+    ) -> dict:
         """Request-local batch of authoritative events; no persistent text cache."""
         from ..core.narrative_api import scope_key
-        if self.connection is None or not isinstance(source_event_ids, list) or len(source_event_ids) > 1000:
+
+        if (
+            self.connection is None
+            or not isinstance(source_event_ids, list)
+            or len(source_event_ids) > 1000
+        ):
             return {}
         session = scope_key(scope)
-        ids = list(dict.fromkeys(eid.strip() for eid in source_event_ids if isinstance(eid, str) and eid.strip()))
-        stored = await self._read_narrative_event_rows([session + ":" + eid for eid in ids])
+        ids = list(
+            dict.fromkeys(
+                eid.strip()
+                for eid in source_event_ids
+                if isinstance(eid, str) and eid.strip()
+            )
+        )
+        stored = await self._read_narrative_event_rows(
+            [session + ":" + eid for eid in ids]
+        )
         result = {}
         for eid in ids:
             row = stored.get(session + ":" + eid)
             if row is None or row[0] != session:
                 continue
             event = row[1]
-            if (event.get("event_id") != eid or event.get("type") not in {"message.received", "delivery.success"}
-                    or not isinstance(event.get("scope"), dict) or any(
-                        event["scope"].get(field) != scope.get(field)
-                        for field in ("platform", "umo", "persona_id", "instance_id"))):
+            if (
+                event.get("event_id") != eid
+                or event.get("type") not in {"message.received", "delivery.success"}
+                or not isinstance(event.get("scope"), dict)
+                or any(
+                    event["scope"].get(field) != scope.get(field)
+                    for field in ("platform", "umo", "persona_id", "instance_id")
+                )
+            ):
                 continue
             result[eid] = event
         return result
 
-    async def load_narrative_event(self, scope: dict, source_event_id: str) -> dict | None:
+    async def load_narrative_event(
+        self, scope: dict, source_event_id: str
+    ) -> dict | None:
         if not isinstance(source_event_id, str) or not source_event_id.strip():
             return None
-        return (await self.load_narrative_events(scope, [source_event_id])).get(source_event_id.strip())
+        return (await self.load_narrative_events(scope, [source_event_id])).get(
+            source_event_id.strip()
+        )
 
     @staticmethod
     def _narrative_source_plan(metadata: dict):
         from ..core.narrative_api import scope_key
+
         if not isinstance(metadata, dict):
             return None
         evidence = metadata.get("narrative_provenance") or []
@@ -1535,7 +1713,11 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
             return None
         keys = []
         for item in evidence:
-            if not isinstance(item, dict) or not item.get("source_id") or not isinstance(item.get("scope"), dict):
+            if (
+                not isinstance(item, dict)
+                or not item.get("source_id")
+                or not isinstance(item.get("scope"), dict)
+            ):
                 return None
             try:
                 key = scope_key(item["scope"])
@@ -1549,10 +1731,13 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
     async def load_narrative_sources_many(self, metadatas: list[dict]) -> list:
         """Deduplicate source reads across selected summaries, preserving every plan."""
         from ..core.narrative_api import timestamp
+
         if not isinstance(metadatas, list) or len(metadatas) > 64:
             raise ValueError("narrative_source_batch_limit")
         plans = [self._narrative_source_plan(metadata) for metadata in metadatas]
-        stored = await self._read_narrative_event_rows([key for plan in plans if plan for key in plan[1]])
+        stored = await self._read_narrative_event_rows(
+            [key for plan in plans if plan for key in plan[1]]
+        )
         outputs = []
         for plan in plans:
             if plan is None:
@@ -1566,10 +1751,15 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                     output = None
                     break
                 event, scope = row[1], item["scope"]
-                if (event.get("event_id") != str(item["source_id"])
-                        or event.get("type") not in {"message.received", "delivery.success"}
-                        or not isinstance(event.get("scope"), dict)
-                        or any(event["scope"].get(k) != scope.get(k) for k in ("platform", "umo", "persona_id", "instance_id"))):
+                if (
+                    event.get("event_id") != str(item["source_id"])
+                    or event.get("type") not in {"message.received", "delivery.success"}
+                    or not isinstance(event.get("scope"), dict)
+                    or any(
+                        event["scope"].get(k) != scope.get(k)
+                        for k in ("platform", "umo", "persona_id", "instance_id")
+                    )
+                ):
                     output = None
                     break
                 outgoing = event["type"] == "delivery.success"
@@ -1577,39 +1767,88 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
                 if item.get("fact_kind") != kind:
                     output = None
                     break
-                output.append({
-                    "id": 0, "session_id": expected, "role": "assistant" if outgoing else "user",
-                    "content": event["text"], "sender_id": event["actor_id"], "sender_name": event["actor_id"],
-                    "group_id": scope["umo"], "platform": scope["platform"], "timestamp": timestamp(event["occurred_at"]),
-                    "metadata": {"schema_version": 1, "source_event_id": event["event_id"], "scope": scope,
-                                 "fact_kind": kind, "is_bot_message": outgoing},
-                })
+                output.append(
+                    {
+                        "id": 0,
+                        "session_id": expected,
+                        "role": "assistant" if outgoing else "user",
+                        "content": event["text"],
+                        "sender_id": event["actor_id"],
+                        "sender_name": event["actor_id"],
+                        "group_id": scope["umo"],
+                        "platform": scope["platform"],
+                        "timestamp": timestamp(event["occurred_at"]),
+                        "metadata": {
+                            "schema_version": 1,
+                            "source_event_id": event["event_id"],
+                            "scope": scope,
+                            "fact_kind": kind,
+                            "is_bot_message": outgoing,
+                        },
+                    }
+                )
             outputs.append(output)
         return outputs
 
     async def load_narrative_sources(self, metadata: dict) -> list[dict] | None:
         return (await self.load_narrative_sources_many([metadata]))[0]
 
+    async def get_messages_by_ids(
+        self, session_id: str, message_ids: list[int]
+    ) -> dict[int, dict]:
+        """Batch-read exact message rows without changing session state or access times."""
+        if (
+            self.connection is None
+            or not isinstance(session_id, str)
+            or not session_id.strip()
+        ):
+            return {}
+        valid_ids = list(
+            dict.fromkeys(
+                mid
+                for mid in message_ids
+                if not isinstance(mid, bool) and isinstance(mid, int) and mid > 0
+            )
+        )
+        if not valid_ids:
+            return {}
+        cols = (
+            "id",
+            "session_id",
+            "role",
+            "content",
+            "sender_id",
+            "sender_name",
+            "group_id",
+            "platform",
+            "timestamp",
+            "metadata",
+        )
+        rows_by_id: dict[int, dict] = {}
+        async with self._read_session() as conn:
+            for offset in range(0, len(valid_ids), 500):
+                chunk = valid_ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                async with conn.execute(
+                    f"SELECT {','.join(cols)} FROM messages WHERE session_id=? AND id IN ({placeholders})",
+                    (session_id, *chunk),
+                ) as cursor:
+                    for row in await cursor.fetchall():
+                        if str(row["session_id"]) == session_id:
+                            rows_by_id[int(row["id"])] = {key: row[key] for key in cols}
+        return rows_by_id
+
     async def get_message_by_id(self, session_id: str, message_id: int) -> dict | None:
         """Read one exact message row without changing session state or access times."""
-        if self.connection is None:
+        if (
+            isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+            or message_id <= 0
+        ):
             return None
-        if not isinstance(session_id, str) or not session_id.strip():
-            return None
-        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
-            return None
-        async with self.connection.execute(
-            "SELECT id,session_id,role,content,sender_id,sender_name,group_id,platform,timestamp,metadata "
-            "FROM messages WHERE session_id=? AND id=? LIMIT 1",
-            (session_id, message_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-        if not row or str(row["session_id"]) != session_id:
-            return None
-        return {key: row[key] for key in (
-            "id", "session_id", "role", "content", "sender_id", "sender_name",
-            "group_id", "platform", "timestamp", "metadata",
-        )}
+        return (await self.get_messages_by_ids(session_id, [message_id])).get(
+            message_id
+        )
 
     async def get_activity_sources(self, umo: str, message_ids: list[str]) -> dict:
         """Resolve physical group IDs and managed envelopes from the owning store."""
@@ -1622,45 +1861,63 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         found = {message_id: [] for message_id in message_ids}
         params = ",".join("?" for _ in message_ids)
         message_id_expr = "CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.platform_message_id') END"
-        async with self.connection.execute(
-            f"SELECT *, {message_id_expr} AS platform_id FROM messages "
-            f"WHERE session_id=? AND role='user' AND {message_id_expr} IN ({params})",
-            (umo, *message_ids),
-        ) as cursor:
-            for row in await cursor.fetchall():
+        async with self._read_session() as conn:
+            async with conn.execute(
+                f"SELECT *, {message_id_expr} AS platform_id FROM messages "
+                f"WHERE session_id=? AND role='user' AND {message_id_expr} IN ({params})",
+                (umo, *message_ids),
+            ) as cursor:
+                message_rows = await cursor.fetchall()
+            for row in message_rows:
                 record = dict(row)
                 record["metadata"] = json.loads(record["metadata"])
                 found[record.pop("platform_id")].append(record)
 
-        event_ids = {
-            "in:" + hashlib.sha256(f"{umo}|{message_id}".encode()).hexdigest(): message_id
-            for message_id in message_ids
-        }
-        async with self.connection.execute(
-            f"SELECT event_id,session_id,envelope FROM narrative_events "
-            f"WHERE event_id IN ({params})", tuple(event_ids)
-        ) as cursor:
-            for row in await cursor.fetchall():
-                try:
-                    event = json.loads(row["envelope"])
-                except (TypeError, ValueError):
-                    continue
-                message_id = event_ids[row["event_id"]]
-                if (not valid_event(event) or event["type"] != "message.received"
-                        or event["event_id"] != row["event_id"]
-                        or event["scope"]["umo"] != umo or event.get("source_ids") != [message_id]):
-                    continue
-                scope = event["scope"]
-                if scope_key(scope) != row["session_id"]:
-                    continue
-                found[message_id].append({
-                    "id": 0, "session_id": row["session_id"], "role": "user",
-                    "content": event["text"], "sender_id": event["actor_id"],
-                    "sender_name": event["actor_id"], "group_id": umo,
-                    "platform": scope["platform"], "timestamp": timestamp(event["occurred_at"]),
+            event_ids = {
+                "in:"
+                + hashlib.sha256(f"{umo}|{message_id}".encode()).hexdigest(): message_id
+                for message_id in message_ids
+            }
+            async with conn.execute(
+                f"SELECT event_id,session_id,envelope FROM narrative_events "
+                f"WHERE event_id IN ({params})",
+                tuple(event_ids),
+            ) as cursor:
+                narrative_rows = await cursor.fetchall()
+        for row in narrative_rows:
+            try:
+                event = json.loads(row["envelope"])
+            except (TypeError, ValueError):
+                continue
+            message_id = event_ids[row["event_id"]]
+            if (
+                not valid_event(event)
+                or event["type"] != "message.received"
+                or event["event_id"] != row["event_id"]
+                or event["scope"]["umo"] != umo
+                or event.get("source_ids") != [message_id]
+            ):
+                continue
+            scope = event["scope"]
+            if scope_key(scope) != row["session_id"]:
+                continue
+            found[message_id].append(
+                {
+                    "id": 0,
+                    "session_id": row["session_id"],
+                    "role": "user",
+                    "content": event["text"],
+                    "sender_id": event["actor_id"],
+                    "sender_name": event["actor_id"],
+                    "group_id": umo,
+                    "platform": scope["platform"],
+                    "timestamp": timestamp(event["occurred_at"]),
                     "metadata": {
-                        "source_event_id": event["event_id"], "scope": scope,
-                        "fact_kind": "observation", "schema_version": 1,
+                        "source_event_id": event["event_id"],
+                        "scope": scope,
+                        "fact_kind": "observation",
+                        "schema_version": 1,
                     },
-                })
+                }
+            )
         return found

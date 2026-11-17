@@ -11,7 +11,9 @@ from astrbot_plugin_dynamics_memory.core.models.conversation_models import Messa
 from astrbot_plugin_dynamics_memory.core.processors import (
     memory_processor as processor_module,
 )
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 from astrbot_plugin_dynamics_memory.core.prompts import prompt_manager
 
 

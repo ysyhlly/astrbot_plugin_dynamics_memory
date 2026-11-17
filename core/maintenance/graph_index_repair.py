@@ -132,10 +132,14 @@ def plan_graph_index_repair(
             raise ValueError(f"duplicate graph document id: {doc_id}")
         by_id[doc_id] = document
 
-    scope = tuple(sorted(by_id if requested_ids is None else {int(i) for i in requested_ids}))
+    scope = tuple(
+        sorted(by_id if requested_ids is None else {int(i) for i in requested_ids})
+    )
     unknown = set(scope) - by_id.keys()
     if unknown:
-        raise ValueError(f"requested graph document ids are outside inventory: {sorted(unknown)}")
+        raise ValueError(
+            f"requested graph document ids are outside inventory: {sorted(unknown)}"
+        )
 
     classifications: list[tuple[int, RepairClass]] = []
     apply_ids: list[int] = []
@@ -222,7 +226,9 @@ def apply_cached_graph_vector_repair(
     if len(approved) != len(set(approved)):
         raise ValueError("repair plan contains duplicate apply IDs")
     if set(persisted_vectors) != set(approved):
-        raise ValueError("persisted vector IDs must exactly match the approved repair scope")
+        raise ValueError(
+            "persisted vector IDs must exactly match the approved repair scope"
+        )
 
     vectors: dict[int, tuple[float, ...]] = {}
     for doc_id in approved:
@@ -235,7 +241,9 @@ def apply_cached_graph_vector_repair(
             or plan.expected_model_id is None
             or vector.model_id != plan.expected_model_id
         ):
-            raise ValueError(f"graph document id {doc_id} cached vector identity changed")
+            raise ValueError(
+                f"graph document id {doc_id} cached vector identity changed"
+            )
         expected_binding = next(
             (binding for binding in plan.apply_bindings if binding[0] == doc_id),
             None,
@@ -245,9 +253,13 @@ def apply_cached_graph_vector_repair(
             vector.source_memory_id,
             vector.content_sha256,
         ):
-            raise ValueError(f"graph document id {doc_id} cached vector source binding changed")
+            raise ValueError(
+                f"graph document id {doc_id} cached vector source binding changed"
+            )
         if len(vector.values) != plan.index_dimension:
-            raise ValueError(f"graph document id {doc_id} cached vector dimension changed")
+            raise ValueError(
+                f"graph document id {doc_id} cached vector dimension changed"
+            )
         normalized = tuple(float(value) for value in vector.values)
         if not all(math.isfinite(value) for value in normalized):
             raise ValueError(f"graph document id {doc_id} cached vector is non-finite")
@@ -256,10 +268,16 @@ def apply_cached_graph_vector_repair(
     existing = adapter.existing_vectors(approved)
     for doc_id, current in existing.items():
         if doc_id not in vectors:
-            raise ValueError(f"index adapter returned an unrequested graph document id: {doc_id}")
+            raise ValueError(
+                f"index adapter returned an unrequested graph document id: {doc_id}"
+            )
         if tuple(float(value) for value in current) != vectors[doc_id]:
-            raise ValueError(f"graph document id {doc_id} already has a different vector")
-    pending = {doc_id: value for doc_id, value in vectors.items() if doc_id not in existing}
+            raise ValueError(
+                f"graph document id {doc_id} already has a different vector"
+            )
+    pending = {
+        doc_id: value for doc_id, value in vectors.items() if doc_id not in existing
+    }
     if not pending:
         return approved
 
@@ -287,16 +305,24 @@ def apply_stale_graph_vector_prune(
     approved = tuple(plan.stale_index_ids)
     if not approved:
         return ()
-    expected = {doc_id: (source_id, digest) for doc_id, source_id, digest in plan.prune_bindings}
+    expected = {
+        doc_id: (source_id, digest) for doc_id, source_id, digest in plan.prune_bindings
+    }
     if set(expected) != set(approved) or len(expected) != len(plan.prune_bindings):
-        raise ValueError("stale-vector plan bindings must exactly match its prune scope")
+        raise ValueError(
+            "stale-vector plan bindings must exactly match its prune scope"
+        )
 
     current = adapter.existing_document_bindings(approved)
     for doc_id, (source_id, digest, source_is_active) in current.items():
         if doc_id not in expected:
-            raise ValueError(f"adapter returned an unrequested graph document id: {doc_id}")
+            raise ValueError(
+                f"adapter returned an unrequested graph document id: {doc_id}"
+            )
         if source_is_active or (source_id, digest) != expected[doc_id]:
-            raise ValueError(f"graph document id {doc_id} source binding changed since planning")
+            raise ValueError(
+                f"graph document id {doc_id} source binding changed since planning"
+            )
     pending = tuple(doc_id for doc_id in approved if doc_id in current)
     if not pending:
         return approved

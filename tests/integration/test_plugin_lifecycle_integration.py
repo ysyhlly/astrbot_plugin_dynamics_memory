@@ -51,7 +51,9 @@ async def _build_plugin(monkeypatch, tmp_path, config: dict | None = None):
     monkeypatch.setattr(
         plugin_main.StarTools, "get_data_dir", lambda plugin_name: tmp_path
     )
-    plugin = plugin_main.LivingMemoryPlugin(context=Mock(), config={"series_runtime_enabled": True, **(config or {})})
+    plugin = plugin_main.LivingMemoryPlugin(
+        context=Mock(), config={"series_runtime_enabled": True, **(config or {})}
+    )
     # Flush startup task callback queue to keep task set stable in assertions.
     await asyncio.sleep(0)
     return plugin

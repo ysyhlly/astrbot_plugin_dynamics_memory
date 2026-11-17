@@ -12,7 +12,9 @@ SCRIPT = ROOT / "scripts" / "bump_version.py"
 
 
 def _metadata_version() -> str:
-    match = re.search(r"^version:\s*(\S+)\s*$", (ROOT / "metadata.yaml").read_text("utf-8"), re.M)
+    match = re.search(
+        r"^version:\s*(\S+)\s*$", (ROOT / "metadata.yaml").read_text("utf-8"), re.M
+    )
     assert match, "metadata.yaml 缺少 version 字段"
     return match.group(1)
 
@@ -30,7 +32,9 @@ def test_all_hardcoded_versions_match_metadata() -> None:
     assert lock["version"] == expected, "package-lock.json 顶层版本未同步"
     assert lock["packages"][""]["version"] == expected, "package-lock.json 包版本未同步"
 
-    from astrbot_plugin_dynamics_memory.core.managers.backup_manager import PLUGIN_VERSION
+    from astrbot_plugin_dynamics_memory.core.managers.backup_manager import (
+        PLUGIN_VERSION,
+    )
 
     assert PLUGIN_VERSION == expected, "backup_manager.PLUGIN_VERSION 未同步"
 

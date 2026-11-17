@@ -60,6 +60,7 @@ def conversation_manager():
         session_metadata[key] = value
 
     manager.get_session_metadata = AsyncMock(side_effect=_get_session_metadata)
+
     async def _get_messages_range(*, session_id, start_index, end_index):
         return [message for message in messages if message.session_id == session_id][
             start_index:end_index
@@ -68,7 +69,9 @@ def conversation_manager():
     manager.get_messages_range = AsyncMock(side_effect=_get_messages_range)
     manager.update_session_metadata = AsyncMock(side_effect=_update_session_metadata)
 
-    async def _commit_summary_cursor(session_id, last_message, expected_revision, *, window_messages=None):
+    async def _commit_summary_cursor(
+        session_id, last_message, expected_revision, *, window_messages=None
+    ):
         position = next(
             i for i, message in enumerate(messages, 1) if message is last_message
         )
@@ -106,7 +109,9 @@ def conversation_manager():
     manager.store = Mock()
     manager.store.get_message_count = AsyncMock(return_value=12)
     manager.store.get_last_message = AsyncMock(return_value=None)
-    manager.store.get_session = AsyncMock(return_value=SimpleNamespace(metadata=session_metadata))
+    manager.store.get_session = AsyncMock(
+        return_value=SimpleNamespace(metadata=session_metadata)
+    )
     manager.store.native_summary_window_start = AsyncMock(return_value=0)
     manager.store.update_message_metadata = AsyncMock()
     manager.store.connection = Mock()
@@ -159,7 +164,9 @@ async def _summary_guard(event, req, source_records, *, segment_text, item_count
     if len(source_records) != item_count or not all(
         type(source["document_id"]) is int
         and source["document_id"] > 0
-        and source["source_session_id"] == source["source_scope"]["umo"] == event.unified_msg_origin
+        and source["source_session_id"]
+        == source["source_scope"]["umo"]
+        == event.unified_msg_origin
         and len(source["document_text_sha256"]) == 64
         and len(source["summary_metadata_sha256"]) == 64
         for source in source_records
@@ -176,7 +183,8 @@ async def _summary_guard(event, req, source_records, *, segment_text, item_count
         refs = req._lm_private_segment_refs_v1
         return req._lm_private_summary_sources_v1 is receipt and any(
             getattr(part, "text", None) == segment_text
-            and refs.get(id(part)) == {"source_level": "legacy_summary", "item_count": item_count}
+            and refs.get(id(part))
+            == {"source_level": "legacy_summary", "item_count": item_count}
             for part in req.extra_user_content_parts
         )
 
@@ -192,7 +200,9 @@ def _make_resp(text: str = "assistant reply") -> LLMResponse:
     return LLMResponse(role="assistant", completion_text=text)
 
 
-def _make_event(group: bool = False, checkpoint: str | None = None, *, text: str = "hello"):
+def _make_event(
+    group: bool = False, checkpoint: str | None = None, *, text: str = "hello"
+):
     event = Mock()
     event._cd_owned_original_input_v1 = None
     event._chat_dynamics_owned_request = False
@@ -207,14 +217,19 @@ def _make_event(group: bool = False, checkpoint: str | None = None, *, text: str
     event.get_sender_name = Mock(return_value="Tester")
     event.get_message_str = Mock(return_value=text)
     event.get_messages = Mock(
-        side_effect=lambda: [Plain(event.get_message_str.return_value)]
-        if isinstance(event.get_message_str.return_value, str) and event.get_message_str.return_value
-        else []
+        side_effect=lambda: (
+            [Plain(event.get_message_str.return_value)]
+            if isinstance(event.get_message_str.return_value, str)
+            and event.get_message_str.return_value
+            else []
+        )
     )
     event.get_platform_name = Mock(return_value="test")
     event.get_platform_id = Mock(return_value="test")
     event.get_extra = Mock(
-        side_effect=lambda key, default=None: checkpoint if key == "llm_checkpoint_id" else default
+        side_effect=lambda key, default=None: (
+            checkpoint if key == "llm_checkpoint_id" else default
+        )
     )
     return event
 

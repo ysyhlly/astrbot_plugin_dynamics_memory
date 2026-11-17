@@ -13,6 +13,7 @@ from .rerank_text import scoring_excerpt
 
 import asyncio
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -164,12 +165,14 @@ class HybridRetriever:
         if not query or not query.strip():
             return []
 
-        local_only = getattr(execution_context,"local_only",False) is True
+        local_only = getattr(execution_context, "local_only", False) is True
         retrieval_context = execution_context
         if getattr(execution_context, "remote_deadline", None) is not None:
             budget = execution_context.budget
             reserve = min(0.15, budget.search_remaining() * 0.20)
-            retrieval_context = execution_context.with_deadline(budget.search_deadline - reserve)
+            retrieval_context = execution_context.with_deadline(
+                budget.search_deadline - reserve
+            )
         candidate_k = max(k, k * self.candidate_multiplier)
         if self.rerank_enabled:
             candidate_k = max(candidate_k, self.rerank_candidates)
@@ -228,29 +231,54 @@ class HybridRetriever:
                     "vector",
                     self.vector_retriever.search,
                     bm25_args,
-                ) if not local_only else asyncio.sleep(0,result=([],None)),
+                )
+                if not local_only
+                else asyncio.sleep(0, result=([], None)),
             )
             if narrative_plan is None:
                 break
             raw_count = max(len(bm25_results), len(vector_results))
             preliminary = self.rrf_fusion.fuse(
-                [BM25Result(r.doc_id, r.score, r.content, r.metadata) for r in bm25_results],
-                [VectorResult(r.doc_id, r.score, r.content, r.metadata) for r in vector_results],
-                top_k=len(bm25_results) + len(vector_results))
-            valid = await narrative_plan.validate(self._apply_relevance(preliminary),
-                                                  execution_context, "document_policy")
+                [
+                    BM25Result(r.doc_id, r.score, r.content, r.metadata)
+                    for r in bm25_results
+                ],
+                [
+                    VectorResult(r.doc_id, r.score, r.content, r.metadata)
+                    for r in vector_results
+                ],
+                top_k=len(bm25_results) + len(vector_results),
+            )
+            valid = await narrative_plan.validate(
+                self._apply_relevance(preliminary), execution_context, "document_policy"
+            )
             if valid:
                 narrative_plan.document_fallback = list(valid)
             valid_map = {r.doc_id: r for r in valid}
-            bm25_results = [replace(r, content=valid_map[r.doc_id].content,
-                                    metadata=valid_map[r.doc_id].metadata)
-                            for r in bm25_results if r.doc_id in valid_map]
-            vector_results = [replace(r, content=valid_map[r.doc_id].content,
-                                      metadata=valid_map[r.doc_id].metadata)
-                              for r in vector_results if r.doc_id in valid_map]
-            if (len(valid) >= narrative_plan.target_k or raw_count < candidate_k
-                    or candidate_k >= narrative_plan.document_ceiling
-                    or not narrative_plan.can_expand(execution_context)):
+            bm25_results = [
+                replace(
+                    r,
+                    content=valid_map[r.doc_id].content,
+                    metadata=valid_map[r.doc_id].metadata,
+                )
+                for r in bm25_results
+                if r.doc_id in valid_map
+            ]
+            vector_results = [
+                replace(
+                    r,
+                    content=valid_map[r.doc_id].content,
+                    metadata=valid_map[r.doc_id].metadata,
+                )
+                for r in vector_results
+                if r.doc_id in valid_map
+            ]
+            if (
+                len(valid) >= narrative_plan.target_k
+                or raw_count < candidate_k
+                or candidate_k >= narrative_plan.document_ceiling
+                or not narrative_plan.can_expand(execution_context)
+            ):
                 narrative_plan.publish_documents(valid)
                 break
             candidate_k = min(candidate_k * 2, narrative_plan.document_ceiling)
@@ -301,7 +329,9 @@ class HybridRetriever:
 
         # 启用重排序时多保留候选，让 Rerank 模型在更大候选池里挑出真正相关的 top_k
         rerank_active = (
-            self.rerank_enabled and self.rerank_provider_resolver is not None and not local_only
+            self.rerank_enabled
+            and self.rerank_provider_resolver is not None
+            and not local_only
         )
         fuse_top_k = self.rerank_candidates if rerank_active else k
         if relevance_only:
@@ -330,12 +360,18 @@ class HybridRetriever:
         # 3.5 Rerank 重排序：按查询相关性重打分并截断到 top_k
         if rerank_active:
             if execution_context is None:
-                fused_results = await self._apply_rerank(query, fused_results, k, compact=narrative_plan is not None)
+                fused_results = await self._apply_rerank(
+                    query, fused_results, k, compact=narrative_plan is not None
+                )
             else:
                 rerank_context = execution_context
-                if narrative_plan is not None and hasattr(execution_context, "with_deadline"):
-                    reserve = min(.12, execution_context.budget.remaining() * .15)
-                    rerank_context = execution_context.with_deadline(execution_context.budget.deadline - reserve)
+                if narrative_plan is not None and hasattr(
+                    execution_context, "with_deadline"
+                ):
+                    reserve = min(0.12, execution_context.budget.remaining() * 0.15)
+                    rerank_context = execution_context.with_deadline(
+                        execution_context.budget.deadline - reserve
+                    )
                 rerank = await rerank_context.run(
                     "document_rerank",
                     self._apply_rerank,
@@ -394,7 +430,13 @@ class HybridRetriever:
         return results
 
     async def _apply_rerank(
-        self, query: str, fused_results: list[FusedResult], k: int, *, timings=None, compact=False
+        self,
+        query: str,
+        fused_results: list[FusedResult],
+        k: int,
+        *,
+        timings=None,
+        compact=False,
     ) -> list[FusedResult]:
         """
         调用 Rerank 模型对融合候选按查询相关性重打分。
@@ -434,8 +476,11 @@ class HybridRetriever:
         scoring_texts = [r.content for r in fused_results]
         if compact and any(len(text) > 2400 and "\n" in text for text in scoring_texts):
             scoring_texts = await asyncio.to_thread(
-                lambda: [scoring_excerpt(query, text) for text in scoring_texts])
-        canonical_order = sorted(range(len(fused_results)), key=lambda i: scoring_texts[i])
+                lambda: [scoring_excerpt(query, text) for text in scoring_texts]
+            )
+        canonical_order = sorted(
+            range(len(fused_results)), key=lambda i: scoring_texts[i]
+        )
         documents = [scoring_texts[i] for i in canonical_order]
         if timings is not None:
             timings["rerank_prepare"] = int((time.monotonic() - prepare_started) * 1000)
@@ -456,7 +501,9 @@ class HybridRetriever:
             async with entry[0]:
                 lock_acquired = True
                 if timings is not None:
-                    timings["rerank_lock"] = int((time.monotonic() - lock_started) * 1000)
+                    timings["rerank_lock"] = int(
+                        (time.monotonic() - lock_started) * 1000
+                    )
                 if self._rerank_provider is not provider:
                     self._rerank_cache.clear()
                     self._rerank_provider = provider
@@ -507,7 +554,9 @@ class HybridRetriever:
                         return fused_results[:k]
                     finally:
                         if timings is not None:
-                            timings["rerank_provider"] = int((time.monotonic() - provider_started) * 1000)
+                            timings["rerank_provider"] = int(
+                                (time.monotonic() - provider_started) * 1000
+                            )
                     self._rerank_cache[key] = (time.monotonic() + 45.0, rerank_results)
                     while len(self._rerank_cache) > 128:
                         self._rerank_cache.popitem(last=False)
@@ -648,7 +697,13 @@ class HybridRetriever:
             return results
 
         def _token_set(text: str) -> set[str]:
-            tokens = set(text.lower().split())
+            lowered = text.lower()
+            tokens = set(lowered.split())
+            for chunk in re.findall(r"[\u4e00-\u9fff]+", lowered):
+                if len(chunk) == 1:
+                    tokens.add(chunk)
+                else:
+                    tokens.update(chunk[idx : idx + 2] for idx in range(len(chunk) - 1))
             return tokens if tokens else {"<empty>"}
 
         selected: list[HybridResult] = []
@@ -757,7 +812,10 @@ class HybridRetriever:
 
         # 先添加到向量库获取doc_id
         doc_id = await self.vector_retriever.add_document(
-            content, metadata, source_validator=source_validator, **({"embedding": embedding} if embedding is not None else {})
+            content,
+            metadata,
+            source_validator=source_validator,
+            **({"embedding": embedding} if embedding is not None else {}),
         )
 
         # 使用相同的doc_id添加到BM25索引。BM25失败时必须清理已经

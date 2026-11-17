@@ -2,11 +2,11 @@
 
 import pytest
 from astrbot.api.provider import LLMResponse, ProviderRequest
-from tests.integration.test_real_db_end_to_end import _TestEvent, real_db_stack  # noqa: F401
+from tests.integration.test_real_db_end_to_end import _TestEvent
 
 
 @pytest.mark.asyncio
-async def test_recall_reflection_and_search_workflow(real_db_stack):  # noqa: F811
+async def test_recall_reflection_and_search_workflow(real_db_stack):
     event_handler = real_db_stack["event_handler"]
     command_handler = real_db_stack["command_handler"]
     conversation_manager = real_db_stack["conversation_manager"]
@@ -20,9 +20,12 @@ async def test_recall_reflection_and_search_workflow(real_db_stack):  # noqa: F8
     response = LLMResponse(role="assistant", completion_text="Great habit, keep going!")
     await event_handler.handle_memory_reflection(event, response)
     await event_handler.shutdown()
-    assert await conversation_manager.get_session_metadata(
-        session_id, "last_summarized_index"
-    ) == 2
+    assert (
+        await conversation_manager.get_session_metadata(
+            session_id, "last_summarized_index"
+        )
+        == 2
+    )
 
     search_messages = [
         msg async for msg in command_handler.handle_search(event, query="running", k=5)

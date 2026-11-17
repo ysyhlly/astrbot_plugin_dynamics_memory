@@ -8,7 +8,9 @@ import pytest
 import astrbot_plugin_dynamics_memory.core.plugin_initializer as initializer_module
 from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManager
 from astrbot_plugin_dynamics_memory.core.plugin_initializer import PluginInitializer
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 
 
 @pytest.mark.asyncio
@@ -54,7 +56,9 @@ async def test_no_summary_provider_when_only_systemone_is_available():
     context.get_all_providers.return_value = [decision]
 
     assert await MemoryProcessor(context=context)._get_current_llm_provider() is None
-    assert await MemoryProcessor(llm_provider=decision)._get_current_llm_provider() is None
+    assert (
+        await MemoryProcessor(llm_provider=decision)._get_current_llm_provider() is None
+    )
 
 
 @pytest.mark.parametrize("configured", [None, "decision-model"])

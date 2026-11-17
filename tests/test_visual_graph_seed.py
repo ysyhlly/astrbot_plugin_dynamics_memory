@@ -2,7 +2,10 @@
 
 import aiosqlite
 import pytest
-from astrbot_plugin_dynamics_memory.core.models.graph_models import GraphEntry, GraphNode
+from astrbot_plugin_dynamics_memory.core.models.graph_models import (
+    GraphEntry,
+    GraphNode,
+)
 from astrbot_plugin_dynamics_memory.scripts.seed_visual_graph import seed_visual_graph
 from astrbot_plugin_dynamics_memory.storage.graph_store import GraphStore
 

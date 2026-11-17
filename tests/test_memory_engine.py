@@ -2380,6 +2380,8 @@ async def test_archive_marks_index_rebuild_when_vector_delete_unavailable(
     assert row is not None and row[0] == "true"
 
     await engine.close()
+
+
 @pytest.mark.asyncio
 async def test_repair_add_preserves_unavailable_source_metadata(tmp_path: Path):
     engine = MemoryEngine(
@@ -2406,13 +2408,15 @@ async def test_repair_add_preserves_unavailable_source_metadata(tmp_path: Path):
     repaired = await engine.get_memory(memory_id)
     assert repaired["metadata"]["has_source"] is True
     assert repaired["metadata"]["source_message_count"] == 2
-    row = await (await engine.db_connection.execute(
-        'SELECT status,step,retry_count FROM memory_write_ops WHERE id=?', (op_id,)
-    )).fetchone()
-    assert tuple(row) == ('needs_repair', 'source_pending', 0)
-    source = [{'role': 'user', 'content': 'original source'}]
-    assert await engine._repair_add_write_op(op_id, memory_id, {'source_messages': source})
+    row = await (
+        await engine.db_connection.execute(
+            "SELECT status,step,retry_count FROM memory_write_ops WHERE id=?", (op_id,)
+        )
+    ).fetchone()
+    assert tuple(row) == ("needs_repair", "source_pending", 0)
+    source = [{"role": "user", "content": "original source"}]
+    assert await engine._repair_add_write_op(
+        op_id, memory_id, {"source_messages": source}
+    )
     assert await engine.get_memory_source(memory_id) == source
     await engine.close()
-
-

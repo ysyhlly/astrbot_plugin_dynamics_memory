@@ -1,6 +1,20 @@
 # ruff: noqa: E402
 from .reload_bootstrap import ensure_current
-ensure_current(__package__, __name__, __file__, checks=[("storage.evidence_sidecar", "EvidenceSidecar", "_bounded_queue_claim_v1"), ("core.recall_runtime", "BoundedRecallTaskPool", "_reply_scope_parallel_v1"), ("core.managers.memory_engine", "MemoryEngine", "repair_retained_sources"), ("core.evidence_view", "EvidenceViewService", "defer_policy_wakeup"), ("core.recall_runtime", "BoundedRecallTaskPool", "_summary_cleanup_release"), ("core.plugin_helpers_mixin", "PluginHelpersMixin", "_native_memory_recall_v1")], version="0.1.7")
+
+ensure_current(
+    __package__,
+    __name__,
+    __file__,
+    checks=[
+        ("storage.evidence_sidecar", "EvidenceSidecar", "_bounded_queue_claim_v1"),
+        ("core.recall_runtime", "BoundedRecallTaskPool", "_reply_scope_parallel_v1"),
+        ("core.managers.memory_engine", "MemoryEngine", "repair_retained_sources"),
+        ("core.evidence_view", "EvidenceViewService", "defer_policy_wakeup"),
+        ("core.recall_runtime", "BoundedRecallTaskPool", "_summary_cleanup_release"),
+        ("core.plugin_helpers_mixin", "PluginHelpersMixin", "_native_memory_recall_v1"),
+    ],
+    version="0.1.7",
+)
 
 """
 main.py - LivingMemory 插件主文件
@@ -8,24 +22,24 @@ main.py - LivingMemory 插件主文件
 """
 
 import copy
-import hashlib
 import inspect
 import json
 import time
-import uuid
-from contextvars import ContextVar
 from pathlib import Path
 from .core.blocking_policy import BlockingPolicyGate
-from .core.evidence_projection import MAX_MATERIALS, PURPOSES, conversation_row_hash, normalize_conversation_row, normalize_event_material
-from .core.evidence_derivation import InvalidDerivationSchema, parse_derivation_response
+from .core.evidence_projection import MAX_MATERIALS, PURPOSES
 from .core.evidence_view import EvidenceViewService
-from .core.memory_scope import classify_umo, is_event_memory_allowed, memory_metadata_matches_policy, resolve_memory_access_policy, resolve_verified_group_sessions
-from .core.native_recall import NATIVE_MEMORY_REQUEST_KEY, NATIVE_MEMORY_VALIDATE_KEY, append_quote_surface, quote_frames, relevant_frames, request_identity
-from .core.recall_runtime import BoundedRecallSearchContext, BoundedRecallTaskPool, RecallDeadline, recall_task_key, trace_recall_hook, timed_recall_phase
-from .core.event_handler_modules.message_utils import discard_unexpected_awaitable, validate_owned_original_input
-from .core.narrative_api import ScopeEvent, is_managed_event, scope_key
-from .core.retrieval.narrative_history import allowed_memory, persona_names, source_origin
-from .core.utils import _get_native_persona_id, get_persona_id, set_persona_aliases
+from .core.recall_runtime import (
+    BoundedRecallSearchContext,
+    BoundedRecallTaskPool,
+    RecallDeadline,
+    recall_task_key,
+    trace_recall_hook,
+    timed_recall_phase,
+)
+from .core.narrative_api import is_managed_event, scope_key
+from .core.retrieval.narrative_history import persona_names, source_origin
+from .core.utils import _get_native_persona_id, set_persona_aliases
 from .storage.evidence_sidecar import EvidenceSidecar
 
 
@@ -166,8 +180,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
 
         # 后台任务跟踪集合
         self._background_tasks: set[asyncio.Task] = set()
-        self._recall_runtime = BoundedRecallTaskPool(max_inflight=16, max_cache=32,
-                                                     cache_ttl_seconds=2.0)
+        self._recall_runtime = BoundedRecallTaskPool(
+            max_inflight=16, max_cache=32, cache_ttl_seconds=2.0
+        )
         self._component_init_lock = asyncio.Lock()
         self._llm_tools_registered = False
         self._terminating = False
@@ -178,7 +193,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         self.register_series_routes()
         from importlib import reload
         from . import series_panels
-        reload(series_panels).register_series_panels(self,'astrbot_plugin_dynamics_memory')
+
+        reload(series_panels).register_series_panels(
+            self, "astrbot_plugin_dynamics_memory"
+        )
         set_active_plugin(self)
 
         # 启动非阻塞的初始化任务
@@ -281,7 +299,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             data_dir = getattr(self, "_data_dir", None)
             if getattr(self, "evidence_service", None) is None and data_dir:
                 try:
-                    sidecar = EvidenceSidecar(Path(data_dir) / "evidence_sidecar.sqlite3")
+                    sidecar = EvidenceSidecar(
+                        Path(data_dir) / "evidence_sidecar.sqlite3"
+                    )
                     service = EvidenceViewService(
                         sidecar=sidecar,
                         scope_key_fn=scope_key,
@@ -299,7 +319,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     self._blocking_policy_gate.wakeup = service.defer_policy_wakeup
                 except Exception as exc:
                     # Evidence sidecar failure must not disable the existing memory path.
-                    logger.warning("Evidence sidecar unavailable; cached projections are disabled (%s)", type(exc).__name__)
+                    logger.warning(
+                        "Evidence sidecar unavailable; cached projections are disabled (%s)",
+                        type(exc).__name__,
+                    )
 
         return True
 
@@ -314,17 +337,24 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Managed summary recovery pass failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "Managed summary recovery pass failed (%s)", type(exc).__name__
+                )
 
     async def _recover_managed_reflection_page(self, store, after_id: int) -> int:
         page_size = 4
-        rows = await store.managed_summary_recovery_candidates(after_id, time.time(), page_size)
+        rows = await store.managed_summary_recovery_candidates(
+            after_id, time.time(), page_size
+        )
         for row in rows:
             try:
                 envelope = json.loads(row["envelope"] or "{}")
                 scope, actor_id = envelope.get("scope"), envelope.get("actor_id")
-                if (not isinstance(actor_id, str) or not actor_id.strip()
-                        or scope_key(scope) != row["session_id"]):
+                if (
+                    not isinstance(actor_id, str)
+                    or not actor_id.strip()
+                    or scope_key(scope) != row["session_id"]
+                ):
                     continue
                 if not await self._narrative_scope_allowed(scope, actor_id):
                     continue
@@ -332,7 +362,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Managed summary recovery scope unavailable (%s)", type(exc).__name__)
+                logger.warning(
+                    "Managed summary recovery scope unavailable (%s)",
+                    type(exc).__name__,
+                )
         return rows[-1]["id"] if len(rows) == page_size else 0
 
     def _register_agent_tools_if_needed(self) -> None:
@@ -367,8 +400,14 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     context=self.context,
                     config_manager=self.config_manager,
                     memory_engine=self.initializer.memory_engine,
-                    **({"conversation_manager": self.initializer.conversation_manager,
-                        "recall_runtime": getattr(self, "_recall_runtime", None)} if not beta_enabled else {}),
+                    **(
+                        {
+                            "conversation_manager": self.initializer.conversation_manager,
+                            "recall_runtime": getattr(self, "_recall_runtime", None),
+                        }
+                        if not beta_enabled
+                        else {}
+                    ),
                 )
             )
         if beta_enabled:
@@ -448,7 +487,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 当前状态，用于 LLM 请求钩子，避免初始化期间每个请求轮询等待。
         """
         if not self.series_runtime_allowed():
-            return False, "群间记忆插件未启用，或存在其他活动记忆提供者；调整配置后重载。"
+            return (
+                False,
+                "群间记忆插件未启用，或存在其他活动记忆提供者；调整配置后重载。",
+            )
         if wait:
             if not await self.initializer.ensure_initialized():
                 return False, self._get_initialization_status_message()
@@ -557,15 +599,21 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         # instead of letting an optional remote search consume that time.
         budget = RecallDeadline.start(total_seconds=6.0, final_reserve_seconds=1.5)
         self._install_private_injection_getter(event, req)
-        if (not getattr(self.initializer, "is_initialized", False)
-                or not self.event_handler):
+        if (
+            not getattr(self.initializer, "is_initialized", False)
+            or not self.event_handler
+        ):
             setattr(req, "_lm_private_hook_outcome_v1", "disabled")
             return
         try:
-            receipt = await timed_recall_phase(req, "projection", asyncio.wait_for(
-                self._prepare_native_memory_projection(event, req),
-                timeout=budget.search_remaining(),
-            ))
+            receipt = await timed_recall_phase(
+                req,
+                "projection",
+                asyncio.wait_for(
+                    self._prepare_native_memory_projection(event, req),
+                    timeout=budget.search_remaining(),
+                ),
+            )
             owner_budget = min(0.5, budget.search_remaining())
             if owner_budget > 0:
                 await asyncio.wait_for(
@@ -584,7 +632,11 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 pass
             return
         get_extra = getattr(event, "get_extra", None)
-        blocking_context = get_extra("_autonomous_blocking_context_v1", None) if callable(get_extra) else None
+        blocking_context = (
+            get_extra("_autonomous_blocking_context_v1", None)
+            if callable(get_extra)
+            else None
+        )
         if (
             isinstance(blocking_context, dict)
             and blocking_context.get("schema_version") == 1
@@ -593,10 +645,16 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             # Stage canonical READY sources before the optional summary search.
             # This is read-only and does not append the request surface yet.
             try:
-                await timed_recall_phase(req,"native_ready",asyncio.wait_for(
-                    self._native_memory_recall_v1(event, req, collect_only=True, budget=budget),
-                    timeout=budget.search_remaining(),
-                ))
+                await timed_recall_phase(
+                    req,
+                    "native_ready",
+                    asyncio.wait_for(
+                        self._native_memory_recall_v1(
+                            event, req, collect_only=True, budget=budget
+                        ),
+                        timeout=budget.search_remaining(),
+                    ),
+                )
             except asyncio.CancelledError:
                 setattr(req, "_lm_private_hook_outcome_v1", "cancelled")
                 raise
@@ -613,22 +671,32 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             # the native surface is appended only after the fresh Blocking check.
             search_outcome = "returned"
             try:
-                await timed_recall_phase(req, "summary_recall", self.event_handler.handle_memory_recall(event, req, budget=budget))
+                await timed_recall_phase(
+                    req,
+                    "summary_recall",
+                    self.event_handler.handle_memory_recall(event, req, budget=budget),
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 search_outcome = f"error:{type(exc).__name__}"
-            if (search_outcome == "returned"
-                    and getattr(req, "_lm_native_memory_search_hit_v1", False) is not True):
+            if (
+                search_outcome == "returned"
+                and getattr(req, "_lm_native_memory_search_hit_v1", False) is not True
+            ):
                 search_outcome = "returned_no_hit_or_handler_error"
             elif search_outcome == "returned":
                 search_outcome = "returned_with_hit"
             setattr(req, "_lm_native_search_outcome_v1", search_outcome)
             try:
-                await timed_recall_phase(req,"native_surface",asyncio.wait_for(
-                    self._native_memory_recall_v1(event, req, budget=budget),
-                    timeout=budget.remaining(),
-                ))
+                await timed_recall_phase(
+                    req,
+                    "native_surface",
+                    asyncio.wait_for(
+                        self._native_memory_recall_v1(event, req, budget=budget),
+                        timeout=budget.remaining(),
+                    ),
+                )
             except asyncio.CancelledError:
                 setattr(req, "_lm_private_hook_outcome_v1", "cancelled")
                 raise
@@ -644,7 +712,11 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if not self.event_handler:
             return
 
-        await timed_recall_phase(req, "summary_recall", self.event_handler.handle_memory_recall(event, req, budget=budget))
+        await timed_recall_phase(
+            req,
+            "summary_recall",
+            self.event_handler.handle_memory_recall(event, req, budget=budget),
+        )
 
     @filter.on_llm_response()
     async def handle_memory_reflection(
@@ -788,45 +860,72 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
     @permission_type(PermissionType.ADMIN)
     @lmem.command("summarize_retry")
     async def summarize_retry(
-        self, event: AstrMessageEvent,
+        self,
+        event: AstrMessageEvent,
     ) -> AsyncGenerator[MessageEventResult, None]:
         """Retry the oldest refused summary for the current managed conversation."""
         if not event.is_admin() or not self.event_handler:
             return
         persona = await _get_native_persona_id(self.context, event)
         scope = self._native_scope_from_request(
-            {"persona_id": persona, "instance_id": persona}, event.unified_msg_origin,
+            {"persona_id": persona, "instance_id": persona},
+            event.unified_msg_origin,
         )
         world = find_role(self.context, "character")
         world_claimed = world is not None or any(
-            bool(data.get("enabled")) and (data.get("capabilities") or {}).get("character") == 1
-            for _, owner in active_entries(self.context) if (data := manifest(owner))
+            bool(data.get("enabled"))
+            and (data.get("capabilities") or {}).get("character") == 1
+            for _, owner in active_entries(self.context)
+            if (data := manifest(owner))
         )
         if world_claimed:
             effective_scope = None
             try:
-                context = await asyncio.wait_for(world.get_character_context(scope, event), 1.0) if scope and world else None
-                if (isinstance(context, dict) and context.get("schema_version") == 1
-                        and context.get("available", True) and not context.get("disabled")
-                        and find_role(self.context, "character") is world):
+                context = (
+                    await asyncio.wait_for(
+                        world.get_character_context(scope, event), 1.0
+                    )
+                    if scope and world
+                    else None
+                )
+                if (
+                    isinstance(context, dict)
+                    and context.get("schema_version") == 1
+                    and context.get("available", True)
+                    and not context.get("disabled")
+                    and find_role(self.context, "character") is world
+                ):
                     effective = context.get("scope")
                     if not isinstance(effective, dict):
-                        effective = {**scope, "persona_id": context.get("persona_id"),
-                                     "instance_id": context.get("instance_id", context.get("persona_id"))}
-                    if all(effective.get(key) == scope[key] for key in ("platform", "umo")):
-                        effective_scope = self._native_scope_from_request(effective, event.unified_msg_origin)
+                        effective = {
+                            **scope,
+                            "persona_id": context.get("persona_id"),
+                            "instance_id": context.get(
+                                "instance_id", context.get("persona_id")
+                            ),
+                        }
+                    if all(
+                        effective.get(key) == scope[key] for key in ("platform", "umo")
+                    ):
+                        effective_scope = self._native_scope_from_request(
+                            effective, event.unified_msg_origin
+                        )
             except (TimeoutError, ValueError, RuntimeError):
                 pass
             if effective_scope is None:
                 yield event.plain_result("当前无法确认世界角色，暂未安排重试。")
                 return
             scope = effective_scope
-        if scope is None or not await self._narrative_scope_allowed(scope, event.get_sender_id()):
+        if scope is None or not await self._narrative_scope_allowed(
+            scope, event.get_sender_id()
+        ):
             yield event.plain_result(t("summarize.access_denied"))
             return
         scheduled = await self.event_handler.retry_refused_scope(scope)
         yield event.plain_result(
-            "已安排重试原始拒绝窗口。" if scheduled else "当前角色没有可重试的拒绝窗口，或已有反思任务在运行。"
+            "已安排重试原始拒绝窗口。"
+            if scheduled
+            else "当前角色没有可重试的拒绝窗口，或已有反思任务在运行。"
         )
 
     @permission_type(PermissionType.ADMIN)
@@ -868,7 +967,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
     # ==================== 生命周期管理 ====================
 
     async def terminate(self):
-        panel=getattr(self,'_series_panels',None)
+        panel = getattr(self, "_series_panels", None)
         if panel:
             panel.close()
         """Cleanup logic when plugin stops"""
@@ -928,26 +1027,38 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
 
         logger.info("LivingMemory 插件已成功停止。")
 
-
-    async def get_evidence_view(self, scope: dict, source_refs: list[dict] | None = None,
-                                purpose: str = "reply", card_version: str = "",
-                                conversation_id: str | None = None,
-                                snapshot_fingerprint: str | None = None,
-                                materials: list[dict] | None = None,
-                                typed_items: list[dict] | None = None,
-                                allow_derivation: bool = True) -> dict:
+    async def get_evidence_view(
+        self,
+        scope: dict,
+        source_refs: list[dict] | None = None,
+        purpose: str = "reply",
+        card_version: str = "",
+        conversation_id: str | None = None,
+        snapshot_fingerprint: str | None = None,
+        materials: list[dict] | None = None,
+        typed_items: list[dict] | None = None,
+        allow_derivation: bool = True,
+    ) -> dict:
         request_started = time.perf_counter()
         if self._terminating:
             return EvidenceViewService._empty_view("terminating", purpose, card_version)
         if purpose not in PURPOSES:
-            return EvidenceViewService._empty_view("invalid_purpose", purpose, card_version)
+            return EvidenceViewService._empty_view(
+                "invalid_purpose", purpose, card_version
+            )
         if not await self._narrative_scope_allowed(scope):
-            return EvidenceViewService._empty_view("scope_not_allowed", purpose, card_version)
+            return EvidenceViewService._empty_view(
+                "scope_not_allowed", purpose, card_version
+            )
         auth_done = time.perf_counter()
         if not self.initializer.is_initialized or not self.evidence_service:
-            return EvidenceViewService._empty_view("service_unavailable", purpose, card_version)
+            return EvidenceViewService._empty_view(
+                "service_unavailable", purpose, card_version
+            )
         combined_materials = []
-        combined_typed_items = [row for row in (typed_items or []) if isinstance(row, dict)]
+        combined_typed_items = [
+            row for row in (typed_items or []) if isinstance(row, dict)
+        ]
         for row in [*(source_refs or []), *(materials or [])]:
             if not isinstance(row, dict):
                 continue
@@ -957,35 +1068,58 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 combined_materials.append(row)
         combined_materials = combined_materials[:MAX_MATERIALS]
         combined_typed_items = combined_typed_items[:MAX_MATERIALS]
-        resolved_refs, rejected = await self._resolve_evidence_source_refs(scope, combined_materials)
+        resolved_refs, rejected = await self._resolve_evidence_source_refs(
+            scope, combined_materials
+        )
         refs_done = time.perf_counter()
         view = await self.evidence_service.get_evidence_view(
-            scope, source_refs=resolved_refs, purpose=purpose, card_version=card_version,
-            conversation_id=conversation_id, snapshot_fingerprint=snapshot_fingerprint,
-            typed_items=combined_typed_items, allow_derivation=allow_derivation,
+            scope,
+            source_refs=resolved_refs,
+            purpose=purpose,
+            card_version=card_version,
+            conversation_id=conversation_id,
+            snapshot_fingerprint=snapshot_fingerprint,
+            typed_items=combined_typed_items,
+            allow_derivation=allow_derivation,
         )
         if rejected:
             diagnostics = dict(view.get("diagnostics", {}))
-            diagnostics["source_refs_rejected"] = int(diagnostics.get("source_refs_rejected", 0)) + rejected
+            diagnostics["source_refs_rejected"] = (
+                int(diagnostics.get("source_refs_rejected", 0)) + rejected
+            )
             view = {**view, "diagnostics": diagnostics}
             view["evidence_status"] = EvidenceViewService._evidence_status(view)
-        diagnostics = dict(view.get('diagnostics', {}))
-        diagnostics['request_stage_ms'] = {
-            'scope_auth': round((auth_done-request_started)*1000, 2),
-            'source_resolve': round((refs_done-auth_done)*1000, 2),
-            'cached_view': round((time.perf_counter()-refs_done)*1000, 2)}
-        view = {**view, 'diagnostics': diagnostics}
+        diagnostics = dict(view.get("diagnostics", {}))
+        diagnostics["request_stage_ms"] = {
+            "scope_auth": round((auth_done - request_started) * 1000, 2),
+            "source_resolve": round((refs_done - auth_done) * 1000, 2),
+            "cached_view": round((time.perf_counter() - refs_done) * 1000, 2),
+        }
+        view = {**view, "diagnostics": diagnostics}
         return view
 
-    async def queue_material_derivation(self, materials: list[dict], scope: dict | None = None,
-                                        purpose: str = "reply", card_version: str = "") -> dict:
+    async def queue_material_derivation(
+        self,
+        materials: list[dict],
+        scope: dict | None = None,
+        purpose: str = "reply",
+        card_version: str = "",
+    ) -> dict:
         if (
-            self._terminating or not self.evidence_service or not isinstance(scope, dict) or
-            purpose not in PURPOSES or not await self._narrative_scope_allowed(scope)
+            self._terminating
+            or not self.evidence_service
+            or not isinstance(scope, dict)
+            or purpose not in PURPOSES
+            or not await self._narrative_scope_allowed(scope)
         ):
-            return {"schema_version": 1, "accepted": False, "queued": 0,
-                    "duplicates": 0, "skipped": len(materials) if isinstance(materials, list) else 0,
-                    "material_ids": []}
+            return {
+                "schema_version": 1,
+                "accepted": False,
+                "queued": 0,
+                "duplicates": 0,
+                "skipped": len(materials) if isinstance(materials, list) else 0,
+                "material_ids": [],
+            }
         resolved, rejected = await self._resolve_evidence_source_refs(scope, materials)
         result = await self.evidence_service.queue_material_derivation(
             resolved, scope=scope, purpose=purpose, card_version=card_version
@@ -994,20 +1128,36 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             result["skipped"] = int(result.get("skipped", 0)) + rejected
         return result
 
-
     def peek_evidence_revision(self, scope: dict) -> dict:
         try:
             key = scope_key(scope)
         except Exception:
-            return {"schema_version": 1, "available": False, "scope_key": "",
-                    "correction_revision": None, "revocations": []}
+            return {
+                "schema_version": 1,
+                "available": False,
+                "scope_key": "",
+                "correction_revision": None,
+                "revocations": [],
+            }
         if not self.evidence_service or self._terminating:
-            return {"schema_version": 1, "available": False, "scope_key": key,
-                    "correction_revision": None, "revocations": []}
+            return {
+                "schema_version": 1,
+                "available": False,
+                "scope_key": key,
+                "correction_revision": None,
+                "revocations": [],
+            }
         return self.evidence_service.peek_evidence_revision(scope)
 
-    async def correct_insight(self, target_id: str, expected_revision: int, action: str,
-                              replacement: str = "", reason: str = "", action_id: str = "") -> dict:
+    async def correct_insight(
+        self,
+        target_id: str,
+        expected_revision: int,
+        action: str,
+        replacement: str = "",
+        reason: str = "",
+        action_id: str = "",
+    ) -> dict:
         if not self.evidence_service or self._terminating:
             raise RuntimeError("evidence store unavailable")
         return await self.evidence_service.correct_insight(
@@ -1036,18 +1186,22 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if plan is None:
             raise ValueError("an explicit graph vector prune plan is required")
         engine = getattr(self.initializer, "memory_engine", None)
-        apply_plan = getattr(engine, "apply_graph_vector_prune", None) if engine else None
+        apply_plan = (
+            getattr(engine, "apply_graph_vector_prune", None) if engine else None
+        )
         if not callable(apply_plan):
             raise RuntimeError("graph_vector_prune_unavailable")
         return await apply_plan(plan)
 
-
-    async def recall_context(self, scope: dict, query: str, purpose: str = "reply",
-                             card_version: str = "") -> dict:
+    async def recall_context(
+        self, scope: dict, query: str, purpose: str = "reply", card_version: str = ""
+    ) -> dict:
         """Deliver a local history baseline even when optional remote recall stalls."""
         loop = asyncio.get_running_loop()
         call_started = loop.time()
-        budget_raw = self.config_manager.get("recall_engine.narrative_total_timeout_seconds", 6.0)
+        budget_raw = self.config_manager.get(
+            "recall_engine.narrative_total_timeout_seconds", 6.0
+        )
         try:
             request_budget = max(0.1, min(float(budget_raw), 7.0))
         except (TypeError, ValueError):
@@ -1061,25 +1215,36 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         route_elapsed_ms: dict[str, int] = {}
         runtime = getattr(self, "_recall_runtime", None)
         if runtime is None:
-            runtime = BoundedRecallTaskPool(max_inflight=16, max_cache=32, cache_ttl_seconds=2.0)
+            runtime = BoundedRecallTaskPool(
+                max_inflight=16, max_cache=32, cache_ttl_seconds=2.0
+            )
             self._recall_runtime = runtime
 
         def empty_reply(reason: str, status: str, available: bool = False) -> dict:
             view = EvidenceViewService._empty_view(reason, purpose, card_version)
             view["available"] = available
             view["evidence_status"] = status
-            return {"schema_version": 1, "items": [], "available": available,
-                    "evidence_view": view, "evidence_status": status,
-                    "diagnostics": {
-                        "timeout_count": sum(value == "timeout" for value in route_failures.values()),
-                        "route_error_count": sum(value in {"error", "busy", "closed"}
-                                                  for value in route_failures.values()),
-                        "route_failures": dict(route_failures),
-                        "route_elapsed_ms": dict(route_elapsed_ms),
-                        "elapsed_ms": int((loop.time() - call_started) * 1000),
-                        "inflight_count": runtime.stats().get("inflight_count", 0),
-                        "source_text_logged": False,
-                    }}
+            return {
+                "schema_version": 1,
+                "items": [],
+                "available": available,
+                "evidence_view": view,
+                "evidence_status": status,
+                "diagnostics": {
+                    "timeout_count": sum(
+                        value == "timeout" for value in route_failures.values()
+                    ),
+                    "route_error_count": sum(
+                        value in {"error", "busy", "closed"}
+                        for value in route_failures.values()
+                    ),
+                    "route_failures": dict(route_failures),
+                    "route_elapsed_ms": dict(route_elapsed_ms),
+                    "elapsed_ms": int((loop.time() - call_started) * 1000),
+                    "inflight_count": runtime.stats().get("inflight_count", 0),
+                    "source_text_logged": False,
+                },
+            }
 
         if self._terminating:
             return empty_reply("scope_not_allowed", "unavailable")
@@ -1091,11 +1256,18 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         auth_revision = self.peek_evidence_revision(scope)
         route_elapsed_ms["revision_peek"] = int((loop.time() - revision_started) * 1000)
         auth_key = recall_task_key(
-            route="scope_auth", scope=scope, query=query, purpose=purpose,
+            route="scope_auth",
+            scope=scope,
+            query=query,
+            purpose=purpose,
             card_version=card_version,
-            correction_revision=(auth_revision.get("correction_revision")
-                                if auth_revision.get("available") else None),
-            persona_ids=auth_personas, origin=str(scope.get("umo", "")),
+            correction_revision=(
+                auth_revision.get("correction_revision")
+                if auth_revision.get("available")
+                else None
+            ),
+            persona_ids=auth_personas,
+            origin=str(scope.get("umo", "")),
         )
         auth_details = {}
 
@@ -1112,9 +1284,14 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         route_elapsed_ms["scope_auth"] = int((loop.time() - auth_started) * 1000)
         if auth_outcome.get("state") != "completed":
             route_failures["scope_auth"] = auth_outcome.get("state", "error")
-            return empty_reply("recall_deadline" if route_failures["scope_auth"] == "timeout"
-                               else "scope_not_allowed", "timeout" if route_failures["scope_auth"] == "timeout"
-                               else "unavailable")
+            return empty_reply(
+                "recall_deadline"
+                if route_failures["scope_auth"] == "timeout"
+                else "scope_not_allowed",
+                "timeout"
+                if route_failures["scope_auth"] == "timeout"
+                else "unavailable",
+            )
         if auth_outcome.get("value") is not True:
             return empty_reply("scope_not_allowed", "unavailable")
         top_k = max(0, min(int(self.config_manager.get("recall_engine.top_k", 5)), 20))
@@ -1128,21 +1305,58 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         engine = self.initializer.memory_engine
         personas = persona_names(scope)
         managed_origin = scope_key(scope)
-        local_budget = max(0.1, min(float(self.config_manager.get("recall_engine.narrative_local_timeout_seconds", 1.0)), 5.0))
-        semantic_budget = max(0.0, min(float(self.config_manager.get("recall_engine.narrative_hybrid_timeout_seconds", 0.75)), 10.0))
+        local_budget = max(
+            0.1,
+            min(
+                float(
+                    self.config_manager.get(
+                        "recall_engine.narrative_local_timeout_seconds", 1.0
+                    )
+                ),
+                5.0,
+            ),
+        )
+        semantic_budget = max(
+            0.0,
+            min(
+                float(
+                    self.config_manager.get(
+                        "recall_engine.narrative_hybrid_timeout_seconds", 0.75
+                    )
+                ),
+                10.0,
+            ),
+        )
         revision_info = self.peek_evidence_revision(scope)
-        correction_revision = revision_info.get("correction_revision") if revision_info.get("available") else None
+        correction_revision = (
+            revision_info.get("correction_revision")
+            if revision_info.get("available")
+            else None
+        )
 
         def task_key(route: str, origin: str, discriminator=None):
             return recall_task_key(
-                route=route, scope=scope, query=query, purpose=purpose,
-                card_version=card_version, correction_revision=correction_revision,
-                persona_ids=personas, origin=origin,
+                route=route,
+                scope=scope,
+                query=query,
+                purpose=purpose,
+                card_version=card_version,
+                correction_revision=correction_revision,
+                persona_ids=personas,
+                origin=origin,
                 discriminator={"top_k": top_k, "route": discriminator},
             )
 
-        async def run_route(method, *args, budget=None, route="unknown", origin="", discriminator=None,
-                            cache_result=False, use_total_deadline=False):
+        async def run_route(
+            method,
+            *args,
+            budget=None,
+            route="unknown",
+            origin="",
+            discriminator=None,
+            cache_result=False,
+            use_total_deadline=False,
+        ):
             if not callable(method):
                 route_failures[route] = "unavailable"
                 return {"state": "error", "value": None}
@@ -1155,24 +1369,50 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 route_elapsed_ms.setdefault(route, 0)
                 return {"state": "timeout", "value": None}
             key = task_key(route, origin, discriminator)
-            handle = runtime.submit(key, lambda: method(*args), cache_result=cache_result)
+            handle = runtime.submit(
+                key, lambda: method(*args), cache_result=cache_result
+            )
             outcome = await runtime.wait(handle, deadline=route_deadline)
-            route_elapsed_ms[route] = route_elapsed_ms.get(route, 0) + int((loop.time() - started) * 1000)
+            route_elapsed_ms[route] = route_elapsed_ms.get(route, 0) + int(
+                (loop.time() - started) * 1000
+            )
             state = outcome.get("state", "error")
             if state != "completed":
                 route_failures[route] = state
                 if state in {"timeout", "busy", "closed", "error"}:
-                    logger.debug("Narrative recall partial route=%s state=%s elapsed_ms=%d",
-                                 route, state, route_elapsed_ms[route])
+                    logger.debug(
+                        "Narrative recall partial route=%s state=%s elapsed_ms=%d",
+                        route,
+                        state,
+                        route_elapsed_ms[route],
+                    )
             return outcome
 
-        async def safe(method, *args, budget=None, route="unknown", origin=None,
-                       discriminator=None, cache_result=False):
-            outcome = await run_route(method, *args, budget=budget, route=route,
-                                      origin=(str(origin) if origin is not None else
-                                              "|".join(str(value) for value in args[2:3])),
-                                      discriminator=discriminator, cache_result=cache_result)
-            result = outcome.get("value") if outcome.get("state") == "completed" else None
+        async def safe(
+            method,
+            *args,
+            budget=None,
+            route="unknown",
+            origin=None,
+            discriminator=None,
+            cache_result=False,
+        ):
+            outcome = await run_route(
+                method,
+                *args,
+                budget=budget,
+                route=route,
+                origin=(
+                    str(origin)
+                    if origin is not None
+                    else "|".join(str(value) for value in args[2:3])
+                ),
+                discriminator=discriminator,
+                cache_result=cache_result,
+            )
+            result = (
+                outcome.get("value") if outcome.get("state") == "completed" else None
+            )
             return result if isinstance(result, list) else []
 
         local = getattr(engine, "search_narrative_history", None)
@@ -1180,82 +1420,161 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         remote_routes = ("semantic_legacy", "semantic_managed")
         semantic_deadline = min(retrieval_deadline, loop.time() + semantic_budget)
         local_waiters = [
-            asyncio.create_task(safe(local, query, top_k, (scope["umo"],), personas,
-                                      budget=min(local_budget, max(0.0, retrieval_deadline - loop.time())),
-                                      route="history_legacy")),
-            asyncio.create_task(safe(local, query, top_k, (managed_origin,), personas,
-                                      budget=min(local_budget, max(0.0, retrieval_deadline - loop.time())),
-                                      route="history_managed")),
-            asyncio.create_task(safe(manager.store.recall_narrative_events, scope, query, 2,
-                                      budget=min(local_budget, max(0.0, retrieval_deadline - loop.time())),
-                                      route="narrative_events")),
-        ]
-        ready_waiter = asyncio.create_task(run_route(
-            lambda: self._ready_narrative_baseline(
-                scope, query, purpose, card_version, correction_revision
+            asyncio.create_task(
+                safe(
+                    local,
+                    query,
+                    top_k,
+                    (scope["umo"],),
+                    personas,
+                    budget=min(
+                        local_budget, max(0.0, retrieval_deadline - loop.time())
+                    ),
+                    route="history_legacy",
+                )
             ),
-            budget=max(0.0, retrieval_deadline - loop.time()),
-            route="ready_baseline", origin=managed_origin,
-            discriminator=correction_revision, cache_result=False,
-        ))
+            asyncio.create_task(
+                safe(
+                    local,
+                    query,
+                    top_k,
+                    (managed_origin,),
+                    personas,
+                    budget=min(
+                        local_budget, max(0.0, retrieval_deadline - loop.time())
+                    ),
+                    route="history_managed",
+                )
+            ),
+            asyncio.create_task(
+                safe(
+                    manager.store.recall_narrative_events,
+                    scope,
+                    query,
+                    2,
+                    budget=min(
+                        local_budget, max(0.0, retrieval_deadline - loop.time())
+                    ),
+                    route="narrative_events",
+                )
+            ),
+        ]
+        ready_waiter = asyncio.create_task(
+            run_route(
+                lambda: self._ready_narrative_baseline(
+                    scope, query, purpose, card_version, correction_revision
+                ),
+                budget=max(0.0, retrieval_deadline - loop.time()),
+                route="ready_baseline",
+                origin=managed_origin,
+                discriminator=correction_revision,
+                cache_result=False,
+            )
+        )
         semantic_waiters = []
         semantic_contexts = []
         if semantic_budget and str(query).strip():
             semantic_deadline = min(retrieval_deadline, loop.time() + semantic_budget)
             from .core.retrieval.vector_search import QueryEmbeddingCache
+
             embedding_cache = QueryEmbeddingCache(semantic_deadline)
             semantic_slots = asyncio.Semaphore(4)
             try:
-                accepts_context = callable(semantic) and "execution_context" in inspect.signature(semantic).parameters
+                accepts_context = (
+                    callable(semantic)
+                    and "execution_context" in inspect.signature(semantic).parameters
+                )
             except (TypeError, ValueError):
                 accepts_context = False
             for index, origin in enumerate((scope["umo"], managed_origin)):
                 search_context = BoundedRecallSearchContext(
-                    runtime, RecallDeadline(loop.time(), semantic_deadline, 0.0),
-                    scope=scope, query=query, purpose=purpose, card_version=card_version,
-                    correction_revision=correction_revision, persona_ids=personas, origin=origin,
-                    _parallel=semantic_slots, hard_deadline=True, embedding_cache=embedding_cache,
+                    runtime,
+                    RecallDeadline(loop.time(), semantic_deadline, 0.0),
+                    scope=scope,
+                    query=query,
+                    purpose=purpose,
+                    card_version=card_version,
+                    correction_revision=correction_revision,
+                    persona_ids=personas,
+                    origin=origin,
+                    _parallel=semantic_slots,
+                    hard_deadline=True,
+                    embedding_cache=embedding_cache,
                 )
                 semantic_contexts.append(search_context)
 
-                async def search(q, count, source_origin, role_ids, context=search_context):
+                async def search(
+                    q, count, source_origin, role_ids, context=search_context
+                ):
                     if accepts_context:
-                        return await semantic(q, count, source_origin, role_ids, execution_context=context)
+                        return await semantic(
+                            q, count, source_origin, role_ids, execution_context=context
+                        )
                     return await semantic(q, count, source_origin, role_ids)
 
-                semantic_waiters.append(asyncio.create_task(
-                    safe(search, query, top_k, origin, personas,
-                         budget=max(0.0, semantic_deadline - loop.time()),
-                         route=remote_routes[index], origin=origin, cache_result=True)
-                ))
+                semantic_waiters.append(
+                    asyncio.create_task(
+                        safe(
+                            search,
+                            query,
+                            top_k,
+                            origin,
+                            personas,
+                            budget=max(0.0, semantic_deadline - loop.time()),
+                            route=remote_routes[index],
+                            origin=origin,
+                            cache_result=True,
+                        )
+                    )
+                )
         try:
             historical, managed, evidence, ready_outcome = await asyncio.gather(
                 *local_waiters, ready_waiter
             )
-            ready_baseline = (ready_outcome.get("value")
-                              if ready_outcome.get("state") == "completed" and
-                              isinstance(ready_outcome.get("value"), dict) else
-                              {"source_refs": [], "typed_items": [], "diagnostic": "partial"})
+            ready_baseline = (
+                ready_outcome.get("value")
+                if ready_outcome.get("state") == "completed"
+                and isinstance(ready_outcome.get("value"), dict)
+                else {"source_refs": [], "typed_items": [], "diagnostic": "partial"}
+            )
             if semantic_waiters:
                 semantic_values = await asyncio.gather(*semantic_waiters)
                 for index, context in enumerate(semantic_contexts):
                     prefix = remote_routes[index] + "_"
-                    route_elapsed_ms.update({prefix + key: value for key, value in context.route_elapsed_ms.items()})
-                    route_failures.update({prefix + key: value for key, value in context.route_failures.items()})
+                    route_elapsed_ms.update(
+                        {
+                            prefix + key: value
+                            for key, value in context.route_elapsed_ms.items()
+                        }
+                    )
+                    route_failures.update(
+                        {
+                            prefix + key: value
+                            for key, value in context.route_failures.items()
+                        }
+                    )
                 for index, baseline in enumerate((historical, managed)):
-                    enriched = semantic_values[index] if index < len(semantic_values) else []
-                    baseline_origins = (scope["umo"],) if index == 0 else (managed_origin,)
+                    enriched = (
+                        semantic_values[index] if index < len(semantic_values) else []
+                    )
+                    baseline_origins = (
+                        (scope["umo"],) if index == 0 else (managed_origin,)
+                    )
                     revalidated = await self._revalidate_narrative_candidates(
-                        [*enriched, *baseline], baseline_origins, personas,
+                        [*enriched, *baseline],
+                        baseline_origins,
+                        personas,
                         run_route,
                     )
                     baseline[:] = revalidated[:top_k]
             else:
                 historical, managed = await asyncio.gather(
-                    self._revalidate_narrative_candidates(historical, (scope["umo"],), personas,
-                                                          run_route),
-                    self._revalidate_narrative_candidates(managed, (managed_origin,), personas,
-                                                          run_route),
+                    self._revalidate_narrative_candidates(
+                        historical, (scope["umo"],), personas, run_route
+                    ),
+                    self._revalidate_narrative_candidates(
+                        managed, (managed_origin,), personas, run_route
+                    ),
                 )
         finally:
             # These are only bounded waiters. The owned pool keeps any late
@@ -1263,60 +1582,103 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             for waiter in [*local_waiters, ready_waiter, *semantic_waiters]:
                 if not waiter.done():
                     waiter.cancel()
-            pending_waiters = [waiter for waiter in [*local_waiters, ready_waiter, *semantic_waiters]
-                               if not waiter.done()]
+            pending_waiters = [
+                waiter
+                for waiter in [*local_waiters, ready_waiter, *semantic_waiters]
+                if not waiter.done()
+            ]
             if pending_waiters:
                 await asyncio.gather(*pending_waiters, return_exceptions=True)
         items = []
         for rows, legacy in ((historical, True), (managed, False)):
             for memory in rows:
                 metadata = getattr(memory, "metadata", {}) or {}
-                unknown_role = metadata.get("persona_id") in (None, "", "default", "[%None]")
-                prefix = "当时角色不明的历史群聊材料（不代表当前角色承诺或人生事实）：\n" if legacy and unknown_role else ""
-                items.append({
-                    "text": prefix + memory.content, "source_id": str(memory.doc_id),
-                    "occurred_at": metadata.get("create_time"), "scope": dict(scope),
-                    "fact_kind": "subjective", "unknown": True,
-                    "provenance_kind": "historical_unknown_character" if legacy and unknown_role else "historical" if legacy else "managed_summary",
-                    "source_persona_id": metadata.get("persona_id"), "source_umo": source_origin(metadata),
-                    "evidence": metadata.get("narrative_provenance", []), "_source_metadata": metadata,
-                })
-        routes = {"historical": len(historical), "managed": len(managed), "evidence": len(evidence)}
+                unknown_role = metadata.get("persona_id") in (
+                    None,
+                    "",
+                    "default",
+                    "[%None]",
+                )
+                prefix = (
+                    "当时角色不明的历史群聊材料（不代表当前角色承诺或人生事实）：\n"
+                    if legacy and unknown_role
+                    else ""
+                )
+                items.append(
+                    {
+                        "text": prefix + memory.content,
+                        "source_id": str(memory.doc_id),
+                        "occurred_at": metadata.get("create_time"),
+                        "scope": dict(scope),
+                        "fact_kind": "subjective",
+                        "unknown": True,
+                        "provenance_kind": "historical_unknown_character"
+                        if legacy and unknown_role
+                        else "historical"
+                        if legacy
+                        else "managed_summary",
+                        "source_persona_id": metadata.get("persona_id"),
+                        "source_umo": source_origin(metadata),
+                        "evidence": metadata.get("narrative_provenance", []),
+                        "_source_metadata": metadata,
+                    }
+                )
+        routes = {
+            "historical": len(historical),
+            "managed": len(managed),
+            "evidence": len(evidence),
+        }
         if purpose == "history_quote":
             # Explicit history query is the only route that returns legacy summary text.
-            view = EvidenceViewService._empty_view("history_quote_uses_source_route", purpose, card_version)
+            view = EvidenceViewService._empty_view(
+                "history_quote_uses_source_route", purpose, card_version
+            )
             view["available"] = True
             view["evidence_status"] = "empty"
-            return {"schema_version": 1, "items": [*items, *evidence][:top_k * 2],
-                    "available": True, "routes": routes,
-                    "evidence_view": view, "evidence_status": "empty",
-                    "diagnostics": {
+            return {
+                "schema_version": 1,
+                "items": [*items, *evidence][: top_k * 2],
+                "available": True,
+                "routes": routes,
+                "evidence_view": view,
+                "evidence_status": "empty",
+                "diagnostics": {
                     **self._narrative_runtime_diagnostics(
                         call_started, route_failures, route_elapsed_ms, runtime
                     ),
-                    "ready_baseline_status": str(ready_baseline.get("diagnostic", "partial"))[:64],
-                    "timeout_count": sum(value == "timeout" for value in route_failures.values()),
-                        "route_error_count": sum(value in {"error", "unavailable", "busy", "closed"}
-                                                  for value in route_failures.values()),
-                    }}
+                    "ready_baseline_status": str(
+                        ready_baseline.get("diagnostic", "partial")
+                    )[:64],
+                    "timeout_count": sum(
+                        value == "timeout" for value in route_failures.values()
+                    ),
+                    "route_error_count": sum(
+                        value in {"error", "unavailable", "busy", "closed"}
+                        for value in route_failures.values()
+                    ),
+                },
+            }
         if purpose not in PURPOSES:
             unavailable = empty_reply("invalid_purpose", "invalid")
             unavailable["routes"] = routes
             unavailable["diagnostics"] = {
-                "reason": "invalid_purpose", "raw_legacy_summaries_returned": False,
-                **self._narrative_runtime_diagnostics(call_started, route_failures,
-                                                      route_elapsed_ms, runtime),
+                "reason": "invalid_purpose",
+                "raw_legacy_summaries_returned": False,
+                **self._narrative_runtime_diagnostics(
+                    call_started, route_failures, route_elapsed_ms, runtime
+                ),
             }
             return unavailable
         if not self.evidence_service:
             unavailable = empty_reply("service_unavailable", "unavailable")
             unavailable["routes"] = routes
-            unavailable["diagnostics"] = {"reason": "evidence_view_unavailable",
-                                          "raw_legacy_summaries_returned": False,
-                                          **self._narrative_runtime_diagnostics(
-                                              call_started, route_failures,
-                                              route_elapsed_ms, runtime
-                                          )}
+            unavailable["diagnostics"] = {
+                "reason": "evidence_view_unavailable",
+                "raw_legacy_summaries_returned": False,
+                **self._narrative_runtime_diagnostics(
+                    call_started, route_failures, route_elapsed_ms, runtime
+                ),
+            }
             return unavailable
 
         materials = []
@@ -1328,40 +1690,66 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 source_plans.append((item, metadata))
             else:
                 item.pop("_source_metadata", None)
-                materials.append({"source_kind": "legacy_summary", "document_id": item.get("source_id"),
-                                  "source_umo": item.get("source_umo"), "text": item.get("text", "")})
+                materials.append(
+                    {
+                        "source_kind": "legacy_summary",
+                        "document_id": item.get("source_id"),
+                        "source_umo": item.get("source_umo"),
+                        "text": item.get("text", ""),
+                    }
+                )
 
         source_semaphore = asyncio.Semaphore(4)
 
         async def load_source_plan(item, metadata):
             async with source_semaphore:
-                origin = str(metadata.get("source_session_id") or metadata.get("session_id") or "")
+                origin = str(
+                    metadata.get("source_session_id")
+                    or metadata.get("session_id")
+                    or ""
+                )
                 doc_id = item.get("source_id", "")
                 return await run_route(
-                    manager.store.load_narrative_sources, metadata,
+                    manager.store.load_narrative_sources,
+                    metadata,
                     budget=max(0.0, finalize_deadline - loop.time()),
-                    route="narrative_sources", origin=origin,
-                    discriminator=doc_id, cache_result=False,
+                    route="narrative_sources",
+                    origin=origin,
+                    discriminator=doc_id,
+                    cache_result=False,
                 )
 
         source_outcomes = []
         batch_sources = getattr(manager.store, "load_narrative_sources_many", None)
         if source_plans and loop.time() < deadline and callable(batch_sources):
             batch_outcome = await run_route(
-                batch_sources, [metadata for _, metadata in source_plans],
-                budget=max(0.0, finalize_deadline - loop.time()), route="narrative_sources",
-                origin=managed_origin, discriminator=[item.get("source_id") for item, _ in source_plans],
+                batch_sources,
+                [metadata for _, metadata in source_plans],
+                budget=max(0.0, finalize_deadline - loop.time()),
+                route="narrative_sources",
+                origin=managed_origin,
+                discriminator=[item.get("source_id") for item, _ in source_plans],
             )
             values = batch_outcome.get("value")
-            if batch_outcome.get("state") == "completed" and isinstance(values, list) and len(values) == len(source_plans):
-                source_outcomes = [{"state": "completed", "value": value} for value in values]
+            if (
+                batch_outcome.get("state") == "completed"
+                and isinstance(values, list)
+                and len(values) == len(source_plans)
+            ):
+                source_outcomes = [
+                    {"state": "completed", "value": value} for value in values
+                ]
             else:
                 if batch_outcome.get("state") == "completed":
                     batch_outcome = {"state": "error", "value": None}
                     route_failures["narrative_sources"] = "error"
-                source_outcomes = [{**batch_outcome, "value": None} for _ in source_plans]
+                source_outcomes = [
+                    {**batch_outcome, "value": None} for _ in source_plans
+                ]
         elif source_plans and loop.time() < deadline:
-            source_outcomes = await asyncio.gather(*(load_source_plan(item, metadata) for item, metadata in source_plans))
+            source_outcomes = await asyncio.gather(
+                *(load_source_plan(item, metadata) for item, metadata in source_plans)
+            )
         for (item, _metadata), outcome in zip(source_plans, source_outcomes):
             if outcome.get("state") != "completed":
                 # A summary without completed source proof cannot substitute for
@@ -1376,41 +1764,71 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 event_id = metadata.get("source_event_id")
                 if not isinstance(source_scope, dict) or not event_id:
                     continue
-                materials.append({
-                    "source_kind": "event", "event_id": event_id,
-                    "event_type": "delivery.success" if fact_kind == "receipt" else "message.received",
-                    "scope": source_scope, "text": source.get("content", ""),
-                    "actor_id": source.get("sender_id"),
-                    "occurred_at": source.get("timestamp"),
-                })
+                materials.append(
+                    {
+                        "source_kind": "event",
+                        "event_id": event_id,
+                        "event_type": "delivery.success"
+                        if fact_kind == "receipt"
+                        else "message.received",
+                        "scope": source_scope,
+                        "text": source.get("content", ""),
+                        "actor_id": source.get("sender_id"),
+                        "occurred_at": source.get("timestamp"),
+                    }
+                )
             if source_rows:
                 continue
             item.pop("_source_metadata", None)
-            materials.append({"source_kind": "legacy_summary", "document_id": item.get("source_id"),
-                              "source_umo": item.get("source_umo"), "text": item.get("text", "")})
+            materials.append(
+                {
+                    "source_kind": "legacy_summary",
+                    "document_id": item.get("source_id"),
+                    "source_umo": item.get("source_umo"),
+                    "text": item.get("text", ""),
+                }
+            )
         for source in evidence:
             if not isinstance(source, dict):
                 continue
             fact_kind = source.get("fact_kind")
             text = str(source.get("text", ""))
             if text.startswith("用户发言："):
-                text = text[len("用户发言："):]
+                text = text[len("用户发言：") :]
             elif text.startswith("已发送："):
-                text = text[len("已发送："):]
-            materials.append({
-                "source_kind": "event", "event_id": source.get("source_id"),
-                "event_type": "delivery.success" if fact_kind == "receipt" else "message.received",
-                "scope": source.get("scope"), "text": text,
-                "occurred_at": source.get("occurred_at"),
-            })
-        ready_refs = ready_baseline.get("source_refs", []) if isinstance(ready_baseline, dict) else []
-        ready_typed = ready_baseline.get("typed_items", []) if isinstance(ready_baseline, dict) else []
+                text = text[len("已发送：") :]
+            materials.append(
+                {
+                    "source_kind": "event",
+                    "event_id": source.get("source_id"),
+                    "event_type": "delivery.success"
+                    if fact_kind == "receipt"
+                    else "message.received",
+                    "scope": source.get("scope"),
+                    "text": text,
+                    "occurred_at": source.get("occurred_at"),
+                }
+            )
+        ready_refs = (
+            ready_baseline.get("source_refs", [])
+            if isinstance(ready_baseline, dict)
+            else []
+        )
+        ready_typed = (
+            ready_baseline.get("typed_items", [])
+            if isinstance(ready_baseline, dict)
+            else []
+        )
         # Keep proof for already verified atoms before optional summary expansion.
         # Deduplicate complete identities, not text (same text can have different authors).
         view_refs, seen_refs = [], set()
         for ref in [*ready_refs, *materials]:
             eid = ref.get("source_event_id", ref.get("event_id"))
-            identity = ("event", str(eid)) if eid else ("material", json.dumps(ref, sort_keys=True, ensure_ascii=False))
+            identity = (
+                ("event", str(eid))
+                if eid
+                else ("material", json.dumps(ref, sort_keys=True, ensure_ascii=False))
+            )
             if identity not in seen_refs:
                 seen_refs.add(identity)
                 view_refs.append(ref)
@@ -1418,90 +1836,158 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             # All useful material is already rendered. Recheck identity/policy
             # instead of sending the same ready atoms through SQLite again.
             view_outcome = await run_route(
-                self._current_ready_narrative_view, scope, ready_baseline, purpose, card_version,
-                route="baseline_recheck", origin=managed_origin, use_total_deadline=True,
+                self._current_ready_narrative_view,
+                scope,
+                ready_baseline,
+                purpose,
+                card_version,
+                route="baseline_recheck",
+                origin=managed_origin,
+                use_total_deadline=True,
             )
         else:
             view_outcome = await run_route(
                 lambda: self.get_evidence_view(
-                    scope, source_refs=view_refs[:MAX_MATERIALS],
-                    typed_items=ready_typed[:MAX_MATERIALS], purpose=purpose,
-                    card_version=card_version, allow_derivation=bool(materials),
+                    scope,
+                    source_refs=view_refs[:MAX_MATERIALS],
+                    typed_items=ready_typed[:MAX_MATERIALS],
+                    purpose=purpose,
+                    card_version=card_version,
+                    allow_derivation=bool(materials),
                 ),
-                route="evidence_view", origin=scope.get("umo", ""),
-                discriminator=revision_info.get("correction_revision"), cache_result=False,
+                route="evidence_view",
+                origin=scope.get("umo", ""),
+                discriminator=revision_info.get("correction_revision"),
+                cache_result=False,
                 # Keep the final reserve for checking/publishing a valid local
                 # baseline. Optional enrichment cannot consume that reserve.
                 use_total_deadline=False,
             )
         baseline_preserved = False
-        if (view_outcome.get("state") != "completed" or not isinstance(view_outcome.get("value"), dict)
-                or view_outcome["value"].get("available") is not True
-                or not view_outcome["value"].get("atoms")):
-            baseline_outcome = await run_route(
-                self._current_ready_narrative_view, scope, ready_baseline, purpose, card_version,
-                route="baseline_recheck", origin=managed_origin, use_total_deadline=True,
-            ) if ready_baseline.get("evidence_view") else {}
-            if (baseline_outcome.get("state") == "completed"
-                    and isinstance(baseline_outcome.get("value"), dict)):
+        if (
+            view_outcome.get("state") != "completed"
+            or not isinstance(view_outcome.get("value"), dict)
+            or view_outcome["value"].get("available") is not True
+            or not view_outcome["value"].get("atoms")
+        ):
+            baseline_outcome = (
+                await run_route(
+                    self._current_ready_narrative_view,
+                    scope,
+                    ready_baseline,
+                    purpose,
+                    card_version,
+                    route="baseline_recheck",
+                    origin=managed_origin,
+                    use_total_deadline=True,
+                )
+                if ready_baseline.get("evidence_view")
+                else {}
+            )
+            if baseline_outcome.get("state") == "completed" and isinstance(
+                baseline_outcome.get("value"), dict
+            ):
                 view_outcome = baseline_outcome
                 baseline_preserved = True
-        if (view_outcome.get("state") != "completed" or not isinstance(view_outcome.get("value"), dict)
-                or view_outcome["value"].get("available") is not True):
+        if (
+            view_outcome.get("state") != "completed"
+            or not isinstance(view_outcome.get("value"), dict)
+            or view_outcome["value"].get("available") is not True
+        ):
             value = view_outcome.get("value")
-            reported_status = value.get("evidence_status") if isinstance(value, dict) else None
-            status = ("timeout" if view_outcome.get("state") == "timeout" else reported_status
-                      if reported_status in {"invalid", "unavailable", "pending", "deferred", "timeout"}
-                      else "unavailable")
-            unavailable = empty_reply("recall_deadline" if status == "timeout" else "evidence_view_unavailable",
-                                      status)
+            reported_status = (
+                value.get("evidence_status") if isinstance(value, dict) else None
+            )
+            status = (
+                "timeout"
+                if view_outcome.get("state") == "timeout"
+                else reported_status
+                if reported_status
+                in {"invalid", "unavailable", "pending", "deferred", "timeout"}
+                else "unavailable"
+            )
+            unavailable = empty_reply(
+                "recall_deadline"
+                if status == "timeout"
+                else "evidence_view_unavailable",
+                status,
+            )
             unavailable["routes"] = routes
             return unavailable
         view = copy.deepcopy(view_outcome["value"])
         if route_failures:
             diagnostics = dict(view.get("diagnostics", {}))
-            diagnostics["timeout_count"] = sum(value == "timeout" for value in route_failures.values())
-            diagnostics["route_error_count"] = sum(value in {"error", "unavailable", "busy", "closed"}
-                                                    for value in route_failures.values())
-            diagnostics["timed_out_routes"] = sorted(key for key, value in route_failures.items() if value == "timeout")
+            diagnostics["timeout_count"] = sum(
+                value == "timeout" for value in route_failures.values()
+            )
+            diagnostics["route_error_count"] = sum(
+                value in {"error", "unavailable", "busy", "closed"}
+                for value in route_failures.values()
+            )
+            diagnostics["timed_out_routes"] = sorted(
+                key for key, value in route_failures.items() if value == "timeout"
+            )
             view = {**view, "diagnostics": diagnostics}
             view["evidence_status"] = EvidenceViewService._evidence_status(view)
         if baseline_preserved or (route_failures and view.get("atoms")):
             view["evidence_status"] = "partial"
         safe_items = []
-        for slot_name in ("current_evidence", "commitments_and_boundaries", "recent", "historical_claims"):
+        for slot_name in (
+            "current_evidence",
+            "commitments_and_boundaries",
+            "recent",
+            "historical_claims",
+        ):
             for atom in view.get("slots", {}).get(slot_name, []):
-                safe_items.append({
-                    "item_kind": "evidence_atom", "evidence_schema_version": 1,
-                    "text": atom.get("claim", ""), "source_id": atom.get("atom_id"),
-                    "scope": dict(scope), "fact_kind": atom.get("kind"),
-                    "provenance_kind": atom.get("source_status"), "status": atom.get("status"),
-                    "scope_key": view.get("scope_key"),
-                    "correction_revision": view.get("correction_revision"),
-                    "source_refs": atom.get("source_refs", []),
-                    "root_evidence_ids": atom.get("root_evidence_ids", []),
-                    "root_material_ids": atom.get("root_material_ids", []),
-                })
-        return {"schema_version": 1, "items": safe_items[:top_k * 4], "available": bool(view.get("available")),
-                "routes": routes, "evidence_view": view,
-                "evidence_status": view.get("evidence_status", "unavailable"),
-                "diagnostics": {
-                    "accepted": int(view.get("diagnostics", {}).get("typed_items_accepted", 0)),
-                    "resolved": int(view.get("diagnostics", {}).get("materials_cached", 0)),
-                    "deferred": int(view.get("diagnostics", {}).get("materials_deferred", 0)),
-                    "rejected": int(view.get("diagnostics", {}).get("source_refs_rejected", 0)) +
-                                int(view.get("diagnostics", {}).get("typed_items_rejected", 0)),
-                    "timeout": int(view.get("diagnostics", {}).get("timeout_count", 0)),
-                    "rerank": self._effective_rerank_status(),
-                    "raw_legacy_summaries_returned": False,
-                    "source_text_logged": False,
-                    "ready_baseline_status": str(ready_baseline.get("diagnostic", "partial"))[:64],
-                    "baseline_preserved": baseline_preserved,
-                    **self._narrative_runtime_diagnostics(
-                        call_started, route_failures, route_elapsed_ms, runtime
-                    ),
-                }}
-
+                safe_items.append(
+                    {
+                        "item_kind": "evidence_atom",
+                        "evidence_schema_version": 1,
+                        "text": atom.get("claim", ""),
+                        "source_id": atom.get("atom_id"),
+                        "scope": dict(scope),
+                        "fact_kind": atom.get("kind"),
+                        "provenance_kind": atom.get("source_status"),
+                        "status": atom.get("status"),
+                        "scope_key": view.get("scope_key"),
+                        "correction_revision": view.get("correction_revision"),
+                        "source_refs": atom.get("source_refs", []),
+                        "root_evidence_ids": atom.get("root_evidence_ids", []),
+                        "root_material_ids": atom.get("root_material_ids", []),
+                    }
+                )
+        return {
+            "schema_version": 1,
+            "items": safe_items[: top_k * 4],
+            "available": bool(view.get("available")),
+            "routes": routes,
+            "evidence_view": view,
+            "evidence_status": view.get("evidence_status", "unavailable"),
+            "diagnostics": {
+                "accepted": int(
+                    view.get("diagnostics", {}).get("typed_items_accepted", 0)
+                ),
+                "resolved": int(view.get("diagnostics", {}).get("materials_cached", 0)),
+                "deferred": int(
+                    view.get("diagnostics", {}).get("materials_deferred", 0)
+                ),
+                "rejected": int(
+                    view.get("diagnostics", {}).get("source_refs_rejected", 0)
+                )
+                + int(view.get("diagnostics", {}).get("typed_items_rejected", 0)),
+                "timeout": int(view.get("diagnostics", {}).get("timeout_count", 0)),
+                "rerank": self._effective_rerank_status(),
+                "raw_legacy_summaries_returned": False,
+                "source_text_logged": False,
+                "ready_baseline_status": str(
+                    ready_baseline.get("diagnostic", "partial")
+                )[:64],
+                "baseline_preserved": baseline_preserved,
+                **self._narrative_runtime_diagnostics(
+                    call_started, route_failures, route_elapsed_ms, runtime
+                ),
+            },
+        }
 
     async def ingest_events(self, events: list[dict]) -> dict:
         """Persist received messages and confirmed segments; never model drafts."""
@@ -1515,7 +2001,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             if event.get("type") not in {"message.received", "delivery.success"}:
                 continue
             scope = event.get("scope", {})
-            if not await self._narrative_scope_allowed(scope, str(event.get("actor_id", ""))):
+            if not await self._narrative_scope_allowed(
+                scope, str(event.get("actor_id", ""))
+            ):
                 continue
             if await manager.store.ingest_narrative_event(event):
                 accepted += 1
@@ -1539,8 +2027,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 yield event.plain_result("当前没有可纠正的派生见解。")
                 return
             lines = ["派生见解（仅显示ID与来源元数据，不显示群友原文）："]
-            lines.extend(f"{row['atom_id']} | {row['kind']} | {row['status']} | correction rev {row['correction_revision']}"
-                         for row in rows)
+            lines.extend(
+                f"{row['atom_id']} | {row['kind']} | {row['status']} | correction rev {row['correction_revision']}"
+                for row in rows
+            )
             yield event.plain_result("\n".join(lines))
             return
         parts = [part.strip() for part in args.split("|", 4)]
@@ -1560,10 +2050,17 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         replacement = parts[3] if action == "supersede" and len(parts) == 5 else ""
         reason = parts[4] if action == "supersede" and len(parts) == 5 else parts[3]
         try:
-            result = await self.correct_insight(target_id, expected_revision, action,
-                                                replacement=replacement, reason=reason)
+            result = await self.correct_insight(
+                target_id,
+                expected_revision,
+                action,
+                replacement=replacement,
+                reason=reason,
+            )
         except (ValueError, RuntimeError):
-            yield event.plain_result("纠正未写入：目标不存在、revision已变化或参数无效。请重新查看ID和revision。")
+            yield event.plain_result(
+                "纠正未写入：目标不存在、revision已变化或参数无效。请重新查看ID和revision。"
+            )
             return
         yield event.plain_result(
             f"纠正已追加：{result['action']} {result['target_id']}；"

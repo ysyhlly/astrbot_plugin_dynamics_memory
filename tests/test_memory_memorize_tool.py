@@ -112,9 +112,7 @@ async def test_memory_memorize_tool_writes_resolved_user_scope(
 
     call_kwargs = memory_engine.add_memory.await_args.kwargs
     assert call_kwargs["session_id"] == "livingmemory:user:test:user-1"
-    assert call_kwargs["metadata"]["source_session_id"] == (
-        "test:private:session-1"
-    )
+    assert call_kwargs["metadata"]["source_session_id"] == ("test:private:session-1")
 
 
 @pytest.mark.asyncio
@@ -183,9 +181,12 @@ async def test_memory_memorize_tool_detects_group_chat(memory_engine, memory_pro
             memory="群里约定周五复盘",
         )
 
-    assert memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "is_group_chat"
-    ] is True
+    assert (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "is_group_chat"
+        ]
+        is True
+    )
 
 
 @pytest.mark.asyncio
@@ -209,9 +210,11 @@ async def test_memory_memorize_tool_normalizes_invalid_sentiment(
             sentiment="SURPRISED",
         )
 
-    structured_data = memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "structured_data"
-    ]
+    structured_data = (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "structured_data"
+        ]
+    )
     assert structured_data["sentiment"] == "neutral"
 
 
@@ -236,9 +239,11 @@ async def test_memory_memorize_tool_handles_non_string_sentiment(
             sentiment=1,
         )
 
-    structured_data = memory_processor.build_memory_from_structured_data.call_args.kwargs[
-        "structured_data"
-    ]
+    structured_data = (
+        memory_processor.build_memory_from_structured_data.call_args.kwargs[
+            "structured_data"
+        ]
+    )
     assert structured_data["sentiment"] == "neutral"
 
 

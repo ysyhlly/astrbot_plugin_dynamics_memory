@@ -5,14 +5,11 @@
 
 import hashlib
 import inspect
-import json
 import time
-from contextlib import nullcontext
 import secrets
 from collections import OrderedDict
 from astrbot.api.platform import MessageType
 from ..memory_scope import classify_umo, resolve_memory_write_scope
-from ..memory_source import build_source_row_refs_v1, serialize_source_messages
 from ..models.conversation_models import Message
 from ..utils import get_persona_id
 
@@ -30,10 +27,15 @@ from astrbot.api.provider import LLMResponse
 from ..memory_scope import (
     is_event_memory_allowed,
     is_suspicious_session_id,
-    resolve_event_memory_access,
 )
-from .memory_reflection_storage import MANAGED_WINDOW_REFUSED, MemoryReflectionStorageMixin
-from ...storage.conversation_summary_progress import SUMMARY_RETRY_LIMIT, TERMINAL_SUMMARY_STAGES
+from .memory_reflection_storage import (
+    MANAGED_WINDOW_REFUSED,
+    MemoryReflectionStorageMixin,
+)
+from ...storage.conversation_summary_progress import (
+    SUMMARY_RETRY_LIMIT,
+    TERMINAL_SUMMARY_STAGES,
+)
 from ..narrative_api import scope_key
 
 
@@ -405,9 +407,7 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         """写入助手消息、判断触发条件并计算本次总结窗口。"""
 
         owned_private = self._is_owned_private_event(event)
-        lineage_validator = getattr(
-            event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None
-        )
+        lineage_validator = getattr(event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None)
         lineage_token = None
         if owned_private or callable(lineage_validator):
             if not callable(lineage_validator):
@@ -426,17 +426,23 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                     raise
                 except Exception:
                     exact_current_input = False
-                if (exact_current_input is not True
-                        or not await self._run_owned_source_validator(
-                            event, lineage_validator
-                        )):
-                    logger.warning("[LMReflection] route=owned_source outcome=unavailable")
+                if (
+                    exact_current_input is not True
+                    or not await self._run_owned_source_validator(
+                        event, lineage_validator
+                    )
+                ):
+                    logger.warning(
+                        "[LMReflection] route=owned_source outcome=unavailable"
+                    )
                     return
             lineage_token = secrets.token_hex(24)
 
         # 添加助手响应
         append_kwargs = {
-            "event": event, "role": "assistant", "content": response_text,
+            "event": event,
+            "role": "assistant",
+            "content": response_text,
         }
         if lineage_token is not None:
             append_kwargs["internal_metadata"] = {
@@ -450,7 +456,6 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 lineage_token, event, lineage_validator, assistant_message
             )
         logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
-
 
         # 私聊：助手消息写入后也执行消息数量上限控制
         is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
@@ -533,7 +538,9 @@ class MemoryReflection(MemoryReflectionStorageMixin):
     ) -> _ReflectionPlan | None:
         """首次触发总结：解析人格/作用域后构造最老片段计划。"""
         persona_id = await get_persona_id(self.context, event)
-        memory_scope = resolve_memory_write_scope(self.config_manager, event) or session_id
+        memory_scope = (
+            resolve_memory_write_scope(self.config_manager, event) or session_id
+        )
         return await self._build_reflection_plan_for_cursor(
             session_id,
             total_messages,
@@ -555,13 +562,23 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         memory_scope: str,
     ) -> _ReflectionPlan | None:
         """处理待重试范围、窗口切分并取回总结输入消息。"""
-        if pending_summary and pending_summary.get("failure_stage") in TERMINAL_SUMMARY_STAGES:
+        if (
+            pending_summary
+            and pending_summary.get("failure_stage") in TERMINAL_SUMMARY_STAGES
+        ):
             logger.warning("Summary paused; original input retained")
             return None
-        if pending_summary and pending_summary.get("failure_stage") == "retry_exhausted":
+        if (
+            pending_summary
+            and pending_summary.get("failure_stage") == "retry_exhausted"
+        ):
             if time.time() < float(pending_summary.get("retry_after", 0) or 0):
                 return None
-            pending_summary = {**pending_summary, "failure_stage": "model", "retry_count": 0}
+            pending_summary = {
+                **pending_summary,
+                "failure_stage": "model",
+                "retry_count": 0,
+            }
         # Older pending offsets may point past the first unsummarized row.
         # Use a bounded segment from the cursor before allowing later ranges.
         exact_pending = bool(
@@ -570,29 +587,53 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             and type(pending_summary.get("start_index")) is int
             and pending_summary["start_index"] <= last_summarized_index
         )
-        start_index, candidate_messages = await self.conversation_manager.get_summary_window(
-            session_id, self._max_messages_per_segment(), exact_pending=exact_pending,
+        (
+            start_index,
+            candidate_messages,
+        ) = await self.conversation_manager.get_summary_window(
+            session_id,
+            self._max_messages_per_segment(),
+            exact_pending=exact_pending,
         )
         if len(candidate_messages) < 2:
             return None
         if not exact_pending:
-            candidate_messages = self._split_reflection_window(session_id, start_index, candidate_messages)
-        retry_count = int(pending_summary.get("retry_count", 0)) if pending_summary else 0
+            candidate_messages = self._split_reflection_window(
+                session_id, start_index, candidate_messages
+            )
+        retry_count = (
+            int(pending_summary.get("retry_count", 0)) if pending_summary else 0
+        )
         if retry_count >= SUMMARY_RETRY_LIMIT:
             await self._record_pending_summary(
-                session_id, start_index, start_index + len(candidate_messages), retry_count - 1,
-                expected_revision, failure_stage="retry_exhausted", error_code="segment_retries_exhausted",
+                session_id,
+                start_index,
+                start_index + len(candidate_messages),
+                retry_count - 1,
+                expected_revision,
+                failure_stage="retry_exhausted",
+                error_code="segment_retries_exhausted",
                 window_messages=candidate_messages,
             )
             return None
         return _ReflectionPlan(
-            session_id, candidate_messages, persona_id, start_index,
-            start_index + len(candidate_messages), retry_count, memory_scope, expected_revision,
+            session_id,
+            candidate_messages,
+            persona_id,
+            start_index,
+            start_index + len(candidate_messages),
+            retry_count,
+            memory_scope,
+            expected_revision,
         )
 
     def _max_messages_per_segment(self) -> int:
         try:
-            maximum = int(self.config_manager.get("reflection_engine.max_messages_per_segment", 120))
+            maximum = int(
+                self.config_manager.get(
+                    "reflection_engine.max_messages_per_segment", 120
+                )
+            )
         except (TypeError, ValueError):
             maximum = 120
         return max(2, min(maximum, 1000))
@@ -627,35 +668,71 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         return candidate_messages
 
     async def _build_recorded_scope_plan(
-        self, session_id, persona_id, expected_revision, threshold, *, retry_refused=False,
+        self,
+        session_id,
+        persona_id,
+        expected_revision,
+        threshold,
+        *,
+        retry_refused=False,
     ) -> _ReflectionPlan | None:
-        start, messages, pending = await self.conversation_manager.store.get_managed_summary_window(
-            session_id, self._max_messages_per_segment(), threshold, retry_refused=retry_refused,
+        (
+            start,
+            messages,
+            pending,
+        ) = await self.conversation_manager.store.get_managed_summary_window(
+            session_id,
+            self._max_messages_per_segment(),
+            threshold,
+            retry_refused=retry_refused,
         )
-        if not messages or not await self._revision_still_valid(session_id, expected_revision):
+        if not messages or not await self._revision_still_valid(
+            session_id, expected_revision
+        ):
             return None
         retries = int(pending.get("retry_count", 0) or 0) if pending else 0
-        if not retry_refused and pending and pending.get("failure_stage") == "retry_exhausted":
+        if (
+            not retry_refused
+            and pending
+            and pending.get("failure_stage") == "retry_exhausted"
+        ):
             retries = 0
         if not retry_refused and retries >= SUMMARY_RETRY_LIMIT:
             await self._record_pending_summary(
-                session_id, start, start + len(messages), retries - 1, expected_revision,
-                failure_stage="retry_exhausted", error_code="segment_retries_exhausted",
+                session_id,
+                start,
+                start + len(messages),
+                retries - 1,
+                expected_revision,
+                failure_stage="retry_exhausted",
+                error_code="segment_retries_exhausted",
                 window_messages=messages,
             )
             return None
         if pending is None:
             messages = self._split_reflection_window(session_id, start, messages)
             if not await self.conversation_manager.write_managed_summary_progress(
-                session_id, messages, {
-                    "start_index": start, "end_index": start + len(messages),
-                    "retry_count": 0, "failure_stage": "planned",
-                }, expected_revision,
+                session_id,
+                messages,
+                {
+                    "start_index": start,
+                    "end_index": start + len(messages),
+                    "retry_count": 0,
+                    "failure_stage": "planned",
+                },
+                expected_revision,
             ):
                 return None
         return _ReflectionPlan(
-            session_id, messages, persona_id, start, start + len(messages),
-            retries, session_id, expected_revision, retry_refused,
+            session_id,
+            messages,
+            persona_id,
+            start,
+            start + len(messages),
+            retries,
+            session_id,
+            expected_revision,
+            retry_refused,
         )
 
     async def schedule_recorded_scope(self, scope, *, retry_refused=False) -> bool:
@@ -673,7 +750,10 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             while True:
                 revision = await self._read_session_revision(session_id)
                 plan = await self._build_recorded_scope_plan(
-                    session_id, scope["persona_id"], revision, self._recorded_threshold(),
+                    session_id,
+                    scope["persona_id"],
+                    revision,
+                    self._recorded_threshold(),
                     retry_refused=retry_refused,
                 )
                 if plan is not None:
@@ -693,7 +773,9 @@ class MemoryReflection(MemoryReflectionStorageMixin):
 
     def _recorded_threshold(self) -> int:
         try:
-            rounds = int(self.config_manager.get("reflection_engine.summary_trigger_rounds", 10))
+            rounds = int(
+                self.config_manager.get("reflection_engine.summary_trigger_rounds", 10)
+            )
         except (TypeError, ValueError):
             rounds = 10
         return max(1, rounds) * 2
@@ -709,7 +791,9 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         if not await self._revision_still_valid(session_id, expected_revision):
             return None
         if session_id.startswith("narrative:v1:"):
-            return await self._build_recorded_scope_plan(session_id, persona_id, expected_revision, 1)
+            return await self._build_recorded_scope_plan(
+                session_id, persona_id, expected_revision, 1
+            )
 
         total_messages = await self.conversation_manager.store.get_message_count(
             session_id
@@ -746,17 +830,31 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 batch_has_more = await self._consume_reflection_segments(plan)
             session_id = plan.session_id
             next_plan = None
-            if batch_has_more and session_id.startswith("narrative:v1:") and not self._shutting_down:
+            if (
+                batch_has_more
+                and session_id.startswith("narrative:v1:")
+                and not self._shutting_down
+            ):
                 await asyncio.sleep(1)
                 if not self._shutting_down:
                     next_plan = await self._build_recorded_scope_plan(
-                        session_id, plan.persona_id, plan.expected_revision, self._recorded_threshold(),
+                        session_id,
+                        plan.persona_id,
+                        plan.expected_revision,
+                        self._recorded_threshold(),
                     )
-            while next_plan is None and session_id in self._recorded_scope_wakes and not self._shutting_down:
+            while (
+                next_plan is None
+                and session_id in self._recorded_scope_wakes
+                and not self._shutting_down
+            ):
                 self._recorded_scope_wakes.discard(session_id)
                 revision = await self._read_session_revision(session_id)
                 next_plan = await self._build_recorded_scope_plan(
-                    session_id, plan.persona_id, revision, self._recorded_threshold(),
+                    session_id,
+                    plan.persona_id,
+                    revision,
+                    self._recorded_threshold(),
                 )
             if next_plan is None:
                 return
@@ -783,8 +881,12 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 break
             if outcome is not MANAGED_WINDOW_REFUSED:
                 committed_any = True
-                if await self.conversation_manager.get_session_metadata(plan.session_id, "idle_summary_pending", False):
-                    await self.conversation_manager.update_session_metadata(plan.session_id, "idle_summary_pending", False)
+                if await self.conversation_manager.get_session_metadata(
+                    plan.session_id, "idle_summary_pending", False
+                ):
+                    await self.conversation_manager.update_session_metadata(
+                        plan.session_id, "idle_summary_pending", False
+                    )
             if self._shutting_down or plan.retry_refused:
                 break
 
@@ -804,9 +906,18 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             )
             if next_plan is None:
                 break
-            previous_anchor = (plan.history_messages[-1].timestamp, plan.history_messages[-1].id)
-            next_anchor = (next_plan.history_messages[-1].timestamp, next_plan.history_messages[-1].id)
-            if not plan.session_id.startswith("narrative:v1:") and next_anchor <= previous_anchor:
+            previous_anchor = (
+                plan.history_messages[-1].timestamp,
+                plan.history_messages[-1].id,
+            )
+            next_anchor = (
+                next_plan.history_messages[-1].timestamp,
+                next_plan.history_messages[-1].id,
+            )
+            if (
+                not plan.session_id.startswith("narrative:v1:")
+                and next_anchor <= previous_anchor
+            ):
                 logger.warning("Summary anchor did not advance; backlog retained")
                 break
             plan = next_plan
@@ -847,11 +958,21 @@ class MemoryReflection(MemoryReflectionStorageMixin):
     async def _history_rows_current(self, session_id: str, history_messages) -> bool:
         """Require each captured message to still match its stored row."""
         store = getattr(self.conversation_manager, "store", None)
+        raw_batch_loader = getattr(store, "get_messages_by_ids", None)
+        batch_loader = (
+            raw_batch_loader if asyncio.iscoroutinefunction(raw_batch_loader) else None
+        )
         loader = getattr(store, "get_message_by_id", None)
-        if not callable(loader) or not isinstance(session_id, str) or not session_id.strip():
+        if (
+            (batch_loader is None and not callable(loader))
+            or not isinstance(session_id, str)
+            or not session_id.strip()
+        ):
             return False
         if not isinstance(history_messages, (list, tuple)) or not history_messages:
             return False
+        sources: list[dict] = []
+        message_ids: list[int] = []
         for message in history_messages:
             if isinstance(message, dict):
                 source = message
@@ -860,29 +981,62 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             else:
                 source = {
                     key: getattr(message, key, None)
-                    for key in ("id", "session_id", "role", "content", "sender_id",
-                                "sender_name", "group_id", "platform", "timestamp", "metadata")
+                    for key in (
+                        "id",
+                        "session_id",
+                        "role",
+                        "content",
+                        "sender_id",
+                        "sender_name",
+                        "group_id",
+                        "platform",
+                        "timestamp",
+                        "metadata",
+                    )
                 }
             message_id = source.get("id")
-            if (isinstance(message_id, bool) or not isinstance(message_id, int)
-                    or message_id <= 0 or source.get("session_id") != session_id):
+            if (
+                isinstance(message_id, bool)
+                or not isinstance(message_id, int)
+                or message_id <= 0
+                or source.get("session_id") != session_id
+            ):
                 return False
+            sources.append(source)
+            message_ids.append(message_id)
+        rows_by_id: dict[int, dict] | None = None
+        if callable(batch_loader):
             try:
-                current = await loader(session_id, message_id)
+                loaded = await batch_loader(session_id, message_ids)
+                if isinstance(loaded, dict):
+                    rows_by_id = loaded
             except asyncio.CancelledError:
                 raise
             except Exception:
                 return False
+        for source, message_id in zip(sources, message_ids):
+            if rows_by_id is not None:
+                current = rows_by_id.get(message_id)
+            else:
+                try:
+                    current = await loader(session_id, message_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return False
             if not isinstance(current, dict):
                 return False
-            if (current.get("id") != message_id
-                    or current.get("session_id") != session_id
-                    or current.get("role") != source.get("role")
-                    or current.get("content") != Message.content_to_text(source.get("content"))
-                    or current.get("sender_id") != source.get("sender_id")
-                    or current.get("sender_name") != source.get("sender_name")
-                    or current.get("group_id") != source.get("group_id")
-                    or current.get("platform") != source.get("platform")):
+            if (
+                current.get("id") != message_id
+                or current.get("session_id") != session_id
+                or current.get("role") != source.get("role")
+                or current.get("content")
+                != Message.content_to_text(source.get("content"))
+                or current.get("sender_id") != source.get("sender_id")
+                or current.get("sender_name") != source.get("sender_name")
+                or current.get("group_id") != source.get("group_id")
+                or current.get("platform") != source.get("platform")
+            ):
                 return False
             try:
                 if float(current.get("timestamp")) != float(source.get("timestamp")):
@@ -893,16 +1047,27 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             if isinstance(current_metadata, str):
                 try:
                     import json
+
                     current_metadata = json.loads(current_metadata)
                 except (TypeError, ValueError):
                     return False
             expected_metadata = source.get("metadata", {})
-            if not isinstance(current_metadata, dict) or not isinstance(expected_metadata, dict):
+            if not isinstance(current_metadata, dict) or not isinstance(
+                expected_metadata, dict
+            ):
                 return False
-            identity_keys = ("schema_version", "source_event_id", "scope", "fact_kind",
-                             "is_bot_message", _OWNED_DRAFT_LINEAGE_KEY)
-            if any(current_metadata.get(key) != expected_metadata.get(key)
-                   for key in identity_keys):
+            identity_keys = (
+                "schema_version",
+                "source_event_id",
+                "scope",
+                "fact_kind",
+                "is_bot_message",
+                _OWNED_DRAFT_LINEAGE_KEY,
+            )
+            if any(
+                current_metadata.get(key) != expected_metadata.get(key)
+                for key in identity_keys
+            ):
                 return False
         return True
 
@@ -917,9 +1082,10 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         return classify_umo(getattr(event, "unified_msg_origin", None)) == "private"
 
     async def _run_owned_source_validator(self, event, validator) -> bool:
-        if not callable(validator) or getattr(
-            event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None
-        ) is not validator:
+        if (
+            not callable(validator)
+            or getattr(event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None) is not validator
+        ):
             return False
         try:
             pending = validator(event)
@@ -943,23 +1109,30 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         if not callable(resolver):
             return False
         original = await resolver(event)
-        if (getattr(original, "status", None) != "valid"
-                or not isinstance(getattr(original, "scope", None), dict)
-                or original.scope.get("umo") != session_id):
+        if (
+            getattr(original, "status", None) != "valid"
+            or not isinstance(getattr(original, "scope", None), dict)
+            or original.scope.get("umo") != session_id
+        ):
             return False
         current_key = getattr(original, "current_event_key", None)
         if not isinstance(current_key, str) or not current_key:
             return False
-        current = [item for item in getattr(original, "messages", ())
-                   if getattr(item, "event_key", None) == current_key]
+        current = [
+            item
+            for item in getattr(original, "messages", ())
+            if getattr(item, "event_key", None) == current_key
+        ]
         if len(current) != 1:
             return False
         source = current[0]
-        if (not isinstance(getattr(source, "author_id", None), str)
-                or not source.author_id.strip()
-                or not isinstance(getattr(source, "plain_text", None), str)
-                or not source.plain_text
-                or getattr(source, "occurred_at", None) is None):
+        if (
+            not isinstance(getattr(source, "author_id", None), str)
+            or not source.author_id.strip()
+            or not isinstance(getattr(source, "plain_text", None), str)
+            or not source.plain_text
+            or getattr(source, "occurred_at", None) is None
+        ):
             return False
         store = getattr(self.conversation_manager, "store", None)
         loader = getattr(store, "get_messages", None)
@@ -1009,13 +1182,21 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         message_id = source.get("id")
         session_id = source.get("session_id")
         role = source.get("role")
-        if (isinstance(message_id, bool) or not isinstance(message_id, int)
-                or message_id <= 0 or not isinstance(session_id, str)
-                or role != "assistant"):
+        if (
+            isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+            or message_id <= 0
+            or not isinstance(session_id, str)
+            or role != "assistant"
+        ):
             return None
         content = Message.content_to_text(source.get("content"))
-        return (session_id, message_id, role,
-                hashlib.sha256(content.encode("utf-8")).hexdigest())
+        return (
+            session_id,
+            message_id,
+            role,
+            hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        )
 
     def _remember_owned_source_lineage(
         self, token: str, event, validator, assistant_message
@@ -1040,8 +1221,12 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         if not isinstance(lineages, OrderedDict):
             return
         for token, pair in tuple(lineages.items()):
-            if (isinstance(pair, tuple) and len(pair) == 3
-                    and pair[0] is event and pair[1] is validator):
+            if (
+                isinstance(pair, tuple)
+                and len(pair) == 3
+                and pair[0] is event
+                and pair[1] is validator
+            ):
                 lineages.pop(token, None)
 
     @staticmethod
@@ -1065,9 +1250,12 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             if _OWNED_DRAFT_LINEAGE_KEY in metadata:
                 token = metadata.get(_OWNED_DRAFT_LINEAGE_KEY)
                 lineage = lineages.get(token) if isinstance(token, str) else None
-                if (role != "assistant" or not isinstance(lineage, tuple)
-                        or len(lineage) != 3
-                        or self._lineage_message_identity(message) != lineage[2]):
+                if (
+                    role != "assistant"
+                    or not isinstance(lineage, tuple)
+                    or len(lineage) != 3
+                    or self._lineage_message_identity(message) != lineage[2]
+                ):
                     continue
                 lineages.move_to_end(token)
             eligible.append(message)
@@ -1082,16 +1270,25 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             if _OWNED_DRAFT_LINEAGE_KEY not in metadata:
                 continue
             token = metadata.get(_OWNED_DRAFT_LINEAGE_KEY)
-            if role != "assistant" or not isinstance(token, str) or not isinstance(lineages, OrderedDict):
+            if (
+                role != "assistant"
+                or not isinstance(token, str)
+                or not isinstance(lineages, OrderedDict)
+            ):
                 return False
             pair = lineages.get(token)
-            if (not isinstance(pair, tuple) or len(pair) != 3
-                    or self._lineage_message_identity(message) != pair[2]):
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 3
+                or self._lineage_message_identity(message) != pair[2]
+            ):
                 return False
             event, validator, _identity = pair
-            if not callable(validator) or getattr(
-                event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None
-            ) is not validator:
+            if (
+                not callable(validator)
+                or getattr(event, _OWNED_MEMORY_SOURCE_VALIDATE_ATTR, None)
+                is not validator
+            ):
                 self._forget_owned_source_pair(event, validator)
                 return False
             unique[(id(event), id(validator))] = (event, validator)
@@ -1100,10 +1297,13 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             return True
         try:
             outcomes = await asyncio.wait_for(
-                asyncio.gather(*(
-                    self._run_owned_source_validator(event, validator)
-                    for event, validator in unique.values()
-                ), return_exceptions=True),
+                asyncio.gather(
+                    *(
+                        self._run_owned_source_validator(event, validator)
+                        for event, validator in unique.values()
+                    ),
+                    return_exceptions=True,
+                ),
                 timeout=_OWNED_VALIDATION_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
@@ -1129,21 +1329,21 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             return False
         for token, expected in expected_by_token.items():
             current = current_lineages.get(token)
-            if (not isinstance(current, tuple) or len(current) != 3
-                    or current[0] is not expected[0]
-                    or current[1] is not expected[1]
-                    or current[2] != expected[2]):
+            if (
+                not isinstance(current, tuple)
+                or len(current) != 3
+                or current[0] is not expected[0]
+                or current[1] is not expected[1]
+                or current[2] != expected[2]
+            ):
                 return False
         return True
 
     def _max_segments_per_run(self) -> int:
         try:
             value = int(
-                self.config_manager.get(
-                    "reflection_engine.max_segments_per_run", 10
-                )
+                self.config_manager.get("reflection_engine.max_segments_per_run", 10)
             )
         except (TypeError, ValueError):
             value = 10
         return max(1, min(value, 50))
-

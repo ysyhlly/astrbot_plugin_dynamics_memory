@@ -2,8 +2,6 @@
 Tests for history alignment (webui edit/regenerate revert detection).
 """
 
-import pytest
-
 from astrbot_plugin_dynamics_memory.core.utils.history_alignment import (
     compute_revert_cutoff,
 )

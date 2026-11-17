@@ -238,7 +238,9 @@ def _make_msg(session_id: str, role: str, content: str, checkpoint: str | None =
 
 async def _seed_turns(store: ConversationStore, session_id: str, turns: list[str]):
     for checkpoint in turns:
-        await store.add_message(_make_msg(session_id, "user", f"u-{checkpoint}", checkpoint))
+        await store.add_message(
+            _make_msg(session_id, "user", f"u-{checkpoint}", checkpoint)
+        )
         await store.add_message(
             _make_msg(session_id, "assistant", f"a-{checkpoint}", checkpoint)
         )

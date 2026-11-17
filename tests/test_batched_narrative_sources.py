@@ -24,6 +24,9 @@ async def test_batched_sources_keep_order_duplicates_and_recheck_deleted_rows(tm
         }
         queries = []
         await store.connection.set_trace_callback(queries.append)
+        async with store._read_session() as read_conn:
+            if read_conn is not store.connection:
+                await read_conn.set_trace_callback(queries.append)
         rows = await store.load_narrative_sources(metadata)
         assert [row["content"] for row in rows] == ids
         assert (

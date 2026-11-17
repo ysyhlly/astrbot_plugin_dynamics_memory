@@ -183,7 +183,9 @@ class MemoryEngine(
         self.db_connection = None
         self.source_loader = None
         self._db_write_lock = asyncio.Lock()
-        self._write_op_repair_enabled = bool(self.config.get("write_op_repair_enabled", True))
+        self._write_op_repair_enabled = bool(
+            self.config.get("write_op_repair_enabled", True)
+        )
         self._write_op_max_retries = int(self.config.get("write_op_max_retries", 3))
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
         self._search_cache_ttl = float(
@@ -210,6 +212,7 @@ class MemoryEngine(
         await self._open_database()
         await self._create_tables()
         from ..retrieval.narrative_history import ensure_scope_index
+
         await ensure_scope_index(self.db_connection)
         await self._migrate_adapter_ownership()
         await self._init_document_route()
@@ -336,9 +339,7 @@ class MemoryEngine(
                 try:
                     await close()
                 except Exception:
-                    logger.warning(
-                        "[MemoryEngine] 关闭存储连接池失败", exc_info=True
-                    )
+                    logger.warning("[MemoryEngine] 关闭存储连接池失败", exc_info=True)
         if self.graph_vector_db is not None:
             await self.graph_vector_db.close()
 
@@ -369,16 +370,22 @@ class MemoryEngine(
             async with write_transaction(self) as connection:
                 yield connection
 
-    def _create_tracked_task(self, coro, *, clean_context: bool = False) -> asyncio.Task:
+    def _create_tracked_task(
+        self, coro, *, clean_context: bool = False
+    ) -> asyncio.Task:
         """Create and track a background task, auto-discarding on completion."""
         if clean_context:
             import contextvars
+
             task = contextvars.Context().run(asyncio.create_task, coro)
         else:
             task = asyncio.create_task(coro)
         self._pending_tasks.add(task)
         import contextvars
-        task.add_done_callback(self._on_background_task_done, context=contextvars.Context())
+
+        task.add_done_callback(
+            self._on_background_task_done, context=contextvars.Context()
+        )
         return task
 
     def _on_background_task_done(self, task: asyncio.Task) -> None:

@@ -6,11 +6,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from astrbot_plugin_dynamics_memory.core.managers.conversation_manager import ConversationManager
+from astrbot_plugin_dynamics_memory.core.managers.conversation_manager import (
+    ConversationManager,
+)
 from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
-from astrbot_plugin_dynamics_memory.core.page_api_modules.memory_handler import MemoryHandler
+from astrbot_plugin_dynamics_memory.core.page_api_modules.memory_handler import (
+    MemoryHandler,
+)
 from astrbot_plugin_dynamics_memory.core.page_api_modules.utils import PageApiUtils
-from astrbot_plugin_dynamics_memory.core.processors.memory_processor import MemoryProcessor
+from astrbot_plugin_dynamics_memory.core.processors.memory_processor import (
+    MemoryProcessor,
+)
 from astrbot_plugin_dynamics_memory.storage.conversation_store import ConversationStore
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
@@ -35,7 +41,7 @@ async def test_old_platform_import_is_recallable_after_remap(tmp_path: Path):
     store = ConversationStore(str(tmp_path / "c.db"))
     await store.initialize()
     await store.create_session("default:FriendMessage:1163018485", "default")
-    manager = ConversationManager(store=store)
+    ConversationManager(store=store)
     try:
         processor = MemoryProcessor(llm_provider=AsyncMock(), context=None)
         handler = MemoryHandler(PageApiUtils())

@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 
 from ..faiss_async_persist import get_async_persister
-from ..memory_scope import adapter_sql, adapter_visible, current_adapter_access
+from ..memory_scope import adapter_sql, current_adapter_access
 
 query_embeddings = ContextVar("livingmemory_query_embeddings", default=None)
 
@@ -73,9 +73,7 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         return []
     fetch_k = min(cap, max(k * (4 if filters else 2), k))
     storage_filters = {
-        key: value
-        for key, value in filters.items()
-        if not key.startswith("__")
+        key: value for key, value in filters.items() if not key.startswith("__")
     }
 
     search_options = {}
@@ -95,7 +93,7 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
             import faiss
 
             candidates = await retrieve_documents(
-                db, filters, limit=None, ids_only=True
+                db, storage_filters, limit=None, ids_only=True
             )
             if not candidates:
                 return []
@@ -202,6 +200,7 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
 
 class QueryEmbeddingCache(dict):
     """One request's query vectors with an owner deadline, no source results."""
+
     def __init__(self, deadline, *, owner=None):
         super().__init__()
         self.deadline = float(deadline)
@@ -232,9 +231,11 @@ class QueryEmbeddingCache(dict):
         task.add_done_callback(_observe_embedding)
         return task
 
+
 def _observe_embedding(task):
     if not task.cancelled():
         task.exception()
+
 
 def _metadata_matches_filters(metadata, filters):
     for key, value in filters.items():
@@ -248,16 +249,12 @@ def _metadata_matches_filters(metadata, filters):
                 metadata.get("session_id"),
             )
             if not any(
-                isinstance(source_id, str)
-                and source_id.casefold().startswith(prefix)
+                isinstance(source_id, str) and source_id.casefold().startswith(prefix)
                 for source_id in source_ids
             ):
                 return False
         elif key == "__exclude_private_visibility__":
-            if (
-                value
-                and metadata.get("memory_visibility") == "private"
-            ):
+            if value and metadata.get("memory_visibility") == "private":
                 return False
         elif metadata.get(key) != value:
             return False

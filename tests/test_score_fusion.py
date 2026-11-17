@@ -8,7 +8,9 @@ from typing import cast
 import pytest
 
 from astrbot_plugin_dynamics_memory.core.retrieval.bm25_retriever import BM25Retriever
-from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import HybridRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.hybrid_retriever import (
+    HybridRetriever,
+)
 from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import (
     BM25Result as RRFBM25Result,
 )
@@ -16,7 +18,9 @@ from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import (
     RRFFusion,
     VectorResult,
 )
-from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import VectorRetriever
+from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
+    VectorRetriever,
+)
 
 
 def _bm25(doc_id: int, score: float) -> RRFBM25Result:

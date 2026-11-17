@@ -1,9 +1,6 @@
 """检索召回、缓存与读取接口。"""
 
-import hashlib
-from ..memory_scope import classify_umo, memory_metadata_matches_policy
-from ..processors.atom_classifier import classify_atoms
-from ..utils.number_utils import safe_float
+from ..memory_scope import memory_metadata_matches_policy
 
 
 import asyncio
@@ -109,7 +106,9 @@ class MemoryEngineRecallMixin:
             source_session_id,
             touch_access,
         )
-        cached_results = self._get_cached_search_results(cache_key) if cache_results else None
+        cached_results = (
+            self._get_cached_search_results(cache_key) if cache_results else None
+        )
         if cached_results is not None:
             cached_results = await self._apply_atom_policy(cached_results)
             if touch_access:
@@ -129,8 +128,7 @@ class MemoryEngineRecallMixin:
         # 迁移过时才调度后台任务；迁移完成后由进程内缓存短路，热路径不再查库。
         if (
             allow_legacy_session_migration
-            and
-            session_id
+            and session_id
             and ":" in session_id
             and not session_id.startswith("livingmemory:")
             and await self._runtime_session_migration_needed(session_id)
@@ -147,9 +145,14 @@ class MemoryEngineRecallMixin:
         if budgeted_reply:
             budget = execution_context.budget
             reserve = min(0.6, budget.search_remaining() * 0.30)
-            retrieval_context = execution_context.with_deadline(budget.search_deadline - reserve)
-        execution_kwargs = ({"execution_context": retrieval_context}
-                            if retrieval_context is not None else {})
+            retrieval_context = execution_context.with_deadline(
+                budget.search_deadline - reserve
+            )
+        execution_kwargs = (
+            {"execution_context": retrieval_context}
+            if retrieval_context is not None
+            else {}
+        )
         if self.dual_route_retriever is not None:
             results = await self.dual_route_retriever.search(
                 query,
@@ -177,7 +180,10 @@ class MemoryEngineRecallMixin:
 
         if self.atom_retriever is not None:
             atom_args = (
-                query, k * 2, session_id, persona_id,
+                query,
+                k * 2,
+                session_id,
+                persona_id,
             )
             atom_kwargs = {
                 "interaction_type": interaction_type,
@@ -186,11 +192,21 @@ class MemoryEngineRecallMixin:
             }
             if retrieval_context is not None:
                 atom_outcome = await retrieval_context.run(
-                    "atoms", self.atom_retriever.search, *atom_args,
-                    discriminator={"session_id": session_id, "persona_id": persona_id,
-                                   **atom_kwargs}, **atom_kwargs,
+                    "atoms",
+                    self.atom_retriever.search,
+                    *atom_args,
+                    discriminator={
+                        "session_id": session_id,
+                        "persona_id": persona_id,
+                        **atom_kwargs,
+                    },
+                    **atom_kwargs,
                 )
-                atom_results = atom_outcome.get("value", []) if atom_outcome.get("state") == "completed" else []
+                atom_results = (
+                    atom_outcome.get("value", [])
+                    if atom_outcome.get("state") == "completed"
+                    else []
+                )
             else:
                 atom_results, _ = await search_route(
                     "atoms", self.atom_retriever.search(*atom_args, **atom_kwargs)
@@ -203,13 +219,22 @@ class MemoryEngineRecallMixin:
                         scores.get(atom.parent_memory_id, 0), atom.final_score
                     )
             if scores:
-                lookup = {"metadata_filters": {}, "ids": list(scores), "limit": len(scores)}
+                lookup = {
+                    "metadata_filters": {},
+                    "ids": list(scores),
+                    "limit": len(scores),
+                }
                 if budgeted_reply:
                     outcome = await retrieval_context.run(
-                        "atom_parents", retrieve_documents, self.faiss_db,
-                        discriminator={"ids": list(scores)}, **lookup,
+                        "atom_parents",
+                        retrieve_documents,
+                        self.faiss_db,
+                        discriminator={"ids": list(scores)},
+                        **lookup,
                     )
-                    documents = outcome["value"] if outcome["state"] == "completed" else []
+                    documents = (
+                        outcome["value"] if outcome["state"] == "completed" else []
+                    )
                 else:
                     documents = await retrieve_documents(self.faiss_db, **lookup)
                 for document in documents:
@@ -222,22 +247,27 @@ class MemoryEngineRecallMixin:
                     ):
                         continue
                     if (
-                        persona_id is not None
-                        and metadata.get("persona_id") != persona_id
-                    ) or (
-                        interaction_type is not None
-                        and metadata.get("interaction_type") != interaction_type
-                    ) or (
-                        source_platform is not None
-                        and not memory_metadata_matches_policy(
-                            metadata,
-                            interaction_type=interaction_type,
-                            source_platform=source_platform,
-                            source_session_id=source_session_id,
+                        (
+                            persona_id is not None
+                            and metadata.get("persona_id") != persona_id
                         )
-                    ) or (
-                        source_session_id is not None
-                        and metadata.get("source_session_id") != source_session_id
+                        or (
+                            interaction_type is not None
+                            and metadata.get("interaction_type") != interaction_type
+                        )
+                        or (
+                            source_platform is not None
+                            and not memory_metadata_matches_policy(
+                                metadata,
+                                interaction_type=interaction_type,
+                                source_platform=source_platform,
+                                source_session_id=source_session_id,
+                            )
+                        )
+                        or (
+                            source_session_id is not None
+                            and metadata.get("source_session_id") != source_session_id
+                        )
                     ):
                         continue
                     score = scores[int(document["id"])]
@@ -260,22 +290,31 @@ class MemoryEngineRecallMixin:
             "source_platform": source_platform,
             "source_session_id": source_session_id,
         }
-        results = self._filter_by_retrieval_policy(await self._apply_atom_policy(results))
+        results = self._filter_by_retrieval_policy(
+            await self._apply_atom_policy(results)
+        )
 
         def filter_scope(candidates):
             if all(value is None for value in scope_filters.values()):
                 return candidates
             return [
-                result for result in candidates
+                result
+                for result in candidates
                 if memory_metadata_matches_policy(result.metadata, **scope_filters)
             ]
 
         async def merge_recent(candidates, projected_ids=None):
             merged = await self._merge_recent_memories(
-                candidates, k, session_id, persona_id, **scope_filters,
+                candidates,
+                k,
+                session_id,
+                persona_id,
+                **scope_filters,
             )
             # The scoped result has a separate fresh validation before injection.
-            return await self._apply_atom_policy(filter_scope(merged), skip_doc_ids=projected_ids)
+            return await self._apply_atom_policy(
+                filter_scope(merged), skip_doc_ids=projected_ids
+            )
 
         if budgeted_reply:
             results = filter_scope(results)
@@ -285,7 +324,10 @@ class MemoryEngineRecallMixin:
                     execution_context.budget.search_deadline - reserve
                 )
                 outcome = await recent_context.run(
-                    "recent_memories", merge_recent, results, {row.doc_id for row in results},
+                    "recent_memories",
+                    merge_recent,
+                    results,
+                    {row.doc_id for row in results},
                     discriminator={"ids": [row.doc_id for row in results], "limit": k},
                 )
                 if outcome["state"] == "completed":
@@ -339,14 +381,20 @@ class MemoryEngineRecallMixin:
                 continue
             atoms = grouped.get(result.doc_id)
             previous = result.atom_projection
-            if atoms is None and previous is None and not result.metadata.get("atom_types"):
+            if (
+                atoms is None
+                and previous is None
+                and not result.metadata.get("atom_types")
+            ):
                 filtered.append(result)
                 continue
             active = self._agentic_live_rows(atoms or [])
             if not active:
                 continue
             content, atom_proof = project_live_atoms(active)
-            document_sha256 = previous.document_sha256 if previous else text_sha256(result.content)
+            document_sha256 = (
+                previous.document_sha256 if previous else text_sha256(result.content)
+            )
             filtered.append(
                 replace(
                     result,
@@ -371,9 +419,12 @@ class MemoryEngineRecallMixin:
         has_atoms = await self._agentic_has_atom_table()
         atom_columns = (
             ", a.id, a.parent_memory_id, a.content, a.status, a.expires_at"
-            if has_atoms else ""
+            if has_atoms
+            else ""
         )
-        atom_join = "LEFT JOIN memory_atoms a ON a.parent_memory_id = d.id" if has_atoms else ""
+        atom_join = (
+            "LEFT JOIN memory_atoms a ON a.parent_memory_id = d.id" if has_atoms else ""
+        )
         order_by = "ORDER BY d.id, a.id" if has_atoms else "ORDER BY d.id"
         # BM25 reads from the same SQLite file on a separate connection. Use
         # that connection so an in-flight engine write cannot leak into a guard.
@@ -871,7 +922,6 @@ class MemoryEngineRecallMixin:
             int(self.config.get("rerank_candidates", 20)),
         )
 
-
     def _filter_by_retrieval_policy(
         self, results: list[HybridResult]
     ) -> list[HybridResult]:
@@ -1013,7 +1063,6 @@ class MemoryEngineRecallMixin:
         ]
         return self._filter_by_retrieval_policy(recent)[:count]
 
-
     async def _merge_recent_memories(
         self,
         results: list[HybridResult],
@@ -1043,7 +1092,12 @@ class MemoryEngineRecallMixin:
             return results[:k]
 
         recent = await self._get_recent_memory_results(
-            recent_count, session_id, persona_id, interaction_type=interaction_type, source_platform=source_platform, source_session_id=source_session_id
+            recent_count,
+            session_id,
+            persona_id,
+            interaction_type=interaction_type,
+            source_platform=source_platform,
+            source_session_id=source_session_id,
         )
         selected = list(results)
         selected_ids = {result.doc_id for result in selected}
@@ -1055,7 +1109,6 @@ class MemoryEngineRecallMixin:
             selected.append(result)
             selected_ids.add(result.doc_id)
         return selected
-
 
     def _get_cached_search_results(
         self,

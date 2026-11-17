@@ -297,6 +297,17 @@ class DecayScheduler:
 
     async def _scheduler_loop(self) -> None:
         """调度器主循环"""
+        # 启动时异步让出控制权再执行首次检查，避免阻塞插件初始化流程
+        try:
+            await asyncio.sleep(0)
+            if self._running:
+                await self._check_and_execute()
+        except asyncio.CancelledError:
+            logger.info("[衰减调度] 调度器被取消")
+            return
+        except Exception as e:
+            logger.error(f"[衰减调度] 首次检查异常: {e}", exc_info=True)
+
         while self._running:
             try:
                 wait_seconds = self._seconds_until_next_run()
@@ -323,8 +334,6 @@ class DecayScheduler:
             return
 
         self._running = True
-
-        await self._check_and_execute()
 
         self._task = asyncio.create_task(self._scheduler_loop())
         logger.info(
