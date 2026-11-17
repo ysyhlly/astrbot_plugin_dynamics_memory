@@ -13,7 +13,6 @@ ensure_current(
         ("core.recall_runtime", "BoundedRecallTaskPool", "_summary_cleanup_release"),
         ("core.plugin_helpers_mixin", "PluginHelpersMixin", "_native_memory_recall_v1"),
     ],
-    version="0.1.7",
 )
 
 """
@@ -40,6 +39,7 @@ from .core.recall_runtime import (
 from .core.narrative_api import is_managed_event, scope_key
 from .core.retrieval.narrative_history import persona_names, source_origin
 from .core.utils import _get_native_persona_id, set_persona_aliases
+from .series_panels import get_series_defaults
 from .storage.evidence_sidecar import EvidenceSidecar
 
 
@@ -169,7 +169,16 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             logger.info(f"[LivingMemory] 记忆人格别名: {persona_aliases}")
 
         # 初始化后端 i18n
-        i18n_init(config.get("bot_language", "zh"))
+        raw_language = str(config.get("bot_language", "") or "").strip()
+        if not raw_language:
+            shared_lang = str(
+                get_series_defaults(context).get("ui_language", "") or ""
+            ).strip()
+            normalized = shared_lang.replace("_", "-").split("-", 1)[0].lower()
+            raw_language = (
+                normalized if normalized in {"zh", "en", "ja", "ru"} else "zh"
+            )
+        i18n_init(raw_language)
 
         # 初始化插件初始化器
         self.initializer = PluginInitializer(context, self.config_manager, data_dir)
