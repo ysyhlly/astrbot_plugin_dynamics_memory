@@ -416,3 +416,50 @@ async def test_semantic_engine_forwards_budget_and_keeps_atom_policy():
     )
     assert retriever.search.call_args.kwargs["execution_context"] is ctx
     engine._apply_atom_policy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "purpose,query,matched,fast",
+    [
+        ("reply", "coffee", True, True),
+        ("reply", "coffee", False, False),
+        ("reply", "还记得上次的 coffee 吗", True, False),
+        ("history_quote", "coffee", True, False),
+    ],
+)
+async def test_only_a_relevant_verified_reply_can_finish_before_semantic(
+    purpose, query, matched, fast
+):
+    plugin, view = plugin_with_ready_baseline(mixed=False)
+    plugin._ready_narrative_baseline.return_value["query_matched"] = matched
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def semantic(*args):
+        started.set()
+        await release.wait()
+        return []
+
+    plugin.initializer.memory_engine.search_narrative_semantic = semantic
+    plugin.config_manager = NS(
+        get=lambda k, default=None: {
+            "recall_engine.narrative_hybrid_timeout_seconds": 2.5,
+            "recall_engine.narrative_total_timeout_seconds": 3.0,
+        }.get(k, default)
+    )
+    task = asyncio.create_task(plugin.recall_context(SCOPE, query, purpose, "card"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        if fast:
+            result = await asyncio.wait_for(asyncio.shield(task), 1)
+            assert result["evidence_view"]["atoms"] == view["atoms"]
+            assert result["diagnostics"]["local_reply_fast_path"]
+        else:
+            done, _ = await asyncio.wait({task}, timeout=0.04)
+            assert not done
+            release.set()
+            await task
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await close_pool(plugin)

@@ -3377,6 +3377,11 @@ class PluginHelpersMixin:
                 and view.get("atoms")
             ):
                 result["evidence_view"] = view
+                result["query_matched"] = any(
+                    len(term) >= 2 and term in str(atom.get("claim", "")).casefold()
+                    for atom in view["atoms"]
+                    for term in terms
+                )
         return result
 
     async def _current_ready_narrative_view(

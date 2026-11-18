@@ -84,6 +84,11 @@ from .core.plugin_helpers_mixin import PluginHelpersMixin, _SCOPE_RECALL_TIMINGS
 from .core.series import active_entries, find_role, manifest
 
 
+_HISTORY_LOOKUP = re.compile(
+    r"还记得|记不记得|你记得|回忆|回顾|上次|当时|以前|之前|前几天|昨天|原话|原文|"
+    r"\b(?:remember|recall|last time|previously|yesterday|verbatim)\b",
+    re.IGNORECASE,
+)
 _MIN_ASTRBOT_VERSION = "4.29.4"
 _ASTRBOT_DISTRIBUTION_NAMES = ("AstrBot", "astrbot")
 
@@ -1482,6 +1487,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         )
         semantic_waiters = []
         semantic_contexts = []
+        local_reply_view = None
         if semantic_budget and str(query).strip():
             semantic_deadline = min(retrieval_deadline, loop.time() + semantic_budget)
             from .core.retrieval.vector_search import QueryEmbeddingCache
@@ -1546,7 +1552,28 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 and isinstance(ready_outcome.get("value"), dict)
                 else {"source_refs": [], "typed_items": [], "diagnostic": "partial"}
             )
-            if semantic_waiters:
+            if (
+                purpose == "reply"
+                and not _HISTORY_LOOKUP.search(str(query))
+                and ready_baseline.get("query_matched") is True
+                and any(not waiter.done() for waiter in semantic_waiters)
+            ):
+                checked = await run_route(
+                    self._current_ready_narrative_view,
+                    scope,
+                    ready_baseline,
+                    purpose,
+                    card_version,
+                    route="baseline_recheck",
+                    origin=managed_origin,
+                    use_total_deadline=True,
+                )
+                if checked.get("state") == "completed" and checked.get("value"):
+                    local_reply_view = checked
+            if local_reply_view is not None:
+                # Raw local summaries require enrichment. Only publish the verified view.
+                historical, managed, evidence = [], [], []
+            elif semantic_waiters:
                 semantic_values = await asyncio.gather(*semantic_waiters)
                 for index, context in enumerate(semantic_contexts):
                     prefix = remote_routes[index] + "_"
@@ -1841,7 +1868,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             if identity not in seen_refs:
                 seen_refs.add(identity)
                 view_refs.append(ref)
-        if not materials and ready_baseline.get("evidence_view"):
+        if local_reply_view is not None:
+            view_outcome = local_reply_view
+        elif not materials and ready_baseline.get("evidence_view"):
             # All useful material is already rendered. Recheck identity/policy
             # instead of sending the same ready atoms through SQLite again.
             view_outcome = await run_route(
@@ -1992,6 +2021,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     ready_baseline.get("diagnostic", "partial")
                 )[:64],
                 "baseline_preserved": baseline_preserved,
+                "local_reply_fast_path": local_reply_view is not None,
                 **self._narrative_runtime_diagnostics(
                     call_started, route_failures, route_elapsed_ms, runtime
                 ),
