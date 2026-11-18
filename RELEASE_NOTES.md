@@ -1,4 +1,6 @@
-# astrbot_plugin_dynamics_memory 0.2.0-rc.2
+# astrbot_plugin_dynamics_memory 0.2.0-rc.3
+
+补全 VitePress 主题入口，文档构建会加载现有的自定义样式。
 
 普通回复命中经过来源校验的相关本地记忆时，可提前结束对语义检索的等待。
 

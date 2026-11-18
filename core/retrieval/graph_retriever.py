@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from astrbot.api import logger
-
-
 import asyncio
 import math
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from astrbot.api import logger
 
 from ..models.memory_atom import compute_decay_score
 from ..utils.json_utils import safe_json_dict

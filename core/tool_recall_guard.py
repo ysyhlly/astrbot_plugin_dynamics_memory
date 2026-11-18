@@ -10,6 +10,7 @@ import asyncio
 import copy
 import weakref
 
+from .event_handler_modules.message_utils import discard_unexpected_awaitable
 from .evidence_projection import conversation_row_hash
 from .memory_scope import (
     adapter_access,
@@ -21,7 +22,6 @@ from .memory_scope import (
 from .narrative_api import scope_key
 from .passive_group_capture import get_active_plugin
 from .recall_runtime import RecallDeadline
-from .event_handler_modules.message_utils import discard_unexpected_awaitable
 from .summary_source import project_live_atoms, summary_metadata_sha256, text_sha256
 from .utils import get_persona_id
 

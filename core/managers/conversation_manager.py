@@ -10,14 +10,12 @@
 - AstrBot事件集成
 """
 
-from contextlib import asynccontextmanager, nullcontext
-
-
 import asyncio
 import copy
 import math
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any
 
 from astrbot.api import logger

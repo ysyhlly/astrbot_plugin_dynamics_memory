@@ -16,6 +16,10 @@ from contextvars import ContextVar
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .event_handler_modules.message_utils import (
+    discard_unexpected_awaitable,
+    validate_owned_original_input,
+)
 from .evidence_derivation import InvalidDerivationSchema, parse_derivation_response
 from .evidence_projection import (
     MAX_MATERIALS,
@@ -25,10 +29,6 @@ from .evidence_projection import (
     normalize_event_material,
 )
 from .evidence_view import EvidenceViewService
-from .event_handler_modules.message_utils import (
-    discard_unexpected_awaitable,
-    validate_owned_original_input,
-)
 from .memory_scope import (
     adapter_access,
     classify_umo,
@@ -38,7 +38,6 @@ from .memory_scope import (
     resolve_verified_group_sessions,
 )
 from .narrative_api import ScopeEvent, scope_key
-from .summary_source import project_live_atoms, summary_metadata_sha256, text_sha256
 from .native_recall import (
     NATIVE_MEMORY_REQUEST_KEY,
     NATIVE_MEMORY_VALIDATE_KEY,
@@ -56,6 +55,7 @@ from .recall_runtime import (
     RecallDeadline,
 )
 from .retrieval.narrative_history import allowed_memory, source_origin
+from .summary_source import project_live_atoms, summary_metadata_sha256, text_sha256
 from .utils import get_persona_id
 
 _SCOPE_RECALL_TIMINGS: ContextVar[dict | None] = ContextVar(

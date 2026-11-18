@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-
 import aiosqlite
 
 from ..core.models.graph_models import GraphEdge, GraphEntry, GraphNode

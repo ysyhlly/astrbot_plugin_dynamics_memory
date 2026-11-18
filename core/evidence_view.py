@@ -7,7 +7,7 @@ import copy
 import json
 import math
 import time
-from collections import OrderedDict, Counter
+from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
@@ -16,8 +16,8 @@ from .evidence_projection import (
     MAX_MATERIALS,
     PURPOSES,
     atom_id,
-    normalize_conversation_row,
     event_evidence_id,
+    normalize_conversation_row,
     normalize_event_material,
     normalize_host_material,
     normalize_legacy_summary,

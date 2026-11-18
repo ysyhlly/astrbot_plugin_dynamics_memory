@@ -6,7 +6,6 @@ import inspect
 import time
 from typing import Any
 
-
 PLUGIN_NAME = "astrbot_plugin_autonomous_blocking"
 
 

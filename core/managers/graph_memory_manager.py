@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+import shutil
+import tempfile
+from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+from astrbot.api import logger
+
+from ...storage.graph_store import GraphStore
 from ..maintenance.graph_index_repair import (
     GraphIndexDocument,
     RepairPlan,
@@ -11,18 +20,6 @@ from ..maintenance.graph_index_repair import (
     plan_graph_index_repair,
 )
 from ..maintenance.source_state_guard import SourceStateGuard
-
-
-import asyncio
-import shutil
-import tempfile
-from collections.abc import AsyncIterable
-from pathlib import Path
-from typing import Any
-
-from astrbot.api import logger
-
-from ...storage.graph_store import GraphStore
 from ..models.graph_models import GraphEntry
 from ..processors.graph_extractor import GraphExtractor
 from ..retrieval.graph_vector_retriever import GraphVectorRetriever

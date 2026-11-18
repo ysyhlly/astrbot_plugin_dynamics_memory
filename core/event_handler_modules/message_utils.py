@@ -3,16 +3,14 @@
 负责消息内容提取、去重、限制等操作
 """
 
-import inspect
-import math
-from collections.abc import Mapping
-from dataclasses import dataclass
-
-
 import asyncio
 import hashlib
+import inspect
+import math
 import re
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger

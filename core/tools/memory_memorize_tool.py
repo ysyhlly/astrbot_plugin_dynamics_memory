@@ -1,9 +1,5 @@
 """供 Agent 主动调用的长期记忆写入工具。"""
 
-from ..memory_scope import classify_umo, resolve_memory_write_scope
-from ..narrative_api import scope_key
-
-
 import asyncio
 from dataclasses import field
 from typing import Any
@@ -16,7 +12,13 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from ..memory_scope import adapter_access, is_event_memory_allowed
+from ..memory_scope import (
+    adapter_access,
+    classify_umo,
+    is_event_memory_allowed,
+    resolve_memory_write_scope,
+)
+from ..narrative_api import scope_key
 from ..utils import get_persona_id
 from .agentic_recall_common import json_result as _json_result
 

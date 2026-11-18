@@ -8,7 +8,6 @@ import time
 from ..core.memory_source import summary_window_fingerprint
 from ..core.models.conversation_models import Message
 
-
 TERMINAL_SUMMARY_STAGES = {"policy", "provider_terminal"}
 SUMMARY_RETRY_LIMIT = 3
 SUMMARY_COOLDOWN_SECONDS = 900

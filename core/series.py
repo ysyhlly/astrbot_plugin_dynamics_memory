@@ -10,7 +10,6 @@ import time
 
 from .memory_source import serialize_source_messages
 
-
 # Contribution time is recorded by Games on receipt. Some adapters provide
 # second precision or a skewed source clock; never substitute the claimed time.
 ACTIVITY_SOURCE_CLOCK_SKEW = 300

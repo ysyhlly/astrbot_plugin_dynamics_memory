@@ -3,20 +3,16 @@
 实现并行检索、RRF融合和智能加权策略
 """
 
+import asyncio
 import copy
 import hashlib
-from collections import OrderedDict
 import json
-from dataclasses import replace
-from .rerank_text import scoring_excerpt
-
-
-import asyncio
 import math
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from astrbot.api import logger
@@ -26,6 +22,7 @@ from ..utils.json_utils import safe_json_dict
 from ..utils.number_utils import clamp_float, safe_float
 from .bm25_retriever import BM25Retriever
 from .recall_diagnostics import record_route
+from .rerank_text import scoring_excerpt
 from .route_execution import search_route
 from .rrf_fusion import BM25Result, FusedResult, RRFFusion, VectorResult
 from .vector_retriever import VectorRetriever

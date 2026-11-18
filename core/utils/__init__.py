@@ -2,11 +2,6 @@
 utils 子模块
 """
 
-from ..processors.text_processor import TextProcessor
-from .stopwords_manager import StopwordsManager, get_stopwords_manager
-from .formatting import safe_parse_metadata, validate_timestamp
-
-
 import re
 import time
 
@@ -14,7 +9,13 @@ from astrbot.api import logger, sp
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 
-from .formatting import format_memories_for_injection
+from ..processors.text_processor import TextProcessor
+from .formatting import (
+    format_memories_for_injection,
+    safe_parse_metadata,
+    validate_timestamp,
+)
+from .stopwords_manager import StopwordsManager, get_stopwords_manager
 
 
 class OperationContext:

@@ -1,25 +1,26 @@
 """记忆反思的后台存储任务：LLM 总结、游标提交、回滚补偿与修订号校验。"""
 
+import asyncio
 import inspect
 import time
-from ..memory_scope import classify_umo
-from ..memory_source import build_source_row_refs_v1, summary_window_fingerprint
-from ...storage.conversation_summary_progress import (
-    SUMMARY_COOLDOWN_SECONDS,
-    SUMMARY_RETRY_LIMIT,
-    TERMINAL_SUMMARY_STAGES,
-)
-from ..models.conversation_models import Message
-
-
-import asyncio
 from contextlib import nullcontext
 from typing import Any
 
 from astrbot.api import logger
 
+from ...storage.conversation_summary_progress import (
+    SUMMARY_COOLDOWN_SECONDS,
+    SUMMARY_RETRY_LIMIT,
+    TERMINAL_SUMMARY_STAGES,
+)
 from ..base.exceptions import LowQualityMemoryError, MemoryParseError
-from ..memory_source import serialize_source_messages
+from ..memory_scope import classify_umo
+from ..memory_source import (
+    build_source_row_refs_v1,
+    serialize_source_messages,
+    summary_window_fingerprint,
+)
+from ..models.conversation_models import Message
 
 _DEFAULT_MEMORY_SCOPE = object()
 MANAGED_WINDOW_REFUSED = object()

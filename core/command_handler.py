@@ -3,9 +3,6 @@
 负责处理插件命令
 """
 
-from .memory_scope import resolve_memory_write_scope
-
-
 import os
 from collections.abc import AsyncGenerator
 from datetime import datetime
@@ -24,6 +21,7 @@ from .memory_scope import (
     GLOBAL_MEMORY_SCOPE,
     is_event_memory_allowed,
     resolve_event_memory_access,
+    resolve_memory_write_scope,
     resolve_user_memory_scope,
 )
 from .memory_source import serialize_source_messages

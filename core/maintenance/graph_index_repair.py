@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol
 
 
 class RepairClass(StrEnum):

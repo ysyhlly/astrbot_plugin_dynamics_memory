@@ -3,10 +3,6 @@
 负责处理AstrBot事件钩子
 """
 
-from .utils.injection_adapter import InjectionAdapter
-from .narrative_api import is_managed_event
-
-
 import asyncio
 from typing import Any
 
@@ -24,7 +20,9 @@ from .event_handler_modules import (
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .memory_scope import adapter_access
+from .narrative_api import is_managed_event
 from .processors.memory_processor import MemoryProcessor
+from .utils.injection_adapter import InjectionAdapter
 
 
 class EventHandler:

@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import contextvars
+import copy
+import functools
 import hashlib
 import json
 import time
-import functools
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from astrbot.api import logger
 
@@ -221,7 +222,7 @@ class BoundedRecallSearchContext:
 
     def __init__(
         self,
-        pool: "BoundedRecallTaskPool",
+        pool: BoundedRecallTaskPool,
         budget: RecallDeadline,
         *,
         scope: dict,
@@ -381,8 +382,8 @@ class BoundedRecallSearchContext:
             ) + int((work_started - dispatch_started) * 1000)
             # The pool intentionally clears ambient ContextVars. Carry only
             # this request's pure query-vector cache, never req/event objects.
-            from .retrieval.vector_search import query_embeddings
             from .memory_scope import current_adapter_access
+            from .retrieval.vector_search import query_embeddings
 
             adapter_token = current_adapter_access.set(self.adapter_access_snapshot)
             token = (

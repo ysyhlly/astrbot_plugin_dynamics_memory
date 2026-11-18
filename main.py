@@ -20,33 +20,15 @@ main.py - LivingMemory 插件主文件
 负责插件注册、初始化和生命周期管理
 """
 
+import asyncio
 import copy
 import inspect
 import json
-import time
-from pathlib import Path
-from .core.blocking_policy import BlockingPolicyGate
-from .core.evidence_projection import MAX_MATERIALS, PURPOSES
-from .core.evidence_view import EvidenceViewService
-from .core.recall_runtime import (
-    BoundedRecallSearchContext,
-    BoundedRecallTaskPool,
-    RecallDeadline,
-    recall_task_key,
-    trace_recall_hook,
-    timed_recall_phase,
-)
-from .core.narrative_api import is_managed_event, scope_key
-from .core.retrieval.narrative_history import persona_names, source_origin
-from .core.utils import _get_native_persona_id, set_persona_aliases
-from .series_panels import get_series_defaults
-from .storage.evidence_sidecar import EvidenceSidecar
-
-
-import asyncio
 import re
+import time
 from collections.abc import AsyncGenerator
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
@@ -56,12 +38,16 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 
 from .core.base.config_manager import ConfigManager
+from .core.blocking_policy import BlockingPolicyGate
 from .core.command_handler import CommandHandler
 from .core.event_handler import EventHandler
+from .core.evidence_projection import MAX_MATERIALS, PURPOSES
+from .core.evidence_view import EvidenceViewService
 from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
 from .core.memory_scope import adapter_access
+from .core.narrative_api import is_managed_event, scope_key
 from .core.page_api import PluginPageApi
 from .core.passive_group_capture import (
     PassiveGroupCaptureFilter,
@@ -70,7 +56,18 @@ from .core.passive_group_capture import (
     is_session_enabled,
     set_active_plugin,
 )
+from .core.plugin_helpers_mixin import _SCOPE_RECALL_TIMINGS, PluginHelpersMixin
 from .core.plugin_initializer import PluginInitializer
+from .core.recall_runtime import (
+    BoundedRecallSearchContext,
+    BoundedRecallTaskPool,
+    RecallDeadline,
+    recall_task_key,
+    timed_recall_phase,
+    trace_recall_hook,
+)
+from .core.retrieval.narrative_history import persona_names, source_origin
+from .core.series import active_entries, find_role, manifest
 from .core.tools import (
     AgenticMemorySearchTool,
     MemoryForgetTool,
@@ -78,11 +75,9 @@ from .core.tools import (
     MemoryReadTool,
     MemorySearchTool,
 )
-
-
-from .core.plugin_helpers_mixin import PluginHelpersMixin, _SCOPE_RECALL_TIMINGS
-from .core.series import active_entries, find_role, manifest
-
+from .core.utils import _get_native_persona_id, set_persona_aliases
+from .series_panels import get_series_defaults
+from .storage.evidence_sidecar import EvidenceSidecar
 
 _HISTORY_LOOKUP = re.compile(
     r"还记得|记不记得|你记得|回忆|回顾|上次|当时|以前|之前|前几天|昨天|原话|原文|"
@@ -206,6 +201,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         self.page_api.register_routes()
         self.register_series_routes()
         from importlib import reload
+
         from . import series_panels
 
         reload(series_panels).register_series_panels(

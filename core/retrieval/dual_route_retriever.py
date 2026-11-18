@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import replace
-from ..memory_scope import memory_metadata_matches_policy
-from ..utils.json_utils import safe_json_dict
-
-
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
+from ..memory_scope import memory_metadata_matches_policy
+from ..utils.json_utils import safe_json_dict
 from .graph_retriever import GraphRetriever
 from .hybrid_retriever import HybridResult, HybridRetriever
 from .recall_diagnostics import merge_route

@@ -1,8 +1,5 @@
 """检索召回、缓存与读取接口。"""
 
-from ..memory_scope import memory_metadata_matches_policy
-
-
 import asyncio
 import copy
 import json
@@ -21,6 +18,7 @@ from ..memory_scope import (
     adapter_sql,
     adapter_visible,
     current_adapter_access,
+    memory_metadata_matches_policy,
 )
 from ..memory_transfer import memory_import_key
 from ..retrieval.hybrid_retriever import HybridResult

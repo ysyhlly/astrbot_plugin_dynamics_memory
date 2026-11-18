@@ -3,41 +3,39 @@
 负责检查是否需要记忆总结和存储
 """
 
+import asyncio
 import hashlib
 import inspect
-import time
-import secrets
-from collections import OrderedDict
-from astrbot.api.platform import MessageType
-from ..memory_scope import classify_umo, resolve_memory_write_scope
-from ..models.conversation_models import Message
-from ..utils import get_persona_id
-
-
-import asyncio
 import math
+import secrets
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api.platform import MessageType
 from astrbot.api.provider import LLMResponse
 
-from ..memory_scope import (
-    is_event_memory_allowed,
-    is_suspicious_session_id,
-)
-from .memory_reflection_storage import (
-    MANAGED_WINDOW_REFUSED,
-    MemoryReflectionStorageMixin,
-)
 from ...storage.conversation_summary_progress import (
     SUMMARY_RETRY_LIMIT,
     TERMINAL_SUMMARY_STAGES,
 )
+from ..memory_scope import (
+    classify_umo,
+    is_event_memory_allowed,
+    is_suspicious_session_id,
+    resolve_memory_write_scope,
+)
+from ..models.conversation_models import Message
 from ..narrative_api import scope_key
-
+from ..utils import get_persona_id
+from .memory_reflection_storage import (
+    MANAGED_WINDOW_REFUSED,
+    MemoryReflectionStorageMixin,
+)
 
 _OWNED_MEMORY_SOURCE_VALIDATE_ATTR = "_cd_owned_memory_sources_validate_v1"
 

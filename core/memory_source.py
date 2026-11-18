@@ -5,11 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from .evidence_projection import conversation_row_hash
-
-
 from typing import Any
 
+from .evidence_projection import conversation_row_hash
 from .models.conversation_models import Message
 
 

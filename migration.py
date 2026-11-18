@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+from contextlib import closing
+from pathlib import Path
 
 
 def sha(path):

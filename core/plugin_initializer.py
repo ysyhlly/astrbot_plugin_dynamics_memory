@@ -13,10 +13,10 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
+from ..series_panels import inherit_provider
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
 from ..storage.sqlite_connection import open_connection, resolve_journal_mode
-from ..series_panels import inherit_provider
 from .astrbot_compat import get_using_provider
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError

@@ -1,9 +1,6 @@
 """Passive group capture helpers for LivingMemory."""
 
 import sys
-from .narrative_api import is_managed_event
-
-
 import weakref
 from typing import Any
 
@@ -13,6 +10,7 @@ from astrbot.api.event.filter import CustomFilter
 from astrbot.api.platform import MessageType
 
 from .memory_scope import is_event_memory_allowed
+from .narrative_api import is_managed_event
 
 SESSION_PLUGIN_NAMES = (
     "群间记忆",

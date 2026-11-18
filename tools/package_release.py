@@ -1,13 +1,14 @@
 """Build deterministic plugin install/source archives without local state."""
 
 from __future__ import annotations
+
 import argparse
 import hashlib
 import json
 import os
 import re
-import zipfile
 import subprocess
+import zipfile
 from pathlib import Path
 
 SKIP_DIRS = {

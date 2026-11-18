@@ -1,9 +1,7 @@
 """Bound retrieval latency while preserving independent successful routes."""
 
-import time
-
-
 import asyncio
+import time
 
 from astrbot.api import logger
 

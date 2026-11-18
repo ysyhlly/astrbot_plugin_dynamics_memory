@@ -4,9 +4,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from weakref import WeakValueDictionary
-import aiosqlite
-from .sqlite_connection import BUSY_TIMEOUT_MS, open_connection
 
+import aiosqlite
+
+from .sqlite_connection import BUSY_TIMEOUT_MS, open_connection
 
 _PATH_WRITE_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
     WeakValueDictionary()

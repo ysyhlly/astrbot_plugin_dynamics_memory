@@ -1,14 +1,28 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
+import asyncio
 import inspect
 import time
+from dataclasses import field
+from typing import Any
+
+from pydantic.dataclasses import dataclass
+
+from astrbot.api import logger
+from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.tool import FunctionTool, ToolExecResult
+from astrbot.core.astr_agent_context import AstrAgentContext
+
+from ..base.config_manager import ConfigManager
+from ..event_handler_modules.message_utils import discard_unexpected_awaitable
+from ..evidence_projection import conversation_row_hash
 from ..memory_scope import (
+    adapter_access,
     classify_umo,
     is_event_memory_allowed,
     resolve_memory_access_policy,
     resolve_verified_group_sessions,
 )
-from ..evidence_projection import conversation_row_hash
 from ..narrative_api import is_managed_event, scope_key
 from ..passive_group_capture import get_active_plugin
 from ..recall_runtime import (
@@ -21,23 +35,7 @@ from ..tool_recall_guard import (
     make_managed_evidence_validator,
     make_memory_source_validator,
 )
-from ..event_handler_modules.message_utils import discard_unexpected_awaitable
 from ..utils import get_persona_id
-
-
-import asyncio
-from dataclasses import field
-from typing import Any
-
-from pydantic.dataclasses import dataclass
-
-from astrbot.api import logger
-from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.agent.tool import FunctionTool, ToolExecResult
-from astrbot.core.astr_agent_context import AstrAgentContext
-
-from ..base.config_manager import ConfigManager
-from ..memory_scope import adapter_access
 from .agentic_recall_common import json_result as _json_result
 
 

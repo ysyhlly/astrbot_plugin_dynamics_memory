@@ -3,27 +3,8 @@
 负责长期记忆的检索和注入
 """
 
-import contextvars
-from ..memory_scope import (
-    classify_umo,
-    current_adapter_access,
-    resolve_memory_access_policy,
-    resolve_verified_group_sessions,
-)
-from ..summary_source import AtomProjectionProof, summary_metadata_sha256, text_sha256
-from ..utils.injection_adapter import InjectionAdapter
-from ..utils import get_persona_id
-from ..recall_runtime import (
-    BoundedRecallSearchContext,
-    RecallDeadline,
-    RecallOperationContext,
-    discard_private_summary_segment,
-    remember_private_segment,
-)
-from ..retrieval.vector_search import QueryEmbeddingCache
-
-
 import asyncio
+import contextvars
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -35,12 +16,27 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
 from ..memory_scope import (
+    classify_umo,
+    current_adapter_access,
     is_event_memory_allowed,
     is_suspicious_session_id,
+    resolve_memory_access_policy,
+    resolve_verified_group_sessions,
 )
+from ..recall_runtime import (
+    BoundedRecallSearchContext,
+    RecallDeadline,
+    RecallOperationContext,
+    discard_private_summary_segment,
+    remember_private_segment,
+)
+from ..retrieval.vector_search import QueryEmbeddingCache
+from ..summary_source import AtomProjectionProof, summary_metadata_sha256, text_sha256
 from ..utils import (
     format_memories_for_injection,
+    get_persona_id,
 )
+from ..utils.injection_adapter import InjectionAdapter
 from .memory_reflection import cancel_session_storage_task
 
 if TYPE_CHECKING:

@@ -3,15 +3,9 @@
 提供统一的记忆管理接口,整合所有底层组件
 """
 
-from collections.abc import Sequence
-from ..maintenance.graph_index_repair import RepairPlan
-from ..maintenance.source_state_guard import SourceStateGuard
-from .memory_engine_write_ops import MemoryEngineWriteOpsMixin
-
-
 import asyncio
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -31,6 +25,8 @@ from ...storage.schema import (
 )
 from ...storage.sqlite_connection import open_connection
 from ...storage.sqlite_write import settle, write_transaction
+from ..maintenance.graph_index_repair import RepairPlan
+from ..maintenance.source_state_guard import SourceStateGuard
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..processors.graph_extractor import GraphExtractor
@@ -52,6 +48,7 @@ from .memory_engine_batch import MemoryEngineBatchMixin
 from .memory_engine_crud import MemoryEngineCrudMixin
 from .memory_engine_recall import MemoryEngineRecallMixin
 from .memory_engine_stats import MemoryEngineStatsMixin
+from .memory_engine_write_ops import MemoryEngineWriteOpsMixin
 
 
 class MemoryEngine(
