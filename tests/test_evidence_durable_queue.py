@@ -531,10 +531,10 @@ async def test_scope_quota_survives_restart_and_fake_clock_wakes_deferred_job(tm
         clock.value += 3601
         service2.wake_scheduler()
         await _wait_until(lambda: "fixture quota second" in second_calls)
-        state = await sidecar2.material_retry_state(
-            second_descriptor["material_id"], scope_key(SCOPE_A)
+        # The derivation callback precedes the transaction that publishes its result.
+        await _wait_material_status(
+            sidecar2, second_descriptor["material_id"], SCOPE_A, "ready"
         )
-        assert state["status"] == "ready"
         with sqlite3.connect(path) as db:
             count = db.execute(
                 "SELECT COUNT(*) FROM evidence_queue_admissions WHERE scope_key=?",
