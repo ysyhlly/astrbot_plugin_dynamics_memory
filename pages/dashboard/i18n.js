@@ -833,7 +833,7 @@
 
   function getBridgeLocale() {
     try {
-      const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
+      const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginView || window.AstrBotPluginPage);
       if (bridge) {
         const ctx = bridge.getContext();
         if (ctx && ctx.locale) {
@@ -873,7 +873,7 @@
 
   function listenBridgeLocale() {
     try {
-      const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
+      const bridge = (window.DynamicsPanelBridge || window.AstrBotPluginView || window.AstrBotPluginPage);
       if (!bridge || typeof bridge.onContext !== "function") return;
       bridge.onContext(function (ctx) {
         if (!ctx || !ctx.locale) return;

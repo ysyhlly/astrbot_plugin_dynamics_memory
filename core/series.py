@@ -235,6 +235,8 @@ class SeriesMixin:
         }
 
     def register_series_routes(self):
+        from ..series_workspace import register_panel_api
+
         for path, handler, methods, title in (
             ("series", self.series_status, ["GET"], "群间记忆接入与冲突状态"),
             (
@@ -251,8 +253,13 @@ class SeriesMixin:
                 "标记来源冲突已审查",
             ),
         ):
-            self.context.register_web_api(
-                f"/{PLUGIN}/page/{path}", self._series_route(handler), methods, title
+            register_panel_api(
+                self,
+                self.context.register_web_api,
+                f"/{PLUGIN}/page/{path}",
+                self._series_route(handler),
+                methods,
+                title,
             )
 
     @staticmethod

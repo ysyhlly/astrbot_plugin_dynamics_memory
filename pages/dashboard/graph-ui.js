@@ -66,7 +66,7 @@
 
   async function requestGraph(path, options) {
     options = options || {};
-    var bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
+    var bridge = (window.DynamicsPanelBridge || window.AstrBotPluginView || window.AstrBotPluginPage);
     if (!bridge) throw new Error(window.t("graph.bridgeError"));
 
     var method = (options.method || "GET").toUpperCase();

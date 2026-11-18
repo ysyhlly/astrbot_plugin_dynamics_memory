@@ -177,9 +177,13 @@ class PluginPageApi:
 
     def register_routes(self) -> None:
         """注册官方插件页面所需的原生 API。"""
+        from ..series_workspace import register_panel_api
+
         for suffix, handler_path, methods, description in self._ROUTES:
             handler = self._resolve_handler(handler_path)
-            self.plugin.context.register_web_api(
+            register_panel_api(
+                self.plugin,
+                self.plugin.context.register_web_api,
                 f"{PAGE_API_PREFIX}/{suffix}",
                 self._scoped(handler),
                 methods,
@@ -190,8 +194,13 @@ class PluginPageApi:
             ("evidence/correct", self.correct_evidence_insight, ["POST"]),
             ("storage/repair", self.repair_storage, ["POST"]),
         ):
-            self.plugin.context.register_web_api(
-                f"{PAGE_API_PREFIX}/{suffix}", self._scoped(handler), methods, suffix
+            register_panel_api(
+                self.plugin,
+                self.plugin.context.register_web_api,
+                f"{PAGE_API_PREFIX}/{suffix}",
+                self._scoped(handler),
+                methods,
+                suffix,
             )
 
     def _resolve_handler(self, path: str):

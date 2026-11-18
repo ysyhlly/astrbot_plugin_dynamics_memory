@@ -7,7 +7,7 @@ import { unwrapResponse } from "./utils.js";
 
 export class ApiClient {
   constructor() {
-    this.bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
+    this.bridge = (window.DynamicsPanelBridge || window.AstrBotPluginView || window.AstrBotPluginPage);
     this._context = null;
     this._pendingGets = new Map();
   }
