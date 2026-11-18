@@ -1487,7 +1487,6 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         )
         semantic_waiters = []
         semantic_contexts = []
-        local_reply_view = None
         if semantic_budget and str(query).strip():
             semantic_deadline = min(retrieval_deadline, loop.time() + semantic_budget)
             from .core.retrieval.vector_search import QueryEmbeddingCache
@@ -1552,26 +1551,16 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 and isinstance(ready_outcome.get("value"), dict)
                 else {"source_refs": [], "typed_items": [], "diagnostic": "partial"}
             )
-            if (
+            local_reply_fast_path = (
                 purpose == "reply"
                 and not _HISTORY_LOOKUP.search(str(query))
                 and ready_baseline.get("query_matched") is True
+                and bool(ready_baseline.get("evidence_view"))
                 and any(not waiter.done() for waiter in semantic_waiters)
-            ):
-                checked = await run_route(
-                    self._current_ready_narrative_view,
-                    scope,
-                    ready_baseline,
-                    purpose,
-                    card_version,
-                    route="baseline_recheck",
-                    origin=managed_origin,
-                    use_total_deadline=True,
-                )
-                if checked.get("state") == "completed" and checked.get("value"):
-                    local_reply_view = checked
-            if local_reply_view is not None:
-                # Raw local summaries require enrichment. Only publish the verified view.
+            )
+            if local_reply_fast_path:
+                # The common ready-view path rechecks scope, permissions and revision
+                # after the waiters have drained and before publishing the local result.
                 historical, managed, evidence = [], [], []
             elif semantic_waiters:
                 semantic_values = await asyncio.gather(*semantic_waiters)
@@ -1868,9 +1857,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             if identity not in seen_refs:
                 seen_refs.add(identity)
                 view_refs.append(ref)
-        if local_reply_view is not None:
-            view_outcome = local_reply_view
-        elif not materials and ready_baseline.get("evidence_view"):
+        if not materials and ready_baseline.get("evidence_view"):
             # All useful material is already rendered. Recheck identity/policy
             # instead of sending the same ready atoms through SQLite again.
             view_outcome = await run_route(
@@ -2021,7 +2008,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     ready_baseline.get("diagnostic", "partial")
                 )[:64],
                 "baseline_preserved": baseline_preserved,
-                "local_reply_fast_path": local_reply_view is not None,
+                "local_reply_fast_path": local_reply_fast_path,
                 **self._narrative_runtime_diagnostics(
                     call_started, route_failures, route_elapsed_ms, runtime
                 ),

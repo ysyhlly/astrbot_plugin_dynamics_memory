@@ -463,3 +463,25 @@ async def test_only_a_relevant_verified_reply_can_finish_before_semantic(
         release.set()
         await asyncio.gather(task, return_exceptions=True)
         await close_pool(plugin)
+
+
+@pytest.mark.asyncio
+async def test_fast_reply_never_publishes_a_view_revoked_at_final_recheck():
+    plugin, _ = plugin_with_ready_baseline(mixed=False)
+    plugin._ready_narrative_baseline.return_value["query_matched"] = True
+    plugin._current_ready_narrative_view = AsyncMock(return_value=None)
+    release = asyncio.Event()
+
+    async def semantic(*args):
+        await release.wait()
+        return []
+
+    plugin.initializer.memory_engine.search_narrative_semantic = semantic
+    try:
+        result = await plugin.recall_context(SCOPE, "coffee", "reply", "card")
+        assert not result["items"]
+        assert not result["evidence_view"].get("atoms")
+        plugin._current_ready_narrative_view.assert_awaited()
+    finally:
+        release.set()
+        await close_pool(plugin)
