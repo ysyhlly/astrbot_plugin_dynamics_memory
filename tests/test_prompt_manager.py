@@ -216,6 +216,7 @@ class TestChatPromptTemplates:
         assert "{current_date}" not in fixed_prefix
         assert "{current_date}" in runtime
         assert "{conversation}" in runtime
+        assert runtime.index("{conversation}") < runtime.index("{current_date}")
         assert "# 输出格式" in fixed_prefix
         assert "# 示例" in fixed_prefix
         assert len(fixed_prefix) <= 1500

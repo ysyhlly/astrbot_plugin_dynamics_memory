@@ -1113,7 +1113,9 @@ async def test_quality_retry_uses_source_and_keeps_rejection_gate():
         )
     processor._call_llm_with_retry.assert_awaited_once()
     sent = processor._call_llm_with_retry.call_args.kwargs
-    assert "上次摘要" in sent["system_prompt"]
-    assert "不要猜测或编造说话者" in sent["system_prompt"]
+    assert "上次摘要" in sent["prompt"]
+    assert "不要猜测或编造说话者" in sent["prompt"]
+    assert "上次摘要" not in sent["system_prompt"]
+    assert "不要猜测或编造说话者" not in sent["system_prompt"]
     assert bad not in sent["prompt"]
     assert bad not in sent["system_prompt"]

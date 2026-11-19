@@ -22,9 +22,8 @@ importance 为 0.0-1.0 的 JSON 数字，保留 1-2 位小数。关键需求或�
 输出: {"summary": "张三提醒我明天(2025-11-20)15:00 开会要带项目文档", "topics": ["会议提醒"], "key_facts": ["张三通知明天(2025-11-20)15:00 开会", "需要带项目文档"], "sentiment": "neutral", "importance": 0.8}
 
 # 本次请求
-当前日期时间: {current_date}
-
 # 对话历史
 {conversation}
 
 请回顾上述对话并输出 JSON:
+当前日期时间: {current_date}

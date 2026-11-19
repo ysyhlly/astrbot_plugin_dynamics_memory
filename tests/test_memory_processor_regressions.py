@@ -136,8 +136,133 @@ async def test_summary_keeps_fixed_prefix_across_dates(
     assert "2026-10-01 12:00" in first_prompt
     assert "2026-10-02 12:00" in second_prompt
     assert "2026-09-20 23:50" in first_prompt
-    assert first_prompt.index("2026-10-01") < first_prompt.index("2026-09-20")
+    # DM-1: {current_date} must sit at the end after the conversation block so the
+    # static instructions + conversation prefix stays byte-identical across retries/minutes.
+    assert first_prompt.index("2026-09-20") < first_prompt.index("2026-10-01")
+    assert (
+        first_prompt.split("当前日期时间:")[0]
+        == second_prompt.split("当前日期时间:")[0]
+    )
     assert "消息的发送时间" in calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_persona", [False, True])
+@pytest.mark.parametrize("is_group", [False, True])
+async def test_reflection_system_prompt_byte_identical_across_normal_and_retry(
+    processor, monkeypatch, with_persona, is_group
+):
+    """DM-1: reflection system_prompt stays byte-identical on quality retry;
+    current_date and quality_feedback both sit at the end of user prompt.
+    """
+    if with_persona:
+        processor.context = SimpleNamespace(
+            persona_manager=SimpleNamespace(
+                get_persona=AsyncMock(
+                    return_value=SimpleNamespace(system_prompt="你是严谨助手")
+                )
+            )
+        )
+    messages = [
+        Message(
+            id=1,
+            session_id="s",
+            role="user",
+            content="下周三提交版本发布说明",
+            sender_id="u1",
+            sender_name="李四",
+            group_id="g1" if is_group else None,
+            platform="test",
+            timestamp=datetime(2026, 11, 19, 10, 0).timestamp(),
+            metadata={"source_event_id": "evt_1"},
+        )
+    ]
+
+    class FirstMinute(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 11, 19, 10, 5)
+
+    class NextMinute(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 11, 19, 10, 6)
+
+    monkeypatch.setattr(processor_module, "datetime", FirstMinute)
+    await processor.process_conversation(
+        messages, is_group, "p1" if with_persona else None
+    )
+    normal_call = dict(processor._llm_provider.text_chat.call_args.kwargs)
+
+    monkeypatch.setattr(processor_module, "datetime", NextMinute)
+    await processor.process_conversation(
+        messages,
+        is_group,
+        "p1" if with_persona else None,
+        quality_feedback="summary_generic_reference",
+    )
+    retry_call = dict(processor._llm_provider.text_chat.call_args.kwargs)
+
+    # 1. system_prompt is strictly byte-identical across normal and retry calls
+    assert normal_call["system_prompt"] == retry_call["system_prompt"]
+    assert "上次摘要" not in retry_call["system_prompt"]
+    assert "2026-11-19 10:05" not in normal_call["system_prompt"]
+    assert "2026-11-19 10:06" not in retry_call["system_prompt"]
+
+    # 2. Leading user prompt prefix (instructions + conversation + static source constraint)
+    #    stays byte-identical across normal and retry attempts
+    normal_prefix, normal_date_tail = normal_call["prompt"].rsplit("当前日期时间:", 1)
+    retry_prefix, retry_date_tail = retry_call["prompt"].rsplit("当前日期时间:", 1)
+    assert normal_prefix == retry_prefix
+    assert "下周三提交版本发布说明" in normal_prefix
+    assert "来源约束" in normal_prefix
+
+    # 3. current_date and quality_feedback are both placed at the tail of user prompt
+    assert normal_date_tail.strip() == "2026-11-19 10:05"
+    assert "2026-11-19 10:06" in retry_date_tail
+    assert "上次摘要" in retry_date_tail
+    assert retry_date_tail.index("2026-11-19 10:06") < retry_date_tail.index("上次摘要")
+    assert retry_call["prompt"].endswith("并在输出前逐项自检。")
+
+
+@pytest.mark.asyncio
+async def test_legacy_custom_template_relocates_current_date_to_tail(
+    processor, monkeypatch
+):
+    """Legacy user templates with leading current_date still get tail placement."""
+    manager = prompt_manager.get_prompt_manager()
+    manager.update_prompt(
+        "private_chat_prompt",
+        "# 规则\n只输出 JSON。\n\n# 本次请求\n当前日期时间: {current_date}\n\n# 对话历史\n{conversation}\n",
+    )
+    messages = [
+        Message(
+            id=1,
+            session_id="s",
+            role="user",
+            content="记录一下明天的安排",
+            sender_id="u1",
+            sender_name="王五",
+            group_id=None,
+            platform="test",
+            timestamp=datetime(2026, 11, 19, 9, 0).timestamp(),
+            metadata={},
+        )
+    ]
+
+    class FrozenNow(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 11, 19, 14, 20)
+
+    monkeypatch.setattr(processor_module, "datetime", FrozenNow)
+    await processor.process_conversation(messages, is_group_chat=False, persona_id=None)
+    sent_prompt = processor._llm_provider.text_chat.call_args.kwargs["prompt"]
+    assert "{current_date}" not in sent_prompt
+    assert sent_prompt.index("记录一下明天的安排") < sent_prompt.index(
+        "2026-11-19 14:20"
+    )
+    assert sent_prompt.rstrip().endswith("当前日期时间: 2026-11-19 14:20")
 
 
 @pytest.mark.asyncio

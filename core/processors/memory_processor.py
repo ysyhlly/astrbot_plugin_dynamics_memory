@@ -79,6 +79,72 @@ _TRANSIENT_ERROR_MESSAGE_MARKERS = (
 )
 
 
+_CURRENT_DATE_LINE_RE = re.compile(
+    r"(?m)^[^\S\n]*当前日期时间[:：]\s*\{current_date\}[^\S\n]*\r?\n?"
+)
+
+_SOURCE_CONSTRAINT_SUFFIX = (
+    "\n来源约束：这些文字是已收到的用户发言或已确认发送的角色消息。"
+    "用户声称发生的事仍是用户陈述；角色猜测仍是主观判断；"
+    "答应、计划或愿望不代表完成或已安排定时任务。"
+    "保留说话者、时间与不确定性，不把重复陈述升级为已核实事实。"
+)
+
+_QUALITY_RETRY_GENERIC_REFERENCE_SUFFIX = (
+    "\n本次是同一段来源消息的质量重试：上次摘要使用了无法归属到具体发言者的泛称。"
+    "请重新依据原始消息总结，不沿用上次摘要。summary 与 key_facts 用消息前缀中的"
+    "昵称或账号指明是谁说的；不要出现‘有人’‘某人’‘某用户’‘用户说’‘对方说’"
+    "‘群成员’等泛称。无法确认归属的细节省略，不要猜测或编造说话者。"
+    "只输出符合原格式的 JSON，并在输出前逐项自检。"
+)
+
+
+def _render_reflection_user_prompt(
+    template: str,
+    conversation_text: str,
+    current_date: str,
+    *,
+    has_source_event_id: bool = False,
+    quality_feedback: str | None = None,
+) -> str:
+    """Render reflection user prompt with dynamic time and retry feedback at the tail.
+
+    Keeps the leading static instructions + conversation block stable across retries
+    and across minute boundaries for upstream prefix caching.
+    """
+    working = template
+    append_current_date = False
+
+    if "{current_date}" in working:
+        conv_pos = working.find("{conversation}")
+        date_pos = working.find("{current_date}")
+        if conv_pos != -1 and date_pos < conv_pos:
+            # Relocate legacy leading "当前日期时间: {current_date}" line to the tail.
+            stripped, count = _CURRENT_DATE_LINE_RE.subn("", working, count=1)
+            if count:
+                working = stripped
+                append_current_date = True
+        elif _CURRENT_DATE_LINE_RE.search(working):
+            # Pull trailing "当前日期时间: {current_date}" line out temporarily so
+            # static source constraints stay ahead of the volatile timestamp.
+            matches = list(_CURRENT_DATE_LINE_RE.finditer(working))
+            last_match = matches[-1]
+            if not working[last_match.end() :].strip():
+                working = working[: last_match.start()].rstrip("\r\n")
+                append_current_date = True
+
+    prompt = working.replace("{conversation}", conversation_text).replace(
+        "{current_date}", current_date
+    )
+    if has_source_event_id:
+        prompt += _SOURCE_CONSTRAINT_SUFFIX
+    if append_current_date:
+        prompt += f"\n当前日期时间: {current_date}"
+    if quality_feedback == "summary_generic_reference":
+        prompt += _QUALITY_RETRY_GENERIC_REFERENCE_SUFFIX
+    return prompt
+
+
 def _extract_http_status(exc: BaseException) -> int | None:
     """从异常对象上提取 HTTP 状态码（兼容 httpx/openai/aiohttp 风格）。"""
     candidates = (
@@ -624,20 +690,18 @@ class MemoryProcessor:
         conversation_text = self._format_conversation(messages)
 
         # 2. 选择合适的提示词模板（每次从 PromptManager 读取，确保 WebUI 保存后立即生效）
-        # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误
+        # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误；
+        # 动态时间与低质量重试反馈统一放在 user prompt 末尾，保持前缀稳定。
         current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        prompt = (
-            self._get_chat_prompt(is_group_chat)
-            .replace("{conversation}", conversation_text)
-            .replace("{current_date}", current_date)
+        prompt = _render_reflection_user_prompt(
+            self._get_chat_prompt(is_group_chat),
+            conversation_text,
+            current_date,
+            has_source_event_id=any(
+                message.metadata.get("source_event_id") for message in messages
+            ),
+            quality_feedback=quality_feedback,
         )
-        if any(message.metadata.get("source_event_id") for message in messages):
-            prompt += (
-                "\n来源约束：这些文字是已收到的用户发言或已确认发送的角色消息。"
-                "用户声称发生的事仍是用户陈述；角色猜测仍是主观判断；"
-                "答应、计划或愿望不代表完成或已安排定时任务。"
-                "保留说话者、时间与不确定性，不把重复陈述升级为已核实事实。"
-            )
 
         # 3. 调用LLM生成结构化记忆
         conversation_type = "群聊" if is_group_chat else "私聊"
@@ -647,16 +711,8 @@ class MemoryProcessor:
             )
             logger.debug(f"[MemoryProcessor] Prompt 模板长度={len(prompt)}")
 
-            # 构建 system_prompt，嵌入人格提示
+            # 构建严格静态的 system_prompt（嵌入人格提示；重试反馈不写入 system_prompt）
             system_prompt = await self._build_system_prompt_with_persona(persona_id)
-            if quality_feedback == "summary_generic_reference":
-                system_prompt += (
-                    "\n本次是同一段来源消息的质量重试：上次摘要使用了无法归属到具体发言者的泛称。"
-                    "请重新依据原始消息总结，不沿用上次摘要。summary 与 key_facts 用消息前缀中的"
-                    "昵称或账号指明是谁说的；不要出现‘有人’‘某人’‘某用户’‘用户说’‘对方说’"
-                    "‘群成员’等泛称。无法确认归属的细节省略，不要猜测或编造说话者。"
-                    "只输出符合原格式的 JSON，并在输出前逐项自检。"
-                )
             logger.debug(f"[MemoryProcessor] System Prompt: {system_prompt[:200]}...")
 
             llm_response_text = await self._call_llm_with_retry(

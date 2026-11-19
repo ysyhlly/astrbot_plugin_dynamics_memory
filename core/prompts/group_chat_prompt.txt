@@ -22,9 +22,8 @@ importance 为 0.0-1.0 的 JSON 数字，保留 1-2 位小数。群体决策或�
 输出: {"summary": "我注意到张三组织明天(2025-11-20)去滑雪场团建", "topics": ["团建"], "key_facts": ["张三组织明天(2025-11-20)团建", "地点是滑雪场"], "participants": ["张三", "我"], "sentiment": "positive", "importance": 0.7}
 
 # 本次请求
-当前日期时间: {current_date}
-
 # 对话历史
 {conversation}
 
 请回顾上述群聊并输出 JSON:
+当前日期时间: {current_date}
