@@ -1,7 +1,7 @@
 name: astrbot_plugin_dynamics_memory
 display_name: 群间记忆 · Dynamics Memory
 author: ysyhlly, lxfight
-version: 0.2.0-rc.4
+version: 0.2.0-rc.5
 desc: Chat Dynamics 系列记忆插件，保留 LivingMemory 本地增强、原文证据与召回接口，统一来源去重和冲突审查。
 astrbot_version: ">=4.29.4,<5"
 tags: [chat-dynamics, memory, evidence]

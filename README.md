@@ -1,6 +1,6 @@
 # 群间记忆 · Dynamics Memory
 
-> 发布候选：`0.2.0-rc.4`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+> 发布候选：`0.2.0-rc.5`。升级说明与验证边界见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ![群间记忆](logo.png)
 

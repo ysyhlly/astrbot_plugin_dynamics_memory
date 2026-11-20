@@ -1,4 +1,8 @@
-# astrbot_plugin_dynamics_memory 0.2.0-rc.3
+# astrbot_plugin_dynamics_memory 0.2.0-rc.5
+
+## 0.2.0-rc.5 — 2026-11-20
+
+- 优化反思（reflection）链路前缀缓存（DM-1）：保持 `system_prompt` 完全静态，将 `current_date` 与重试反馈移至用户提示尾部。
 
 ## 0.2.0-rc.4
 
