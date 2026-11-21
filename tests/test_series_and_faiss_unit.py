@@ -350,7 +350,7 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
         "request",
         NS(
             _request=object(),
-            args={"id": "c1"},
+            query={"id": "c1"},
             json=AsyncMock(return_value={"bad": 1}),
         ),
         raising=False,
@@ -362,7 +362,7 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
         "request",
         NS(
             _request=object(),
-            args={"id": "c1"},
+            query={"id": "c1"},
             json=AsyncMock(return_value={"id": "c1", "revision": 1, "reason": "ok"}),
         ),
         raising=False,
@@ -370,6 +370,9 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
     assert (await s._series_route(s.series_status)())[0] == 200
     assert (await s._series_route(s.series_conflict_list)())[0] == 200
     assert (await s._series_route(s.series_conflict_detail)())[0] == 200
+    s.initializer.conversation_manager.store.get_series_conflict.assert_awaited_with(
+        "c1"
+    )
     assert (await s._series_route(s.series_resolve_conflict)())[0] == 200
 
     assert (await s.record_activity_experience("bad"))["reason"] == "invalid_payload"

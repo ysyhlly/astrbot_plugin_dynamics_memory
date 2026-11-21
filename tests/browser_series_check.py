@@ -122,7 +122,7 @@ async def main():
               apiPost: async(path,data)=>fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json())
             };""")
             await page.goto(f"http://127.0.0.1:{server.server_port}/")
-            await page.locator("#series-panel summary").click()
+            await page.locator('.nav-item[data-page="system"]').click()
             await page.wait_for_function(
                 "document.getElementById('series-status').textContent.includes('已就绪')"
             )

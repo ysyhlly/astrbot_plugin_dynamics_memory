@@ -6,8 +6,12 @@ import asyncio
 import inspect
 import json
 import math
+import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from .memory_scope import parse_value_list
 from .memory_source import serialize_source_messages
 
 # Contribution time is recorded by Games on receipt. Some adapters provide
@@ -26,6 +30,113 @@ def _activity_timestamp(raw):
 
 
 PLUGIN = "astrbot_plugin_dynamics_memory"
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _iso_from_ts(raw) -> str:
+    ts = _activity_timestamp(raw)
+    if ts is None:
+        return _iso_now()
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return _iso_now()
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _compact_text(raw: str, limit: int = 72) -> str:
+    line = " ".join(str(raw or "").split()).strip()
+    if len(line) <= limit:
+        return line
+    return line[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _short_scope(umo: str) -> str:
+    text = str(umo or "").strip()
+    if not text:
+        return ""
+    parts = text.split(":")
+    return parts[-1] if len(parts) >= 3 and parts[-1] else text[:32]
+
+
+_TZ_SHANGHAI = timezone(timedelta(hours=8))
+_UNBOUND_PERSONA_SENTINELS = frozenset({"__none__", "[%None]"})
+
+
+def _day_bounds(
+    date_str: str, *, now_ts: float | None = None
+) -> tuple[float, float] | None:
+    raw = str(date_str or "").strip().lower()
+    if not raw or raw == "today":
+        stamp = time.time() if now_ts is None else float(now_ts)
+        now_local = datetime.fromtimestamp(stamp, tz=_TZ_SHANGHAI)
+        start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        try:
+            parsed = datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            return None
+        start = parsed.replace(tzinfo=_TZ_SHANGHAI)
+    start_ts = start.timestamp()
+    return start_ts, start_ts + 86400.0
+
+
+def _resolve_time_window(
+    date_str: str,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    *,
+    now_ts: float | None = None,
+) -> tuple[bool, tuple[float, float] | None]:
+    if start_ts is not None or end_ts is not None:
+        if (
+            isinstance(start_ts, bool)
+            or isinstance(end_ts, bool)
+            or not isinstance(start_ts, (int, float))
+            or not isinstance(end_ts, (int, float))
+        ):
+            return False, None
+        s_val = float(start_ts)
+        e_val = float(end_ts)
+        if not (math.isfinite(s_val) and math.isfinite(e_val) and e_val > s_val):
+            return False, None
+        return True, (s_val, e_val)
+    raw = str(date_str or "").strip().lower()
+    if raw in {"all", "*"}:
+        return True, None
+    bounds = _day_bounds(raw, now_ts=now_ts)
+    if bounds is None:
+        return False, None
+    return True, bounds
+
+
+def _open_ro_sqlite(raw_path: Path | str | None) -> sqlite3.Connection | None:
+    if not raw_path:
+        return None
+    text = str(raw_path).strip()
+    if not text or text == ":memory:":
+        return None
+    try:
+        path = Path(text)
+        if not path.is_file():
+            return None
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=0.15)
+        except sqlite3.Error:
+            conn = sqlite3.connect(str(path), timeout=0.15)
+            conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 150")
+        conn.row_factory = sqlite3.Row
+        return conn
+    except (OSError, sqlite3.Error, ValueError):
+        return None
 
 
 def value(row, key, default=None):
@@ -129,6 +240,474 @@ class SeriesMixin:
             "api_version": 1,
             "conflicts": self.series_conflicts(),
         }
+
+    def _series_data_dir(self) -> Path | None:
+        raw = getattr(self, "_data_dir", None)
+        if not raw:
+            initializer = getattr(self, "initializer", None)
+            raw = getattr(initializer, "data_dir", None)
+        if not raw:
+            return None
+        try:
+            return Path(str(raw))
+        except (TypeError, ValueError):
+            return None
+
+    def _series_memory_db_path(self) -> Path | None:
+        initializer = getattr(self, "initializer", None)
+        engine = getattr(initializer, "memory_engine", None)
+        bm25 = getattr(
+            getattr(engine, "hybrid_retriever", None), "bm25_retriever", None
+        )
+        for candidate in (
+            getattr(bm25, "db_path", None),
+            getattr(getattr(initializer, "db_migration", None), "db_path", None),
+        ):
+            if candidate and str(candidate).strip() not in {"", ":memory:"}:
+                return Path(str(candidate))
+        data_dir = self._series_data_dir()
+        return (data_dir / "livingmemory.db") if data_dir is not None else None
+
+    def _series_conversation_db_path(self) -> Path | None:
+        initializer = getattr(self, "initializer", None)
+        store = getattr(
+            getattr(initializer, "conversation_manager", None), "store", None
+        )
+        candidate = getattr(store, "db_path", None)
+        if candidate and str(candidate).strip() not in {"", ":memory:"}:
+            return Path(str(candidate))
+        data_dir = self._series_data_dir()
+        return (data_dir / "conversations.db") if data_dir is not None else None
+
+    def _count_pending_source_conflicts(self) -> int:
+        conn = _open_ro_sqlite(self._series_conversation_db_path())
+        if conn is None:
+            return 0
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM series_source_conflicts WHERE status = 'pending'"
+            ).fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.Error:
+            return 0
+        finally:
+            conn.close()
+
+    def _memory_health_snapshot(self) -> tuple[int, str]:
+        conn = _open_ro_sqlite(self._series_memory_db_path())
+        if conn is None:
+            return 0, _iso_now()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), "
+                "MAX(COALESCE(CAST(json_extract(metadata, '$.update_time') AS REAL), "
+                "CAST(json_extract(metadata, '$.create_time') AS REAL), 0)) "
+                "FROM documents "
+                "WHERE json_valid(metadata) "
+                "AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active'"
+            ).fetchone()
+            if not row:
+                return 0, _iso_now()
+            count = int(row[0] or 0)
+            latest_ts = row[1]
+            return count, _iso_from_ts(latest_ts) if latest_ts else _iso_now()
+        except sqlite3.Error:
+            return 0, _iso_now()
+        finally:
+            conn.close()
+
+    def get_series_summary(self) -> dict:
+        """Return lightweight read-only badge and pulse summary for series_presence v2."""
+        try:
+            provider_conflicts = self.series_conflicts()
+            enabled = getattr(self, "_series_enabled", False) is True
+            initialized = bool(
+                getattr(getattr(self, "initializer", None), "is_initialized", False)
+            )
+            ready = self.series_runtime_allowed() and initialized
+            pending_conflicts = self._count_pending_source_conflicts()
+            active_memories, updated_at = self._memory_health_snapshot()
+
+            if provider_conflicts:
+                count = len(provider_conflicts)
+                return {
+                    "badge": {
+                        "count": count,
+                        "tone": "danger",
+                        "label": f"{count} 项插件冲突",
+                    },
+                    "pulse": {
+                        "headline": f"检测到旧记忆插件冲突（{', '.join(provider_conflicts[:2])}）",
+                        "updated_at": _iso_now(),
+                    },
+                }
+            if pending_conflicts > 0:
+                return {
+                    "badge": {
+                        "count": pending_conflicts,
+                        "tone": "warm",
+                        "label": f"{pending_conflicts} 条来源冲突",
+                    },
+                    "pulse": {
+                        "headline": f"{pending_conflicts} 条来源冲突待审查 · 共 {active_memories} 条活跃记忆",
+                        "updated_at": updated_at,
+                    },
+                }
+            if not enabled:
+                return {
+                    "badge": {"count": 0, "tone": "muted", "label": "待接入"},
+                    "pulse": {
+                        "headline": f"未开启系列记忆接入 · 现有 {active_memories} 条记忆",
+                        "updated_at": updated_at,
+                    },
+                }
+            if not ready:
+                return {
+                    "badge": {"count": 0, "tone": "info", "label": "初始化中"},
+                    "pulse": {
+                        "headline": "记忆引擎初始化中",
+                        "updated_at": updated_at,
+                    },
+                }
+            return {
+                "badge": {"count": 0, "tone": "accent", "label": "运行正常"},
+                "pulse": {
+                    "headline": f"已沉淀 {active_memories} 条活跃记忆 · 来源无冲突",
+                    "updated_at": updated_at,
+                },
+            }
+        except Exception:
+            return {
+                "badge": {"count": 0, "tone": "muted", "label": "状态暂不可用"},
+                "pulse": {"headline": "群间记忆状态暂不可用", "updated_at": _iso_now()},
+            }
+
+    def series_search_items(
+        self, query: str, scope: str = "", limit: int = 20, persona: str = ""
+    ) -> list[dict]:
+        """Search memories and graph entities safely read-only for Ctrl+K federated search."""
+        try:
+            if not isinstance(query, str):
+                return []
+            keyword = query.strip()[:120]
+            if not keyword:
+                return []
+            try:
+                bounded_limit = max(1, min(int(limit), 50))
+            except (TypeError, ValueError):
+                bounded_limit = 20
+            scope_filter = str(scope or "").strip()
+            persona_filter = str(persona or "").strip()
+            if persona_filter in _UNBOUND_PERSONA_SENTINELS:
+                return []
+            pattern = f"%{_escape_like(keyword)}%"
+
+            conn = _open_ro_sqlite(self._series_memory_db_path())
+            if conn is None:
+                return []
+
+            results: list[dict] = []
+            try:
+                mem_sql = (
+                    "SELECT id, content, metadata FROM documents "
+                    "WHERE json_valid(metadata) "
+                    "AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active' "
+                    "AND LOWER(COALESCE(content, '')) LIKE LOWER(?) ESCAPE '\\' "
+                )
+                params: list[object] = [pattern]
+                if scope_filter:
+                    mem_sql += "AND json_extract(metadata, '$.session_id') = ? "
+                    params.append(scope_filter)
+                if persona_filter:
+                    mem_sql += "AND json_extract(metadata, '$.persona_id') = ? "
+                    params.append(persona_filter)
+                mem_sql += (
+                    "ORDER BY COALESCE(CAST(json_extract(metadata, '$.importance') AS REAL), 0) DESC, "
+                    "id DESC LIMIT ?"
+                )
+                params.append(bounded_limit)
+                try:
+                    for row in conn.execute(mem_sql, params).fetchall():
+                        doc_id = int(row["id"])
+                        try:
+                            meta = json.loads(row["metadata"] or "{}")
+                        except (TypeError, ValueError):
+                            meta = {}
+                        mem_type = str(meta.get("memory_type") or "FACT").upper()
+                        sess = str(meta.get("session_id") or "")
+                        sub_parts = [f"记忆 #{doc_id}", mem_type]
+                        short_sess = _short_scope(sess)
+                        if short_sess:
+                            sub_parts.append(short_sess)
+                        results.append(
+                            {
+                                "kind": "memory",
+                                "title": _compact_text(
+                                    row["content"] or f"记忆 #{doc_id}", 72
+                                ),
+                                "subtitle": " · ".join(sub_parts),
+                                "plugin_id": PLUGIN,
+                                "page": "dashboard",
+                                "deep_link": {
+                                    "plugin": PLUGIN,
+                                    "page": "memory",
+                                    "memory_id": doc_id,
+                                    "umo": sess or scope_filter,
+                                },
+                            }
+                        )
+                except sqlite3.Error:
+                    pass
+
+                remaining = bounded_limit - len(results)
+                if remaining > 0:
+                    try:
+                        if scope_filter or persona_filter:
+                            node_sql = (
+                                "SELECT DISTINCT n.id, n.node_type, n.node_value "
+                                "FROM graph_nodes n "
+                                "JOIN graph_entry_nodes en ON en.node_id = n.id "
+                                "JOIN graph_entries e ON e.id = en.entry_id "
+                                "WHERE (LOWER(n.node_value) LIKE LOWER(?) ESCAPE '\\' "
+                                "OR LOWER(n.canonical_value) LIKE LOWER(?) ESCAPE '\\') "
+                            )
+                            node_params: list[object] = [pattern, pattern]
+                            if scope_filter:
+                                node_sql += "AND e.session_id = ? "
+                                node_params.append(scope_filter)
+                            if persona_filter:
+                                node_sql += "AND e.persona_id = ? "
+                                node_params.append(persona_filter)
+                            node_sql += "ORDER BY n.id DESC LIMIT ?"
+                            node_params.append(remaining)
+                            node_rows = conn.execute(node_sql, node_params).fetchall()
+                        else:
+                            node_sql = (
+                                "SELECT id, node_type, node_value FROM graph_nodes "
+                                "WHERE LOWER(node_value) LIKE LOWER(?) ESCAPE '\\' "
+                                "OR LOWER(canonical_value) LIKE LOWER(?) ESCAPE '\\' "
+                                "ORDER BY id DESC LIMIT ?"
+                            )
+                            node_rows = conn.execute(
+                                node_sql, (pattern, pattern, remaining)
+                            ).fetchall()
+                        for row in node_rows:
+                            node_id = int(row["id"])
+                            node_val = _compact_text(row["node_value"] or "", 72)
+                            node_type = str(row["node_type"] or "entity")
+                            results.append(
+                                {
+                                    "kind": "entity",
+                                    "title": node_val or f"实体 #{node_id}",
+                                    "subtitle": f"图谱实体 · {node_type}",
+                                    "plugin_id": PLUGIN,
+                                    "page": "dashboard",
+                                    "deep_link": {
+                                        "plugin": PLUGIN,
+                                        "page": "graph",
+                                        "node_id": node_id,
+                                        "query": node_val,
+                                        "umo": scope_filter,
+                                    },
+                                }
+                            )
+                    except sqlite3.Error:
+                        pass
+            finally:
+                conn.close()
+            return results[:bounded_limit]
+        except Exception:
+            return []
+
+    def get_series_scope_status(self, umo: str) -> dict:
+        """Return read-only status for a group/session UMO in the cross-plugin matrix."""
+        try:
+            scope = str(umo or "").strip()
+            conflicts = self.series_conflicts()
+            runtime_allowed = self.series_runtime_allowed()
+            enabled: bool | None = runtime_allowed
+            cfg = getattr(self, "config_manager", None)
+            if runtime_allowed and cfg is not None and scope:
+                whitelist_on = bool(cfg.get("access_control.whitelist_enabled", False))
+                if whitelist_on:
+                    allowed = {
+                        item.casefold()
+                        for item in parse_value_list(
+                            cfg.get("access_control.allowed_ids", "")
+                        )
+                    }
+                    parts = scope.split(":")
+                    group_id = parts[-1] if len(parts) >= 3 else ""
+                    enabled = bool(
+                        scope.casefold() in allowed
+                        or (group_id and group_id.casefold() in allowed)
+                    )
+
+            total_count = 0
+            activity_today = 0
+            persona_id = ""
+            day_bounds = _day_bounds("today")
+            start_ts, end_ts = day_bounds if day_bounds else (0.0, time.time() + 1.0)
+            conn = _open_ro_sqlite(self._series_memory_db_path())
+            if conn is not None and scope:
+                try:
+                    row = conn.execute(
+                        "SELECT COUNT(*), "
+                        "SUM(CASE WHEN COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) >= ? "
+                        "AND COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) < ? THEN 1 ELSE 0 END) "
+                        "FROM documents "
+                        "WHERE json_valid(metadata) "
+                        "AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active' "
+                        "AND json_extract(metadata, '$.session_id') = ?",
+                        (start_ts, end_ts, scope),
+                    ).fetchone()
+                    if row:
+                        total_count = int(row[0] or 0)
+                        activity_today = int(row[1] or 0)
+                    p_row = conn.execute(
+                        "SELECT json_extract(metadata, '$.persona_id') FROM documents "
+                        "WHERE json_valid(metadata) "
+                        "AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active' "
+                        "AND json_extract(metadata, '$.session_id') = ? "
+                        "AND COALESCE(json_extract(metadata, '$.persona_id'), '') != '' "
+                        "ORDER BY id DESC LIMIT 1",
+                        (scope,),
+                    ).fetchone()
+                    if p_row and p_row[0]:
+                        persona_id = str(p_row[0])
+                except sqlite3.Error:
+                    pass
+                finally:
+                    conn.close()
+
+            if conflicts:
+                summary = f"存在旧插件冲突（{conflicts[0]}）"
+            elif not getattr(self, "_series_enabled", False):
+                summary = f"未开启接入 · 现有 {total_count} 条记忆"
+            elif enabled is False:
+                summary = f"未在白名单 · 现有 {total_count} 条记忆"
+            else:
+                summary = f"共 {total_count} 条记忆 · 今日 +{activity_today}"
+
+            return {
+                "enabled": enabled,
+                "supported": False,
+                "persona_id": persona_id,
+                "activity_today": activity_today,
+                "summary": summary,
+                "version": f"ro:{int(bool(enabled))}:{total_count}:{activity_today}",
+            }
+        except Exception:
+            return {
+                "enabled": None,
+                "supported": False,
+                "persona_id": "",
+                "activity_today": None,
+                "summary": "群间记忆状态暂不可用",
+                "version": "0",
+            }
+
+    def get_journal_events(
+        self,
+        persona: str = "",
+        scope: str = "",
+        date: str = "today",
+        limit: int = 20,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list[dict]:
+        """Return today's important memory events for World's Living Journal feed."""
+        try:
+            ok, bounds = _resolve_time_window(date, start_ts, end_ts)
+            if not ok:
+                return []
+            try:
+                bounded_limit = max(1, min(int(limit), 50))
+            except (TypeError, ValueError):
+                bounded_limit = 20
+            persona_filter = str(persona or "").strip()
+            scope_filter = str(scope or "").strip()
+            if persona_filter in _UNBOUND_PERSONA_SENTINELS:
+                return []
+            if scope_filter and not persona_filter:
+                return []
+
+            conn = _open_ro_sqlite(self._series_memory_db_path())
+            if conn is None:
+                return []
+            events: list[dict] = []
+            try:
+                sql = (
+                    "SELECT id, content, metadata FROM documents "
+                    "WHERE json_valid(metadata) "
+                    "AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active' "
+                )
+                params: list[object] = []
+                if bounds is not None:
+                    sql += (
+                        "AND COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) >= ? "
+                        "AND COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) < ? "
+                    )
+                    params.extend(bounds)
+                if scope_filter:
+                    sql += "AND json_extract(metadata, '$.session_id') = ? "
+                    params.append(scope_filter)
+                if persona_filter:
+                    sql += "AND json_extract(metadata, '$.persona_id') = ? "
+                    params.append(persona_filter)
+                sql += (
+                    "ORDER BY COALESCE(CAST(json_extract(metadata, '$.create_time') AS REAL), 0) DESC, "
+                    "COALESCE(CAST(json_extract(metadata, '$.importance') AS REAL), 0) DESC, "
+                    "id DESC LIMIT ?"
+                )
+                params.append(bounded_limit)
+                for row in conn.execute(sql, params).fetchall():
+                    doc_id = str(row["id"])
+                    try:
+                        meta = json.loads(row["metadata"] or "{}")
+                    except (TypeError, ValueError):
+                        meta = {}
+                    mem_type = str(meta.get("memory_type") or "FACT").upper()
+                    try:
+                        imp = float(meta.get("importance") or 0.5)
+                    except (TypeError, ValueError):
+                        imp = 0.5
+                    is_high = (imp <= 1.0 and imp >= 0.75) or imp >= 7.5
+                    tone = (
+                        "warm"
+                        if is_high
+                        else "info"
+                        if mem_type in {"EVENT", "EPISODIC"}
+                        else "accent"
+                    )
+                    sess = str(meta.get("session_id") or "")
+                    sub_parts = [mem_type, f"记忆 #{doc_id}"]
+                    short_sess = _short_scope(sess)
+                    if short_sess:
+                        sub_parts.append(short_sess)
+                    events.append(
+                        {
+                            "id": f"memory:{doc_id}",
+                            "category": "memory",
+                            "source_label": "群间记忆",
+                            "tone": tone,
+                            "occurred_at": _iso_from_ts(meta.get("create_time")),
+                            "title": _compact_text(
+                                row["content"] or f"沉淀新记忆 #{doc_id}", 64
+                            ),
+                            "subtitle": " · ".join(sub_parts),
+                            "target_plugin": PLUGIN,
+                            "target_route": "dashboard",
+                            "target_id": doc_id,
+                        }
+                    )
+            except sqlite3.Error:
+                return []
+            finally:
+                conn.close()
+            return events
+        except Exception:
+            return []
 
     async def get_shared_evidence(
         self, scope, source_refs, *, purpose="reply", card_version=""
@@ -348,7 +927,7 @@ class SeriesMixin:
         await self._series_admin()
         from astrbot.api.web import request
 
-        identifier = request.args.get("id", "")
+        identifier = request.query.get("id", "")
         ready, error = await self._ensure_plugin_ready(wait=False)
         if not ready:
             return {"status": "error", "message": error}

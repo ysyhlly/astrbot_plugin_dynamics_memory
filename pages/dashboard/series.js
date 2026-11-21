@@ -8,7 +8,7 @@ const button = document.getElementById('series-refresh');
 let loading = false;
 
 async function refresh() {
-  if (loading) return;
+  if (loading || !status || !rows || !button) return;
   loading = true;
   button.disabled = true;
   setText(rows,'');
@@ -69,7 +69,5 @@ async function refresh() {
   } catch (error) { setText(status,msg('读取失败：{0}',error.message||error)); }
   finally { loading = false; button.disabled = false; }
 }
-button.addEventListener('click', refresh);
-document.getElementById('series-panel').addEventListener('toggle', event => {
-  if (event.target.open) refresh();
-});
+if (button) button.addEventListener('click', refresh);
+window.lmRefreshSeriesStatus = refresh;

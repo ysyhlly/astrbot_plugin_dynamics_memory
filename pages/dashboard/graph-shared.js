@@ -58,7 +58,10 @@
   };
 
   function isDark() {
-    return (document.documentElement.getAttribute("data-theme") || "light") === "dark";
+    var root = document.documentElement;
+    var uiTheme = root.getAttribute("data-ui-theme");
+    if (uiTheme === "night" || uiTheme === "day") return uiTheme === "night";
+    return (root.getAttribute("data-theme") || "light") === "dark";
   }
 
   function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
@@ -76,10 +79,41 @@
   }
 
   function hexToRgba(h, alpha) {
-    var v = String(h || "#000").replace("#", "").trim();
-    v = v.length === 3 ? v.split("").map(function(c) { return c + c; }).join("") : v.padEnd(6, "0").slice(0, 6);
-    var r = parseInt(v.slice(0, 2), 16), g = parseInt(v.slice(2, 4), 16), b = parseInt(v.slice(4, 6), 16);
-    return "rgba(" + r + "," + g + "," + b + "," + clamp(alpha, 0, 1) + ")";
+    var numAlpha = Number(alpha);
+    var a = Number.isFinite(numAlpha) ? clamp(numAlpha, 0, 1) : 1;
+    var raw = String(h || "").trim();
+    var rgbMatch = raw.match(
+      /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i
+    );
+    if (rgbMatch) {
+      var sr = Math.round(clamp(Number(rgbMatch[1]), 0, 255));
+      var sg = Math.round(clamp(Number(rgbMatch[2]), 0, 255));
+      var sb = Math.round(clamp(Number(rgbMatch[3]), 0, 255));
+      var srcAlpha = 1;
+      if (rgbMatch[4] != null) {
+        srcAlpha = rgbMatch[4].endsWith("%")
+          ? parseFloat(rgbMatch[4]) / 100
+          : Number(rgbMatch[4]);
+        srcAlpha = Number.isFinite(srcAlpha) ? clamp(srcAlpha, 0, 1) : 1;
+      }
+      return "rgba(" + sr + "," + sg + "," + sb + "," + clamp(a * srcAlpha, 0, 1) + ")";
+    }
+    var v = raw.replace(/^#/, "");
+    if (/^[0-9a-f]{3,4}$/i.test(v)) {
+      var hr = parseInt(v[0] + v[0], 16);
+      var hg = parseInt(v[1] + v[1], 16);
+      var hb = parseInt(v[2] + v[2], 16);
+      var ha = v.length === 4 ? parseInt(v[3] + v[3], 16) / 255 : 1;
+      return "rgba(" + hr + "," + hg + "," + hb + "," + clamp(a * ha, 0, 1) + ")";
+    }
+    if (/^[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(v)) {
+      var r = parseInt(v.slice(0, 2), 16);
+      var g = parseInt(v.slice(2, 4), 16);
+      var b = parseInt(v.slice(4, 6), 16);
+      var hexAlpha = v.length === 8 ? parseInt(v.slice(6, 8), 16) / 255 : 1;
+      return "rgba(" + r + "," + g + "," + b + "," + clamp(a * hexAlpha, 0, 1) + ")";
+    }
+    return "rgba(128,128,128," + a + ")";
   }
 
   function getPos(e, el) {

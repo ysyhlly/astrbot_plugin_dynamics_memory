@@ -226,8 +226,19 @@ export class MemoryPage {
         ? '<span class="type-tag cons-badge" title="' + esc(window.t("table.consolidatedTitle")) + '">' + window.t("table.consolidated", item.consolidated_count) + '</span> '
         : "";
       const lowQuality = item.summary_quality === "low";
-      const originTag = '<span class="origin-tag' + (lowQuality ? " is-low" : "") + '"' + (lowQuality ? ' title="' + esc(window.t("detail.qualityLow")) + '"' : "") + '>' + esc(originLabel(item.origin)) + '</span>';
-      html += '<td class="cell-summary"><div class="memory-summary-line">' + consBadge + '<button class="memory-open memory-summary-text" type="button" aria-label="' + esc(window.t("table.openMemory", item.memory_id)) + '">' + esc(item.summary || "") + '</button></div><div class="memory-summary-meta">' + originTag + '<span>' + esc(window.t("table.updated", item.updated_at || "--")) + '</span></div></td>';
+      const originTone = lowQuality
+        ? " is-low"
+        : (item.origin === "agent_memorize_tool" || item.origin === "source_resummarization")
+          ? " is-verified"
+          : item.origin === "memory_import"
+            ? " is-import"
+            : "";
+      const originTag = '<span class="origin-tag' + originTone + '"' + (lowQuality ? ' title="' + esc(window.t("detail.qualityLow")) + '"' : "") + '>' + esc(originLabel(item.origin)) + '</span>';
+      const confVal = Number(item.confidence);
+      const confTag = Number.isFinite(confVal) && item.confidence != null
+        ? '<span class="conf-tag is-conf">' + Math.round(Math.min(1, Math.max(0, confVal)) * 100) + '%</span>'
+        : '<span class="conf-tag is-' + impCls + '" aria-hidden="true">' + imp + '</span>';
+      html += '<td class="cell-summary"><div class="memory-summary-line">' + consBadge + '<button class="memory-open memory-summary-text" type="button" aria-label="' + esc(window.t("table.openMemory", item.memory_id)) + '">' + esc(item.summary || "") + '</button></div><div class="memory-summary-meta">' + originTag + confTag + '<span>' + esc(window.t("table.updated", item.updated_at || "--")) + '</span></div></td>';
       html += '<td class="cell-type"><span class="type-tag">' + esc(typeLabel(item.memory_type)) + '</span></td>';
       html += '<td class="cell-importance"><div class="importance-bar"><div class="importance-bar-track">';
       html += '<div class="importance-bar-fill ' + impCls + '" style="width:' + (impNum * 10) + '%"></div></div>';

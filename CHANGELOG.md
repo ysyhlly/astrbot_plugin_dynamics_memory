@@ -1,5 +1,11 @@
 # 更新日志
 
+## [0.2.0-rc.6] - 2026-11-21
+
+- 合并线上 phase5 提示词缓存优化：将静态反思模板、证据提取 `required_output` 与记忆合并 JSON schema 上提至 `system_prompt`，并为流式与非流式模型调用附带确定性 2 消息静态缓存锚点（`contexts`）。
+- 升级群间系列 v2 面板联动：支持联邦搜索（`series_search_items`）、群控矩阵只读状态（`get_series_scope_status`）、世界今日生活手账（`get_journal_events`）与共享 UI Kit 跨插件跳转定位。
+- 强化手账与联邦查询的角色隔离与日期时区边界：统一以 `UTC+8` 解析自然日并支持显式 `[start_ts, end_ts)` 区间透传，严格按角色过滤且禁止指定群未绑定角色时放宽为全角色查询。
+
 ## 0.2.0-rc.5 — 2026-11-20
 
 - 优化反思（reflection）链路前缀缓存（DM-1）：保持 `system_prompt` 完全静态，将 `current_date` 与重试反馈移至用户提示尾部。

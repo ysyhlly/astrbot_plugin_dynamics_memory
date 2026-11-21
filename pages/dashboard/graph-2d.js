@@ -651,9 +651,10 @@
     if (typeof window.MutationObserver === "function") {
       this._themeObserver = new MutationObserver(function() {
         self.renderer._bgCacheKey = null;
+        self.renderer._communityCacheKey = null;
         self.animator.wake();
       });
-      this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-style"] });
+      this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-ui-theme", "data-theme", "data-style"] });
     }
 
     this._initialized = true;

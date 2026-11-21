@@ -157,6 +157,11 @@ import {
       if (item.dataset.page === name) item.setAttribute("aria-current", "page");
       else item.removeAttribute("aria-current");
     });
+    const navMore = document.getElementById("nav-more");
+    if (navMore) {
+      navMore.open = false;
+      navMore.classList.toggle("has-active", name === "prompts" || name === "settings");
+    }
 
     document.querySelectorAll(".page").forEach(p => {
       p.classList.toggle("active", p.id === "page-" + name);
@@ -203,11 +208,32 @@ import {
   }
 
   function initSidebar() {
+    const navMore = document.getElementById("nav-more");
     document.querySelectorAll(".nav-item[data-page]").forEach(item => {
       item.addEventListener("click", () => {
+        if (navMore) navMore.open = false;
         switchPage(item.dataset.page);
       });
     });
+    if (navMore) {
+      document.addEventListener("click", (e) => {
+        if (navMore.open && !navMore.contains(e.target)) navMore.open = false;
+      });
+      navMore.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && navMore.open) {
+          e.preventDefault();
+          navMore.open = false;
+          navMore.querySelector("summary")?.focus();
+        } else if (navMore.open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+          const items = [...navMore.querySelectorAll(".nav-item[data-page]")];
+          if (!items.length) return;
+          e.preventDefault();
+          const idx = items.indexOf(document.activeElement);
+          const next = e.key === "ArrowDown" ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length;
+          items[next].focus();
+        }
+      });
+    }
 
     const langMenu = document.getElementById("lang-menu");
     document.querySelectorAll(".lang-option[data-lang]").forEach(option => {
@@ -384,6 +410,22 @@ import {
       commitScope(nextUmo, "shared");
     });
     const validPages = ["graph", "memory", "recall", "system", "prompts", "settings"];
+    window.addEventListener("dynamics-cmdk-deeplink", async (ev) => {
+      const item = ev.detail || {};
+      const link = item && typeof item.deep_link === "object" && item.deep_link ? item.deep_link : item;
+      const targetPage = validPages.includes(link.page) ? link.page : (link.memory_id != null ? "memory" : link.query ? "graph" : "");
+      if (link.umo) commitScope(link.umo, "shared");
+      if (targetPage) await switchPage(targetPage);
+      if (link.memory_id != null) {
+        peekPanel.renderMemory({ memory_id: Number(link.memory_id), summary: item.title || "" });
+      } else if (targetPage === "graph" && link.query) {
+        const input = document.getElementById("graph-query-input");
+        if (input) {
+          input.value = String(link.query);
+          document.getElementById("graph-search-btn")?.click();
+        }
+      }
+    });
     const loc = window.location || {};
     const requestedPage = new URLSearchParams(loc.search || "").get("page") || String(loc.hash || "").replace(/^#/, "");
     const initialPage = validPages.includes(requestedPage) ? requestedPage : "graph";

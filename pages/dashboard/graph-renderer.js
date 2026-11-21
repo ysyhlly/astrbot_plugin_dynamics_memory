@@ -465,7 +465,7 @@
 
   Renderer.prototype._drawCommunities = function(nodes, layout, animProgress, dark) {
     if (!layout || !nodes.length) return;
-    var viewportKey = this.viewport.scale.toFixed(3) + "|" +
+    var viewportKey = (dark ? "d" : "l") + "|" + this.viewport.scale.toFixed(3) + "|" +
       this.viewport.ox.toFixed(2) + "|" + this.viewport.oy.toFixed(2);
     var idle = layout._done && animProgress >= 1;
     if (!layout._done) this._communityCacheKey = null;

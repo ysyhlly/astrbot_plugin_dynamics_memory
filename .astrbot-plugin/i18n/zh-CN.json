@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "display_name": "群间记忆",
-    "short_desc": "拥有完整记忆生命周期的智能长期记忆插件",
-    "desc": "为 AstrBot 打造的、拥有完整记忆生命周期的智能长期记忆插件（v2.0 重构版）。"
+    "display_name": "群间记忆 · Dynamics Memory",
+    "short_desc": "群间系列长期记忆与原文证据库插件",
+    "desc": "群间系列长期记忆与证据库插件：提供完整记忆生命周期、BM25+向量+2D/3D 图谱混合召回、原文证据溯源与来源冲突审查。"
   },
   "config": {
     "bot_language": {

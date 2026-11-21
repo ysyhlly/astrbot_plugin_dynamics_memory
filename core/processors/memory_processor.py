@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import math
@@ -83,6 +84,14 @@ _CURRENT_DATE_LINE_RE = re.compile(
     r"(?m)^[^\S\n]*当前日期时间[:：]\s*\{current_date\}[^\S\n]*\r?\n?"
 )
 
+_CONVERSATION_HISTORY_MARKER_RE = re.compile(
+    r"(?m)^[^\S\n]*#\s*对话历史[^\S\n]*(?:\r?\n|$)"
+)
+
+_CURRENT_REQUEST_HEADER_TAIL_RE = re.compile(
+    r"(?m)(?:\r?\n)*^[^\S\n]*#\s*本次请求[^\S\n]*\s*$"
+)
+
 _SOURCE_CONSTRAINT_SUFFIX = (
     "\n来源约束：这些文字是已收到的用户发言或已确认发送的角色消息。"
     "用户声称发生的事仍是用户陈述；角色猜测仍是主观判断；"
@@ -99,18 +108,26 @@ _QUALITY_RETRY_GENERIC_REFERENCE_SUFFIX = (
 )
 
 
-def _render_reflection_user_prompt(
+def _render_reflection_prompts(
     template: str,
     conversation_text: str,
     current_date: str,
     *,
     has_source_event_id: bool = False,
     quality_feedback: str | None = None,
-) -> str:
-    """Render reflection user prompt with dynamic time and retry feedback at the tail.
+) -> tuple[str, str]:
+    """Split static reflection instructions from dynamic per-call conversation payload.
 
-    Keeps the leading static instructions + conversation block stable across retries
-    and across minute boundaries for upstream prefix caching.
+    Returns ``(static_template_prefix, user_prompt)``:
+    - When the template contains a ``# 对话历史`` marker ahead of ``{conversation}``
+      and the leading prefix contains no dynamic placeholders, everything before
+      ``# 对话历史`` (with any trailing ``# 本次请求`` heading trimmed) is returned
+      as ``static_template_prefix`` so callers can append it to ``system_prompt``
+      for cross-group and cross-retry prefix caching.
+    - Custom templates without ``# 对话历史`` (or with dynamic placeholders in the
+      leading prefix) fall back cleanly to ``("", rendered_user_prompt)``.
+    - Dynamic time (``{current_date}``) and retry ``quality_feedback`` always sit
+      at the tail of ``user_prompt``.
     """
     working = template
     append_current_date = False
@@ -133,7 +150,23 @@ def _render_reflection_user_prompt(
                 working = working[: last_match.start()].rstrip("\r\n")
                 append_current_date = True
 
-    prompt = working.replace("{conversation}", conversation_text).replace(
+    static_prefix = ""
+    dynamic_template = working
+    marker_match = _CONVERSATION_HISTORY_MARKER_RE.search(working)
+    if marker_match is not None:
+        raw_prefix = working[: marker_match.start()]
+        candidate_dynamic = working[marker_match.start() :]
+        candidate_prefix = _CURRENT_REQUEST_HEADER_TAIL_RE.sub("", raw_prefix).strip()
+        if (
+            candidate_prefix
+            and "{conversation}" not in candidate_prefix
+            and "{current_date}" not in candidate_prefix
+            and "{conversation}" in candidate_dynamic
+        ):
+            static_prefix = candidate_prefix
+            dynamic_template = candidate_dynamic
+
+    prompt = dynamic_template.replace("{conversation}", conversation_text).replace(
         "{current_date}", current_date
     )
     if has_source_event_id:
@@ -142,7 +175,57 @@ def _render_reflection_user_prompt(
         prompt += f"\n当前日期时间: {current_date}"
     if quality_feedback == "summary_generic_reference":
         prompt += _QUALITY_RETRY_GENERIC_REFERENCE_SUFFIX
+    return static_prefix, prompt
+
+
+def _render_reflection_user_prompt(
+    template: str,
+    conversation_text: str,
+    current_date: str,
+    *,
+    has_source_event_id: bool = False,
+    quality_feedback: str | None = None,
+) -> str:
+    """Backward-compatible wrapper returning only the dynamic reflection user prompt."""
+    _, prompt = _render_reflection_prompts(
+        template,
+        conversation_text,
+        current_date,
+        has_source_event_id=has_source_event_id,
+        quality_feedback=quality_feedback,
+    )
     return prompt
+
+
+def build_cache_anchor_contexts(
+    system_prompt: str | None,
+    *,
+    task: str = "dynamics_memory",
+) -> list[dict[str, str]]:
+    """Build a tiny deterministic 2-message static anchor keyed only on system_prompt hash.
+
+    Enables implicit prefix caching on Gemini 3.8 Flash (which misses when contexts=[]
+    and contents[0] changes every call) while remaining compatible with DeepSeek, OpenAI,
+    and stock AstrBot providers.
+    """
+    text = str(system_prompt or "")
+    if not text.strip():
+        return []
+    sha12 = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return [
+        {"role": "user", "content": f"[cache_anchor task={task} prefix={sha12}]"},
+        {"role": "assistant", "content": "OK"},
+    ]
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+    return name in parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    )
 
 
 def _extract_http_status(exc: BaseException) -> int | None:
@@ -532,16 +615,19 @@ class MemoryProcessor:
                         provider_id = str(raw_id)[:128] if raw_id else "unknown"
                     except Exception:
                         provider_id = "unknown"
-                    request_kwargs = {"prompt": prompt, "system_prompt": system_prompt}
-                    try:
-                        parameters = inspect.signature(provider.text_chat).parameters
-                    except (ValueError, TypeError):
-                        parameters = {}
-                    if "request_max_retries" in parameters or any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD
-                        for p in parameters.values()
-                    ):
+                    request_kwargs: dict[str, Any] = {
+                        "prompt": prompt,
+                        "system_prompt": system_prompt,
+                    }
+                    anchor_contexts = build_cache_anchor_contexts(
+                        system_prompt, task="dynamics_memory"
+                    )
+                    if _accepts_kwarg(provider.text_chat, "request_max_retries"):
                         request_kwargs["request_max_retries"] = 1
+                    if anchor_contexts and _accepts_kwarg(
+                        provider.text_chat, "contexts"
+                    ):
+                        request_kwargs["contexts"] = anchor_contexts
                     async with asyncio.timeout(attempt_timeout):
                         stream_mode = getattr(self, "config", {}).get(
                             "llm_stream_mode", "auto"
@@ -581,8 +667,16 @@ class MemoryProcessor:
                                 self._stream_only_providers.add(provider_key)
                                 use_stream = True
                         if use_stream:
+                            stream_kwargs: dict[str, Any] = {
+                                "prompt": prompt,
+                                "system_prompt": system_prompt,
+                            }
+                            if anchor_contexts and _accepts_kwarg(
+                                provider.text_chat_stream, "contexts"
+                            ):
+                                stream_kwargs["contexts"] = anchor_contexts
                             async for chunk in provider.text_chat_stream(
-                                prompt=prompt, system_prompt=system_prompt
+                                **stream_kwargs
                             ):
                                 if (
                                     not getattr(chunk, "is_chunk", True)
@@ -691,9 +785,9 @@ class MemoryProcessor:
 
         # 2. 选择合适的提示词模板（每次从 PromptManager 读取，确保 WebUI 保存后立即生效）
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误；
-        # 动态时间与低质量重试反馈统一放在 user prompt 末尾，保持前缀稳定。
+        # 静态规则/输出格式/示例拆分进入 system_prompt，动态对话、时间与重试反馈留在 user prompt。
         current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        prompt = _render_reflection_user_prompt(
+        static_template_prefix, prompt = _render_reflection_prompts(
             self._get_chat_prompt(is_group_chat),
             conversation_text,
             current_date,
@@ -711,8 +805,15 @@ class MemoryProcessor:
             )
             logger.debug(f"[MemoryProcessor] Prompt 模板长度={len(prompt)}")
 
-            # 构建严格静态的 system_prompt（嵌入人格提示；重试反馈不写入 system_prompt）
-            system_prompt = await self._build_system_prompt_with_persona(persona_id)
+            # 构建严格静态的 system_prompt（人格提示 + 静态反思规则；重试反馈不写入 system_prompt）
+            base_system_prompt = await self._build_system_prompt_with_persona(
+                persona_id
+            )
+            system_prompt = (
+                f"{base_system_prompt.rstrip()}\n\n{static_template_prefix}"
+                if static_template_prefix
+                else base_system_prompt
+            )
             logger.debug(f"[MemoryProcessor] System Prompt: {system_prompt[:200]}...")
 
             llm_response_text = await self._call_llm_with_retry(
@@ -916,14 +1017,14 @@ class MemoryProcessor:
         system_prompt = (
             "你是记忆整理助手。把多条关于同一主题或会话的零散记忆合并为一条精炼、"
             "信息无损的记忆摘要。保留所有关键事实与具体细节，去重并消除相互矛盾，"
-            "避免泛化和丢失专有名词。只输出 JSON，不要输出任何其他内容。"
+            "避免泛化和丢失专有名词。只输出 JSON，不要输出任何其他内容。\n\n"
+            "请将输入的记忆合并为一条记忆，按如下 JSON 格式输出：\n"
+            '{"summary": "合并后的精炼摘要", "key_facts": ["事实1", "事实2"], '
+            '"topics": ["主题1"], "importance": 0.5}'
         )
         prompt = (
             f"以下是一组需要合并的记忆（共 {len(items)} 条）：\n"
-            f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
-            "请将它们合并为一条记忆，按如下 JSON 格式输出：\n"
-            '{"summary": "合并后的精炼摘要", "key_facts": ["事实1", "事实2"], '
-            '"topics": ["主题1"], "importance": 0.5}'
+            f"{json.dumps(items, ensure_ascii=False, indent=2)}"
         )
 
         text = await self._call_llm_with_retry(

@@ -33,14 +33,22 @@
             <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
             <span data-i18n="nav.system">System</span>
           </button>
-          <button class="nav-item" data-page="prompts" data-i18n-aria="nav.prompts">
-            <i data-lucide="braces" aria-hidden="true"></i>
-            <span data-i18n="nav.prompts">Prompts</span>
-          </button>
-          <button class="nav-item" data-page="settings" data-i18n-aria="nav.settings">
-            <i data-lucide="palette" aria-hidden="true"></i>
-            <span data-i18n="nav.settings">Settings</span>
-          </button>
+          <details class="nav-more" id="nav-more">
+            <summary class="nav-more-trigger" aria-haspopup="menu">
+              <span data-series-text="更多与运维">更多与运维</span>
+              <span class="nav-more-caret" aria-hidden="true">▾</span>
+            </summary>
+            <div class="nav-more-menu" role="menu">
+              <button class="nav-item" data-page="prompts" data-i18n-aria="nav.prompts" role="menuitem">
+                <i data-lucide="braces" aria-hidden="true"></i>
+                <span data-i18n="nav.prompts">Prompts</span>
+              </button>
+              <button class="nav-item" data-page="settings" data-i18n-aria="nav.settings" role="menuitem">
+                <i data-lucide="palette" aria-hidden="true"></i>
+                <span data-i18n="nav.settings">Settings</span>
+              </button>
+            </div>
+          </details>
         </nav>
         <div class="series-nav-tools">
           <button type="button" class="series-theme" id="theme-toggle" aria-pressed="false"><span id="theme-label" data-series-text="日间模式">日间模式</span><span class="series-switch" aria-hidden="true"></span></button>
@@ -49,18 +57,7 @@
 
       <!-- Main Content -->
       <main class="main-content" id="workspace" tabindex="-1">
-        <div class="dm-top-utility">
-          <section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态"><p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p></section>
-          <details id="series-panel" class="card dm-series-drawer">
-            <summary data-series-text="系列接入与来源冲突">系列接入与来源冲突</summary>
-            <div class="dm-series-drawer-body">
-              <p data-series-text="记忆保存事实与证据，世界维护设定和生活，学习维护已审查的行为。">记忆保存事实与证据，世界维护设定和生活，学习维护已审查的行为。</p>
-              <button class="btn btn-secondary btn-sm" id="series-refresh" type="button" data-series-text="刷新接入状态">刷新接入状态</button>
-              <p id="series-status" role="status" aria-live="polite" data-series-text="展开后可检查接入状态。">展开后可检查接入状态。</p>
-              <div id="series-conflicts"></div>
-            </div>
-          </details>
-        </div>
+        <section id="dynamics-series-panel" aria-label="互通插件状态" data-series-aria-label="互通插件状态"><p class="sp-feedback" role="status" data-series-text="正在读取互通插件…">正在读取互通插件…</p></section>
 
         <!-- 插件初始化/Provider 未就绪时的全局指引，就绪后自动收起 -->
         <div id="not-ready-banner" class="request-feedback" role="status" aria-live="polite" hidden>
@@ -326,6 +323,20 @@
               <div class="system-panel-title" data-i18n="system.sessionsTitle">Sessions</div>
               <div class="session-list" id="session-list"></div>
             </div>
+            <div class="system-panel mb-6" id="system-series-panel">
+              <div class="system-panel-header">
+                <div class="system-panel-title" data-series-text="系列接入与来源冲突">系列接入与来源冲突</div>
+                <div class="system-panel-tools">
+                  <details class="dm-info-tip">
+                    <summary aria-label="说明" title="说明">i</summary>
+                    <p data-series-text="记忆保存事实与证据，世界维护设定和生活，学习维护已审查的行为。">记忆保存事实与证据，世界维护设定和生活，学习维护已审查的行为。</p>
+                  </details>
+                  <button class="btn btn-secondary btn-sm" id="series-refresh" type="button" data-series-text="刷新接入状态">刷新接入状态</button>
+                </div>
+              </div>
+              <p id="series-status" class="dm-series-status" role="status" aria-live="polite" data-series-text="展开后可检查接入状态。">展开后可检查接入状态。</p>
+              <div id="series-conflicts" class="dm-series-conflicts"></div>
+            </div>
             <div class="system-panel">
               <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
               <div class="backup-list" id="backup-list"></div>
@@ -440,7 +451,7 @@
     <!-- Toast -->
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script defer src="./assets/graph.min.js"></script>
+    <script defer src="./assets/graph.min.js?v=round2.2"></script>
     <script type="module" src="./assets/app.min.js"></script>
   <script type="module" src="./series.js"></script>
 </body>

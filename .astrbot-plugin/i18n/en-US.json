@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "display_name": "群间记忆",
-    "short_desc": "Intelligent long-term memory for AstrBot",
-    "desc": "An intelligent long-term memory plugin with hybrid retrieval (BM25 + vector + graph), WebUI management, and dynamic lifecycle. Supports session/persona isolation, importance decay, and auto-cleanup."
+    "display_name": "Dynamics Memory",
+    "short_desc": "Long-term memory and source evidence store for the Chat Dynamics series",
+    "desc": "Long-term memory plugin for the Chat Dynamics series with full memory lifecycle, hybrid retrieval (BM25 + vector + 2D/3D graph), source evidence verification, and conflict review."
   },
   "config": {
     "bot_language": {

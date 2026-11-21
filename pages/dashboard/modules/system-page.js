@@ -29,6 +29,7 @@ export class SystemPage {
       this.render(data);
       /* 子面板与统计互不依赖：失败不影响其余内容，也不必在每次重绘时重复请求 */
       await Promise.all([this.fetchAndRenderBackups(), this.fetchConsolidation()]);
+      window.lmRefreshSeriesStatus?.();
     } catch (e) {
       this.state._systemError = e.message || window.t("system.fetchFailed");
       this.updateFeedback();
