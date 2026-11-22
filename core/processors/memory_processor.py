@@ -16,6 +16,12 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ...series_panels import (
+    is_provider_budget_busy_error,
+    resolve_series_provider,
+    resolve_series_timezone,
+    series_llm_call,
+)
 from ..astrbot_compat import get_using_provider
 from ..base.exceptions import LowQualityMemoryError
 from ..base.usage_metrics import record_llm_usage
@@ -350,6 +356,20 @@ class MemoryProcessor:
             except Exception:
                 pass
 
+        # 回退到主控共享 reply_provider
+        shared_provider_id = resolve_series_provider(self.context, "", role="reply")
+        if shared_provider_id:
+            try:
+                provider = self.context.get_provider_by_id(shared_provider_id)
+                if (
+                    provider
+                    and getattr(provider, "is_systemone_provider", False) is not True
+                    and callable(getattr(provider, "text_chat", None))
+                ):
+                    return provider
+            except Exception:
+                pass
+
         # 回退到AstrBot当前默认Provider
         try:
             provider = await get_using_provider(self.context)
@@ -436,6 +456,13 @@ class MemoryProcessor:
 {"summary": "摘要", "topics": ["主题"], "key_facts": ["事实"], "participants": ["参与者"], "sentiment": "neutral", "importance": 0.5}
 """
 
+    def _current_date_str(self) -> str:
+        tz = resolve_series_timezone(getattr(self, "context", None))
+        try:
+            return datetime.now(tz).strftime("%Y-%m-%d %H:%M")
+        except TypeError:
+            return datetime.now().strftime("%Y-%m-%d %H:%M")
+
     async def _build_system_prompt_with_persona(self, persona_id: str | None) -> str:
         """
         构建包含人格提示的 system_prompt
@@ -446,7 +473,7 @@ class MemoryProcessor:
         Returns:
             str: 包含人格提示的 system_prompt
         """
-        current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+        current_date = self._current_date_str()
 
         # 尝试从 PromptManager 获取基础 system prompt
         try:
@@ -648,7 +675,13 @@ class MemoryProcessor:
                         response = None
                         if not use_stream:
                             try:
-                                response = await provider.text_chat(**request_kwargs)
+                                response = await series_llm_call(
+                                    getattr(self, "context", None),
+                                    provider_id,
+                                    "astrbot_plugin_dynamics_memory",
+                                    purpose,
+                                    lambda: provider.text_chat(**request_kwargs),
+                                )
                             except Exception as exc:
                                 from ..utils.api_failure import (
                                     terminal_provider_failure,
@@ -656,7 +689,8 @@ class MemoryProcessor:
 
                                 message = str(exc).lower()
                                 if (
-                                    terminal_provider_failure(exc)
+                                    is_provider_budget_busy_error(exc)
+                                    or terminal_provider_failure(exc)
                                     or stream_mode != "auto"
                                     or (
                                         "non-stream" not in message
@@ -675,18 +709,30 @@ class MemoryProcessor:
                                 provider.text_chat_stream, "contexts"
                             ):
                                 stream_kwargs["contexts"] = anchor_contexts
-                            async for chunk in provider.text_chat_stream(
-                                **stream_kwargs
-                            ):
-                                if (
-                                    not getattr(chunk, "is_chunk", True)
-                                    and chunk.completion_text
+
+                            async def _invoke_stream():
+                                final_chunk = None
+                                async for chunk in provider.text_chat_stream(
+                                    **stream_kwargs
                                 ):
-                                    response = chunk
-                            if response is None:
-                                raise RuntimeError(
-                                    "流式调用未返回完整响应，已按失败处理"
-                                )
+                                    if (
+                                        not getattr(chunk, "is_chunk", True)
+                                        and chunk.completion_text
+                                    ):
+                                        final_chunk = chunk
+                                if final_chunk is None:
+                                    raise RuntimeError(
+                                        "流式调用未返回完整响应，已按失败处理"
+                                    )
+                                return final_chunk
+
+                            response = await series_llm_call(
+                                getattr(self, "context", None),
+                                provider_id,
+                                "astrbot_plugin_dynamics_memory",
+                                purpose,
+                                _invoke_stream,
+                            )
                     logger.info(
                         "[MemoryProcessor] background_call call_id=%s purpose=%s "
                         "provider_id=%s effort=provider_configured deadline_s=%.1f attempt=1 "
@@ -722,7 +768,9 @@ class MemoryProcessor:
                 except Exception as e:
                     from ..utils.api_failure import terminal_provider_failure
 
-                    if terminal_provider_failure(e):
+                    if is_provider_budget_busy_error(e):
+                        outcome = "budget_busy"
+                    elif terminal_provider_failure(e):
                         outcome = "policy_refusal"
                     elif isinstance(e, (TimeoutError, asyncio.TimeoutError)):
                         outcome = (
@@ -786,7 +834,7 @@ class MemoryProcessor:
         # 2. 选择合适的提示词模板（每次从 PromptManager 读取，确保 WebUI 保存后立即生效）
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误；
         # 静态规则/输出格式/示例拆分进入 system_prompt，动态对话、时间与重试反馈留在 user prompt。
-        current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+        current_date = self._current_date_str()
         static_template_prefix, prompt = _render_reflection_prompts(
             self._get_chat_prompt(is_group_chat),
             conversation_text,

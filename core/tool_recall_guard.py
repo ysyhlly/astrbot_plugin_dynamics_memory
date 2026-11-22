@@ -15,6 +15,7 @@ from .evidence_projection import conversation_row_hash
 from .memory_scope import (
     adapter_access,
     adapter_visible,
+    is_event_excluded_by_series,
     is_event_memory_allowed,
     memory_metadata_matches_policy,
     resolve_memory_access_policy,
@@ -131,6 +132,7 @@ def make_memory_source_validator(
             or getattr(plugin.initializer, "memory_engine", None) is not engine
             or not plugin.series_runtime_allowed()
             or getattr(event, "unified_msg_origin", None) != frozen_request_scope["umo"]
+            or is_event_excluded_by_series(getattr(plugin, "context", None), event)
             or not is_event_memory_allowed(plugin.config_manager, event)
         ):
             return False

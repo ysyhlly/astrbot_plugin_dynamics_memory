@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..series_panels import is_series_group_excluded, resolve_series_timezone
 from .memory_scope import parse_value_list
 from .memory_source import serialize_source_messages
 
@@ -70,21 +71,22 @@ _UNBOUND_PERSONA_SENTINELS = frozenset({"__none__", "[%None]"})
 
 
 def _day_bounds(
-    date_str: str, *, now_ts: float | None = None
+    date_str: str, *, now_ts: float | None = None, tz=None
 ) -> tuple[float, float] | None:
+    zone = tz or _TZ_SHANGHAI
     raw = str(date_str or "").strip().lower()
     if not raw or raw == "today":
         stamp = time.time() if now_ts is None else float(now_ts)
-        now_local = datetime.fromtimestamp(stamp, tz=_TZ_SHANGHAI)
+        now_local = datetime.fromtimestamp(stamp, tz=zone)
         start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     else:
         try:
             parsed = datetime.strptime(raw, "%Y-%m-%d")
         except ValueError:
             return None
-        start = parsed.replace(tzinfo=_TZ_SHANGHAI)
+        start = parsed.replace(tzinfo=zone)
     start_ts = start.timestamp()
-    return start_ts, start_ts + 86400.0
+    return start_ts, (start + timedelta(days=1)).timestamp()
 
 
 def _resolve_time_window(
@@ -93,6 +95,7 @@ def _resolve_time_window(
     end_ts: float | None = None,
     *,
     now_ts: float | None = None,
+    tz=None,
 ) -> tuple[bool, tuple[float, float] | None]:
     if start_ts is not None or end_ts is not None:
         if (
@@ -110,7 +113,7 @@ def _resolve_time_window(
     raw = str(date_str or "").strip().lower()
     if raw in {"all", "*"}:
         return True, None
-    bounds = _day_bounds(raw, now_ts=now_ts)
+    bounds = _day_bounds(raw, now_ts=now_ts, tz=tz)
     if bounds is None:
         return False, None
     return True, bounds
@@ -525,9 +528,11 @@ class SeriesMixin:
             scope = str(umo or "").strip()
             conflicts = self.series_conflicts()
             runtime_allowed = self.series_runtime_allowed()
-            enabled: bool | None = runtime_allowed
+            ctx = getattr(self, "context", None)
+            excluded_by_core = bool(scope and is_series_group_excluded(ctx, umo=scope))
+            enabled: bool | None = runtime_allowed and not excluded_by_core
             cfg = getattr(self, "config_manager", None)
-            if runtime_allowed and cfg is not None and scope:
+            if enabled and cfg is not None and scope:
                 whitelist_on = bool(cfg.get("access_control.whitelist_enabled", False))
                 if whitelist_on:
                     allowed = {
@@ -546,7 +551,7 @@ class SeriesMixin:
             total_count = 0
             activity_today = 0
             persona_id = ""
-            day_bounds = _day_bounds("today")
+            day_bounds = _day_bounds("today", tz=resolve_series_timezone(ctx))
             start_ts, end_ts = day_bounds if day_bounds else (0.0, time.time() + 1.0)
             conn = _open_ro_sqlite(self._series_memory_db_path())
             if conn is not None and scope:
@@ -582,6 +587,8 @@ class SeriesMixin:
 
             if conflicts:
                 summary = f"存在旧插件冲突（{conflicts[0]}）"
+            elif excluded_by_core:
+                summary = f"主控排除 · 现有 {total_count} 条记忆"
             elif not getattr(self, "_series_enabled", False):
                 summary = f"未开启接入 · 现有 {total_count} 条记忆"
             elif enabled is False:
@@ -592,6 +599,7 @@ class SeriesMixin:
             return {
                 "enabled": enabled,
                 "supported": False,
+                "excluded_by_core": excluded_by_core,
                 "persona_id": persona_id,
                 "activity_today": activity_today,
                 "summary": summary,
@@ -618,7 +626,8 @@ class SeriesMixin:
     ) -> list[dict]:
         """Return today's important memory events for World's Living Journal feed."""
         try:
-            ok, bounds = _resolve_time_window(date, start_ts, end_ts)
+            tz = resolve_series_timezone(getattr(self, "context", None))
+            ok, bounds = _resolve_time_window(date, start_ts, end_ts, tz=tz)
             if not ok:
                 return []
             try:

@@ -32,6 +32,7 @@ from .evidence_view import EvidenceViewService
 from .memory_scope import (
     adapter_access,
     classify_umo,
+    is_event_excluded_by_series,
     is_event_memory_allowed,
     memory_metadata_matches_policy,
     resolve_memory_access_policy,
@@ -972,7 +973,9 @@ class PluginHelpersMixin:
         event = ScopeEvent(scope, actor_id)
         timings = _SCOPE_RECALL_TIMINGS.get()
         started = time.monotonic()
-        if not is_event_memory_allowed(self.config_manager, event):
+        if is_event_excluded_by_series(
+            getattr(self, "context", None), event
+        ) or not is_event_memory_allowed(self.config_manager, event):
             return False
         if timings is not None:
             timings["scope_memory_policy"] = int((time.monotonic() - started) * 1000)
@@ -1093,10 +1096,21 @@ class PluginHelpersMixin:
             provider_id = str(raw_provider_id)[:128] if raw_provider_id else "unknown"
         except Exception:
             provider_id = "unknown"
+        from ..series_panels import is_provider_budget_busy_error, series_llm_call
+
         call_id = uuid.uuid4().hex[:12]
         started = time.monotonic()
         try:
-            response = await asyncio.wait_for(provider.text_chat(**kwargs), timeout=90)
+            response = await asyncio.wait_for(
+                series_llm_call(
+                    getattr(self, "context", None),
+                    provider_id,
+                    "astrbot_plugin_dynamics_memory",
+                    "evidence_derivation",
+                    lambda: provider.text_chat(**kwargs),
+                ),
+                timeout=90,
+            )
         except asyncio.CancelledError:
             logger.info(
                 "[LivingMemory] background_call call_id=%s purpose=evidence_derivation "
@@ -1110,7 +1124,9 @@ class PluginHelpersMixin:
         except Exception as exc:
             from .utils.api_failure import terminal_provider_failure
 
-            if terminal_provider_failure(exc):
+            if is_provider_budget_busy_error(exc):
+                outcome = "budget_busy"
+            elif terminal_provider_failure(exc):
                 outcome = "policy_refusal"
             elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
                 outcome = "timeout"

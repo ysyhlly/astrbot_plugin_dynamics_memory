@@ -10,7 +10,11 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.platform import MessageType
 
-from ..memory_scope import is_event_memory_allowed, is_suspicious_session_id
+from ..memory_scope import (
+    is_event_excluded_by_series,
+    is_event_memory_allowed,
+    is_suspicious_session_id,
+)
 
 if TYPE_CHECKING:
     from ..base.config_manager import ConfigManager
@@ -26,6 +30,7 @@ class GroupCapture:
         config_manager: "ConfigManager",
         conversation_manager: "ConversationManager",
         message_utils: "MessageUtils",
+        context=None,
     ):
         """
         初始化群聊消息捕获模块
@@ -34,10 +39,12 @@ class GroupCapture:
             config_manager: 配置管理器
             conversation_manager: 会话管理器
             message_utils: 消息处理工具
+            context: 可选 AstrBot 上下文（用于检查主控 exclude_groups）
         """
         self.config_manager = config_manager
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
+        self.context = context
 
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """Capture all group messages for memory storage"""
@@ -51,7 +58,9 @@ class GroupCapture:
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             return
 
-        if not is_event_memory_allowed(self.config_manager, event):
+        if is_event_excluded_by_series(
+            getattr(self, "context", None), event
+        ) or not is_event_memory_allowed(self.config_manager, event):
             return
 
         # 群聊中 Bot 自己的消息由 handle_memory_reflection 负责写入，此处跳过

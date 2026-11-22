@@ -13,7 +13,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
-from ..series_panels import inherit_provider
+from ..series_panels import resolve_series_provider
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
 from ..storage.sqlite_connection import open_connection, resolve_journal_mode
@@ -298,9 +298,11 @@ class PluginInitializer(InitializerFaissMixin):
 
         # 初始化 LLM Provider
         self.llm_provider = None
-        llm_id = self.config_manager.get(
-            "provider_settings.llm_provider_id"
-        ) or inherit_provider("", self.context, role="reply")
+        llm_id = resolve_series_provider(
+            self.context,
+            str(self.config_manager.get("provider_settings.llm_provider_id") or ""),
+            role="reply",
+        )
         if llm_id:
             provider = self._get_provider_by_id(llm_id, silent=silent)
             if (
@@ -667,9 +669,11 @@ class PluginInitializer(InitializerFaissMixin):
         # MemoryProcessor 不直接持有 llm_provider 实例引用，而是在每次调用时
         # 通过 AstrBot 上下文动态解析 Provider，避免宿主重建 Provider 后旧实例
         # 的 httpx client 被关闭（"Cannot send a request..."）。
-        llm_id = self.config_manager.get(
-            "provider_settings.llm_provider_id"
-        ) or inherit_provider("", self.context, role="reply")
+        llm_id = resolve_series_provider(
+            self.context,
+            str(self.config_manager.get("provider_settings.llm_provider_id") or ""),
+            role="reply",
+        )
         self.memory_processor = MemoryProcessor(
             self.context,
             llm_provider=llm_id if llm_id else None,

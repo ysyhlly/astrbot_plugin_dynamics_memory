@@ -64,7 +64,7 @@ class EventHandler:
         # 初始化子模块
         self._message_utils = MessageUtils(config_manager, conversation_manager)
         self._group_capture = GroupCapture(
-            config_manager, conversation_manager, self._message_utils
+            config_manager, conversation_manager, self._message_utils, context=context
         )
         # 后台存储任务跟踪
         self._storage_tasks: set[asyncio.Task] = set()

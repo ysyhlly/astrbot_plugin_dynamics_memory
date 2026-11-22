@@ -25,6 +25,7 @@ from ...storage.conversation_summary_progress import (
 )
 from ..memory_scope import (
     classify_umo,
+    is_event_excluded_by_series,
     is_event_memory_allowed,
     is_suspicious_session_id,
     resolve_memory_write_scope,
@@ -283,7 +284,9 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         工具调用轮次的助手文字由本方法单独写入会话库（不触发后台总结），
         因此这类轮次也返回 None。
         """
-        if not is_event_memory_allowed(self.config_manager, event):
+        if is_event_excluded_by_series(
+            getattr(self, "context", None), event
+        ) or not is_event_memory_allowed(self.config_manager, event):
             logger.debug("当前事件不在记忆白名单中，跳过记忆反思")
             return None
 

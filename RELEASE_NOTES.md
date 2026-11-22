@@ -1,4 +1,10 @@
-# astrbot_plugin_dynamics_memory 0.2.0-rc.6
+# astrbot_plugin_dynamics_memory 0.2.0-rc.7
+
+## [0.2.0-rc.7] - 2026-11-22
+
+- 接入全系列共享 `ProviderBudget` 并发池与遥测统计（覆盖 `memory_processor` 非流式/流式调用及 `plugin_helpers_mixin` 证据提炼），遇队列繁忙可安全降级。
+- 下沉主控共享配置（SSOT）：今日手账与反思日边界统一解析共享时区；模型选择支持主控 `reply_provider` 兜底；捕获、召回、反思与总控矩阵全面联动 `exclude_groups` 排除护栏。
+- 同步按语言拆包的 `series-messages.js` 轻加载器（`series-messages-{en,ja,ru}.js` 按需懒加载）及统一 `series_panels.py`，大幅降低仪表盘首屏体积。
 
 ## [0.2.0-rc.6] - 2026-11-21
 

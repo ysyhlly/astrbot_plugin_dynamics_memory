@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from ..series_panels import is_series_group_excluded
+
 GLOBAL_MEMORY_SCOPE = "livingmemory:global"
 
 
@@ -213,7 +215,9 @@ async def resolve_event_memory_access(
     Returns:
         白名单不通过时 ``allowed=False``，其余字段为 None。
     """
-    if not is_event_memory_allowed(config, event):
+    if is_event_excluded_by_series(context, event) or not is_event_memory_allowed(
+        config, event
+    ):
         return EventMemoryAccess(allowed=False, persona_id=None, scope=None)
     persona_id = None
     if _config_get(config, "filtering_settings.use_persona_filtering", True):
@@ -227,8 +231,21 @@ async def resolve_event_memory_access(
     )
 
 
-def is_event_memory_allowed(config: Any, event: Any) -> bool:
-    """Apply the plugin-level allowlist consistently to every entry point."""
+def is_event_excluded_by_series(context: Any, event: Any) -> bool:
+    """Return True if chat_dynamics excludes this event's UMO or group_id."""
+    if context is None or event is None:
+        return False
+    session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
+    group_id = _event_value(event, "get_group_id", "group_id")
+    return is_series_group_excluded(context, umo=session_id, group_id=group_id)
+
+
+def is_event_memory_allowed(config: Any, event: Any, context: Any = None) -> bool:
+    """Apply the plugin-level allowlist and core exclude_groups guard consistently."""
+    if is_event_excluded_by_series(context, event):
+        return False
+    session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
+    group_id = _event_value(event, "get_group_id", "group_id")
     if not _config_get(config, "access_control.whitelist_enabled", False):
         return True
     allowed = {
@@ -242,8 +259,6 @@ def is_event_memory_allowed(config: Any, event: Any) -> bool:
 
     sender_id = _event_value(event, "get_sender_id", "sender_id")
     platform = _event_value(event, "get_platform_name", "platform")
-    session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
-    group_id = _event_value(event, "get_group_id", "group_id")
     identity = resolve_event_identity(config, event)
     candidates = {
         sender_id,

@@ -18,6 +18,7 @@ from astrbot.core.agent.message import TextPart
 from ..memory_scope import (
     classify_umo,
     current_adapter_access,
+    is_event_excluded_by_series,
     is_event_memory_allowed,
     is_suspicious_session_id,
     resolve_memory_access_policy,
@@ -121,7 +122,9 @@ class MemoryRecall:
     ):
         """Query and inject long-term memory before LLM request"""
         try:
-            if not is_event_memory_allowed(self.config_manager, event):
+            if is_event_excluded_by_series(
+                getattr(self, "context", None), event
+            ) or not is_event_memory_allowed(self.config_manager, event):
                 logger.debug("[LMRecall] route=policy outcome=denied")
                 return
             session_id = str(getattr(event, "unified_msg_origin", "") or "").strip()

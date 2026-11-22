@@ -9,7 +9,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.event.filter import CustomFilter
 from astrbot.api.platform import MessageType
 
-from .memory_scope import is_event_memory_allowed
+from .memory_scope import is_event_excluded_by_series, is_event_memory_allowed
 from .narrative_api import is_managed_event
 
 SESSION_PLUGIN_NAMES = (
@@ -165,7 +165,9 @@ class PassiveGroupCaptureFilter(CustomFilter):
         if not self._passes_global_whitelist(event, cfg):
             return False
 
-        if not is_event_memory_allowed(plugin.config_manager, event):
+        if is_event_excluded_by_series(
+            getattr(plugin, "context", None), event
+        ) or not is_event_memory_allowed(plugin.config_manager, event):
             return False
 
         plugin._schedule_passive_group_capture(event)
