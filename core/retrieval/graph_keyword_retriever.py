@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
 from ...storage.graph_store import GraphStore
 from ..processors.text_processor import TextProcessor
+
+_DEFAULT_MAX_GRAPH_TOKENS = 12
 
 
 @dataclass(slots=True)
@@ -37,6 +40,28 @@ class GraphKeywordRetriever:
             min(2, int(self.config.get("graph_expansion_hops", 1))),
         )
         self.second_hop_weight = float(self.config.get("graph_second_hop_weight", 0.4))
+        self.max_query_tokens = max(
+            1,
+            int(self.config.get("graph_max_query_tokens", _DEFAULT_MAX_GRAPH_TOKENS)),
+        )
+
+    @staticmethod
+    def _select_node_tokens(
+        tokens: list[str], max_tokens: int, *, query: str = ""
+    ) -> list[str]:
+        """Prioritize longer, higher-signal tokens and cap count to bound query cost."""
+        q_clean = str(query or "").strip()
+        raw_items = list(tokens)
+        if 2 <= len(q_clean) <= 12 and not any(ch.isspace() for ch in q_clean):
+            raw_items.insert(0, q_clean)
+        deduped = list(dict.fromkeys(str(t).strip() for t in raw_items if str(t).strip()))
+        if not deduped:
+            return []
+        multi = [t for t in deduped if len(t) >= 2]
+        pool = multi if multi else deduped
+        # Stable sort: longer tokens first (more selective / trigram-eligible), preserving order.
+        ranked = sorted(pool, key=lambda t: (-len(t),))
+        return ranked[: max(1, int(max_tokens))]
 
     async def search(
         self,
@@ -56,75 +81,101 @@ class GraphKeywordRetriever:
         if not tokens:
             return []
 
-        escaped_tokens = ['"' + token.replace('"', '""') + '"' for token in tokens]
+        node_tokens = self._select_node_tokens(
+            tokens, self.max_query_tokens, query=query
+        )
+        fts_tokens = list(dict.fromkeys([*node_tokens, *tokens]))[
+            : self.max_query_tokens * 2
+        ]
+        escaped_tokens = [
+            '"' + token.replace('"', '""') + '"' for token in fts_tokens
+        ]
         fts_query = " OR ".join(escaped_tokens)
 
-        direct_hits = await self.graph_store.search_entries_by_bm25(
-            fts_query=fts_query,
-            limit=max(limit * 3, 12),
-            session_id=session_id,
-            persona_id=persona_id,
-            source_platform=source_platform,
-            interaction_type=interaction_type,
-            source_session_id=source_session_id,
-        )
-        matched_nodes = await self.graph_store.search_nodes_by_tokens(
-            tokens=tokens,
-            limit=max(limit * 3, 12),
-        )
-        matched_node_ids = [item["id"] for item in matched_nodes]
-        expansion_hits = await self.graph_store.get_entries_for_node_ids(
-            node_ids=matched_node_ids,
-            limit=max(self.expansion_limit, limit * 3),
-            session_id=session_id,
-            persona_id=persona_id,
-            source_platform=source_platform,
-            interaction_type=interaction_type,
-            source_session_id=source_session_id,
-        )
-        edge_neighbor_hits: list[dict[str, Any]] = []
-        second_hop_hits: list[dict[str, Any]] = []
-        if matched_node_ids:
-            first_hop_node_ids = await self.graph_store.get_neighbor_node_ids(
-                node_ids=matched_node_ids,
-                limit=max(self.expansion_limit, limit * 3),
-            )
-            matched_node_set = set(matched_node_ids)
-            first_hop_node_ids = [
-                node_id
-                for node_id in first_hop_node_ids
-                if node_id not in matched_node_set
-            ]
-            edge_neighbor_hits = await self.graph_store.get_entries_for_node_ids(
-                node_ids=first_hop_node_ids,
-                limit=max(self.expansion_limit, limit * 3),
+        direct_hits, matched_nodes = await asyncio.gather(
+            self.graph_store.search_entries_by_bm25(
+                fts_query=fts_query,
+                limit=max(limit * 3, 12),
                 session_id=session_id,
                 persona_id=persona_id,
                 source_platform=source_platform,
                 interaction_type=interaction_type,
                 source_session_id=source_session_id,
-            )
-
-            if self.expansion_hops >= 2 and first_hop_node_ids:
-                second_hop_node_ids = await self.graph_store.get_neighbor_node_ids(
-                    node_ids=first_hop_node_ids,
-                    limit=max(self.expansion_limit, limit * 3),
-                )
-                excluded_node_ids = matched_node_set | set(first_hop_node_ids)
-                second_hop_node_ids = [
-                    node_id
-                    for node_id in second_hop_node_ids
-                    if node_id not in excluded_node_ids
-                ]
-                second_hop_hits = await self.graph_store.get_entries_for_node_ids(
-                    node_ids=second_hop_node_ids,
+            ),
+            self.graph_store.search_nodes_by_tokens(
+                tokens=node_tokens,
+                limit=max(limit * 3, 12),
+            ),
+        )
+        matched_node_ids = [item["id"] for item in matched_nodes]
+        expansion_hits: list[dict[str, Any]] = []
+        edge_neighbor_hits: list[dict[str, Any]] = []
+        second_hop_hits: list[dict[str, Any]] = []
+        if matched_node_ids:
+            expansion_hits, first_hop_raw = await asyncio.gather(
+                self.graph_store.get_entries_for_node_ids(
+                    node_ids=matched_node_ids,
                     limit=max(self.expansion_limit, limit * 3),
                     session_id=session_id,
                     persona_id=persona_id,
                     source_platform=source_platform,
                     interaction_type=interaction_type,
                     source_session_id=source_session_id,
-                )
+                ),
+                self.graph_store.get_neighbor_node_ids(
+                    node_ids=matched_node_ids,
+                    limit=max(self.expansion_limit, limit * 3),
+                ),
+            )
+            matched_node_set = set(matched_node_ids)
+            first_hop_node_ids = [
+                node_id
+                for node_id in first_hop_raw
+                if node_id not in matched_node_set
+            ]
+            if first_hop_node_ids:
+                if self.expansion_hops >= 2:
+                    edge_neighbor_hits, second_hop_raw = await asyncio.gather(
+                        self.graph_store.get_entries_for_node_ids(
+                            node_ids=first_hop_node_ids,
+                            limit=max(self.expansion_limit, limit * 3),
+                            session_id=session_id,
+                            persona_id=persona_id,
+                            source_platform=source_platform,
+                            interaction_type=interaction_type,
+                            source_session_id=source_session_id,
+                        ),
+                        self.graph_store.get_neighbor_node_ids(
+                            node_ids=first_hop_node_ids,
+                            limit=max(self.expansion_limit, limit * 3),
+                        ),
+                    )
+                    excluded_node_ids = matched_node_set | set(first_hop_node_ids)
+                    second_hop_node_ids = [
+                        node_id
+                        for node_id in second_hop_raw
+                        if node_id not in excluded_node_ids
+                    ]
+                    if second_hop_node_ids:
+                        second_hop_hits = await self.graph_store.get_entries_for_node_ids(
+                            node_ids=second_hop_node_ids,
+                            limit=max(self.expansion_limit, limit * 3),
+                            session_id=session_id,
+                            persona_id=persona_id,
+                            source_platform=source_platform,
+                            interaction_type=interaction_type,
+                            source_session_id=source_session_id,
+                        )
+                else:
+                    edge_neighbor_hits = await self.graph_store.get_entries_for_node_ids(
+                        node_ids=first_hop_node_ids,
+                        limit=max(self.expansion_limit, limit * 3),
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        source_platform=source_platform,
+                        interaction_type=interaction_type,
+                        source_session_id=source_session_id,
+                    )
 
         aggregated: dict[int, GraphKeywordResult] = {}
 

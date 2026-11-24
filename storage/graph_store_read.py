@@ -244,11 +244,17 @@ class GraphStoreReadMixin:
 
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
-            archived_exclusion = await self._archived_memory_exclusion(
-                db, "ge.source_memory_id"
+            has_docs = await self._documents_table_exists(db)
+            doc_join = (
+                "LEFT JOIN documents d_status ON d_status.id = ge.source_memory_id"
+                if has_docs
+                else ""
             )
-            if archived_exclusion is not None:
-                filters.append(archived_exclusion)
+            if has_docs:
+                filters.append(
+                    "(d_status.id IS NULL OR NOT json_valid(d_status.metadata) "
+                    "OR COALESCE(json_extract(d_status.metadata, '$.status'), 'active') = 'active')"
+                )
             where_clause = f"AND {' AND '.join(filters)}" if filters else ""
             try:
                 cursor = await db.execute(
@@ -258,6 +264,7 @@ class GraphStoreReadMixin:
                            bm25(livingmemory_graph_entries_fts) AS score
                     FROM livingmemory_graph_entries_fts
                     JOIN graph_entries ge ON ge.id = livingmemory_graph_entries_fts.entry_id
+                    {doc_join}
                     WHERE livingmemory_graph_entries_fts MATCH ? {where_clause}
                     ORDER BY score ASC
                     LIMIT ?
@@ -297,10 +304,22 @@ class GraphStoreReadMixin:
             )
         return hits
 
+    @staticmethod
+    def _prefix_range_bounds(token: str) -> tuple[str, str]:
+        """Compute an index-friendly ``[start, end)`` range on ``canonical_value``."""
+        lower = token.lower()
+        return lower, lower[:-1] + chr(ord(lower[-1]) + 1)
+
     async def search_nodes_by_tokens(
         self, tokens: list[str], limit: int = 20
     ) -> list[dict[str, Any]]:
-        """Find graph nodes whose canonical values overlap query tokens."""
+        """Find graph nodes whose canonical values overlap query tokens.
+
+        Uses trigram FTS5 for ``>=3``-char tokens and B-tree prefix range scans on
+        ``idx_graph_nodes_canonical`` for short (1-2 char) tokens, avoiding full-table
+        ``LIKE '%xx%'`` scans. Archived-document exclusion uses correlated indexed
+        ``NOT EXISTS`` instead of nested ``NOT IN (SELECT ... JOIN ...)``.
+        """
         normalized_tokens = list(dict.fromkeys(str(token).strip() for token in tokens))
         normalized_tokens = [token for token in normalized_tokens if token]
         if not normalized_tokens:
@@ -310,24 +329,25 @@ class GraphStoreReadMixin:
         node_filters: list[str] = []
         if ownership_params:
             node_filters.append(
-                "id IN (SELECT gen.node_id FROM graph_entry_nodes gen "
+                "EXISTS (SELECT 1 FROM graph_entry_nodes gen "
                 "JOIN graph_entries ge ON ge.id=gen.entry_id "
-                f"WHERE {ownership})"
+                f"WHERE gen.node_id = graph_nodes.id AND {ownership})"
             )
         rows_by_id: dict[int, aiosqlite.Row] = {}
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
-            archived_exclusion = await self._archived_memory_exclusion(
-                db, "ge.source_memory_id"
-            )
-            if archived_exclusion is not None:
-                # 只排除“仅挂在 archived 记忆上”的节点；没有入口关联或入口
-                # 指向缺失文档的节点继续可检索，避免图谱重建中途静默丢节点。
+            if await self._documents_table_exists(db):
+                # Indexed correlated probe via idx_graph_entry_nodes_node ->
+                # graph_entries(PK) -> documents(PK); avoids full subquery materialization.
                 node_filters.append(
-                    "id NOT IN ("
-                    "SELECT gen.node_id FROM graph_entry_nodes gen "
+                    "NOT EXISTS ("
+                    "SELECT 1 FROM graph_entry_nodes gen "
                     "JOIN graph_entries ge ON ge.id = gen.entry_id "
-                    f"WHERE ge.source_memory_id IN ({self._non_active_documents_sql()}))"
+                    "JOIN documents d_status ON d_status.id = ge.source_memory_id "
+                    "WHERE gen.node_id = graph_nodes.id "
+                    "AND json_valid(d_status.metadata) "
+                    "AND COALESCE(json_extract(d_status.metadata, '$.status'), 'active') <> 'active'"
+                    ")"
                 )
             node_filter = " AND ".join(node_filters) if node_filters else "1"
             for start in range(
@@ -336,15 +356,23 @@ class GraphStoreReadMixin:
                 batch = normalized_tokens[
                     start : start + self._NODE_TOKEN_QUERY_BATCH_SIZE
                 ]
-                clauses = ["canonical_value LIKE ?" for _ in batch]
-                params = [f"%{token}%" for token in batch]
-                if self._node_fts_available:
-                    clauses = [
-                        "id IN (SELECT rowid FROM livingmemory_graph_nodes_fts WHERE canonical_value LIKE ?)"
-                        if len(token) >= 3 and "%" not in token and "_" not in token
-                        else "canonical_value LIKE ?"
-                        for token in batch
-                    ]
+                clauses: list[str] = []
+                params: list[Any] = []
+                for token in batch:
+                    if (
+                        self._node_fts_available
+                        and len(token) >= 3
+                        and "%" not in token
+                        and "_" not in token
+                    ):
+                        clauses.append(
+                            "id IN (SELECT rowid FROM livingmemory_graph_nodes_fts WHERE canonical_value LIKE ?)"
+                        )
+                        params.append(f"%{token}%")
+                    else:
+                        lo, hi = self._prefix_range_bounds(token)
+                        clauses.append("(canonical_value >= ? AND canonical_value < ?)")
+                        params.extend([lo, hi])
                 cursor = await db.execute(
                     f"""
                     SELECT id, node_key, node_type, node_value, canonical_value, metadata
@@ -418,11 +446,17 @@ class GraphStoreReadMixin:
 
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
-            archived_exclusion = await self._archived_memory_exclusion(
-                db, "ge.source_memory_id"
+            has_docs = await self._documents_table_exists(db)
+            doc_join = (
+                "LEFT JOIN documents d_status ON d_status.id = ge.source_memory_id"
+                if has_docs
+                else ""
             )
-            if archived_exclusion is not None:
-                filters.append(archived_exclusion)
+            if has_docs:
+                filters.append(
+                    "(d_status.id IS NULL OR NOT json_valid(d_status.metadata) "
+                    "OR COALESCE(json_extract(d_status.metadata, '$.status'), 'active') = 'active')"
+                )
             where_clause = f"AND {' AND '.join(filters)}" if filters else ""
             factors = await self._node_hub_factors(db, node_ids)
             cursor = await db.execute(
@@ -433,6 +467,7 @@ class GraphStoreReadMixin:
                        GROUP_CONCAT(DISTINCT gen.node_id) AS linked_node_ids
                 FROM graph_entry_nodes gen
                 JOIN graph_entries ge ON ge.id = gen.entry_id
+                {doc_join}
                 WHERE gen.node_id IN ({placeholders}) {where_clause}
                 GROUP BY ge.id
                 ORDER BY hit_count DESC, ge.id DESC

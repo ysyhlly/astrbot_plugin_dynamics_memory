@@ -479,13 +479,31 @@ class MessageUtils:
         return raw_message.strip()
 
     async def enforce_message_limit(self, session_id: str):
-        """执行消息数量上限控制，只删除已被总结的消息"""
+        """执行消息数量上限控制，优先只删除已被总结的消息；反思长期卡死超过硬上限时触发安全裁剪。"""
         if not self.conversation_manager:
             return
 
         max_messages = self.config_manager.get(
             "session_manager.max_messages_per_session", 1000
         )
+        try:
+            max_messages = int(max_messages)
+        except (TypeError, ValueError):
+            max_messages = 1000
+        max_messages = max(1, max_messages)
+
+        default_hard_max = max(max_messages * 2, 2000)
+        hard_max_raw = self.config_manager.get(
+            "session_manager.hard_max_messages_per_session", None
+        )
+        try:
+            hard_max_messages = (
+                int(hard_max_raw) if hard_max_raw is not None else default_hard_max
+            )
+        except (TypeError, ValueError):
+            hard_max_messages = default_hard_max
+        hard_max_messages = max(max_messages, hard_max_messages)
+
         cleanup_batch_size = self.config_manager.get(
             "session_manager.cleanup_batch_size", 50
         )
@@ -515,36 +533,89 @@ class MessageUtils:
                     session_id, "last_summarized_index", 0
                 )
             )
+            try:
+                last_summarized_index = max(0, int(last_summarized_index or 0))
+            except (TypeError, ValueError):
+                last_summarized_index = 0
 
             # 计算需要删除的数量；超过上限时按批量清理，减少每轮只删 1 条的抖动。
             overflow_count = actual_count - max_messages
             target_delete = max(overflow_count, cleanup_batch_size)
 
-            # 只能删除已总结的消息，不能删除未总结的
+            # 优先只删除已总结的消息
             safe_to_delete = min(target_delete, last_summarized_index)
+            delete_unsummarized = False
 
             if safe_to_delete <= 0:
-                logger.debug(
-                    f"[{session_id}] 无可删除消息: "
+                if actual_count > hard_max_messages:
+                    # 反思卡死导致未总结消息突破硬安全上限，强制裁剪最旧消息并至少保留 max_messages 条
+                    hard_overflow = actual_count - hard_max_messages
+                    safe_to_delete = min(
+                        max(hard_overflow, cleanup_batch_size),
+                        max(0, actual_count - max_messages),
+                    )
+                    delete_unsummarized = True
+                    logger.warning(
+                        f"[{session_id}] 未总结消息突破硬安全上限，强制裁剪最旧消息: "
+                        f"总数={actual_count}, 硬上限={hard_max_messages}, "
+                        f"已总结={last_summarized_index}, 强制删除={safe_to_delete}"
+                    )
+                else:
+                    logger.debug(
+                        f"[{session_id}] 无可删除消息: "
+                        f"溢出={overflow_count}, 批量={cleanup_batch_size}, "
+                        f"目标删除={target_delete}, 已总结={last_summarized_index}"
+                    )
+                    return
+
+            if not delete_unsummarized:
+                logger.info(
+                    f"[{session_id}] 开始清理已总结消息: "
+                    f"总数={actual_count}, 上限={max_messages}, "
                     f"溢出={overflow_count}, 批量={cleanup_batch_size}, "
-                    f"目标删除={target_delete}, 已总结={last_summarized_index}"
+                    f"目标删除={target_delete}, 已总结={last_summarized_index}, "
+                    f"实际删除={safe_to_delete}"
                 )
-                return
 
-            logger.info(
-                f"[{session_id}] 开始清理已总结消息: "
-                f"总数={actual_count}, 上限={max_messages}, "
-                f"溢出={overflow_count}, 批量={cleanup_batch_size}, "
-                f"目标删除={target_delete}, 已总结={last_summarized_index}, "
-                f"实际删除={safe_to_delete}"
-            )
-
-            actually_deleted = await self.conversation_manager.trim_session_messages(
-                session_id,
-                safe_to_delete,
-            )
+            if delete_unsummarized:
+                actually_deleted = (
+                    await self.conversation_manager.trim_session_messages(
+                        session_id,
+                        safe_to_delete,
+                        delete_unsummarized=True,
+                    )
+                )
+            else:
+                actually_deleted = (
+                    await self.conversation_manager.trim_session_messages(
+                        session_id,
+                        safe_to_delete,
+                    )
+                )
 
             new_actual_count = max(0, actual_count - actually_deleted)
+
+            # 若普通清理后剩余未总结消息仍超过硬安全上限，继续做一次硬上限安全裁剪
+            if not delete_unsummarized and new_actual_count > hard_max_messages:
+                extra_delete = min(
+                    max(new_actual_count - hard_max_messages, cleanup_batch_size),
+                    max(0, new_actual_count - max_messages),
+                )
+                if extra_delete > 0:
+                    logger.warning(
+                        f"[{session_id}] 常规清理后仍超过硬安全上限，追加强制裁剪: "
+                        f"剩余={new_actual_count}, 硬上限={hard_max_messages}, "
+                        f"追加删除={extra_delete}"
+                    )
+                    extra_deleted = (
+                        await self.conversation_manager.trim_session_messages(
+                            session_id,
+                            extra_delete,
+                            delete_unsummarized=True,
+                        )
+                    )
+                    actually_deleted += extra_deleted
+                    new_actual_count = max(0, new_actual_count - extra_deleted)
             new_summarized_index = await self.conversation_manager.get_session_metadata(
                 session_id,
                 "last_summarized_index",

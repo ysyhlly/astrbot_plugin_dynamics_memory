@@ -791,11 +791,16 @@ class MemoryEngineWriteOpsMixin:
             )
         return len(rows)
 
-    async def cleanup_write_ops(self, retention_days: int = 14) -> int:
-        """Prune aged terminal rows from ``memory_write_ops`` to prevent unbounded growth."""
+    async def cleanup_write_ops(
+        self, retention_days: int = 14, *, payload_retention_days: int = 3
+    ) -> int:
+        """Prune aged rows and strip bloated audit payloads from ``memory_write_ops``."""
         if self.db_connection is None:
             return 0
-        cutoff = time.time() - max(1, int(retention_days)) * 86400
+        now_ts = time.time()
+        cutoff = now_ts - max(1, int(retention_days)) * 86400
+        payload_cutoff = now_ts - max(1, int(payload_retention_days)) * 86400
+        stale_cutoff = now_ts - max(30, int(retention_days) * 2) * 86400
         async with self._write_db() as db:
             table_check = await db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_write_ops' LIMIT 1"
@@ -804,8 +809,22 @@ class MemoryEngineWriteOpsMixin:
             await table_check.close()
             if not exists:
                 return 0
+            # 1. Strip bulky JSON payloads from older completed ops while keeping audit row metadata.
+            await db.execute(
+                "UPDATE memory_write_ops SET payload = '{}' "
+                "WHERE status = 'completed' AND updated_at < ? AND length(payload) > 256",
+                (payload_cutoff,),
+            )
+            # 2. Delete expired terminal rows.
             cursor = await db.execute(
                 "DELETE FROM memory_write_ops WHERE status IN ('completed', 'failed') AND updated_at < ?",
                 (cutoff,),
             )
-            return max(0, int(cursor.rowcount or 0))
+            deleted = max(0, int(cursor.rowcount or 0))
+            # 3. Delete long-abandoned pending/needs_repair rows.
+            stale_cur = await db.execute(
+                "DELETE FROM memory_write_ops WHERE status IN ('pending', 'needs_repair') AND updated_at < ?",
+                (stale_cutoff,),
+            )
+            deleted += max(0, int(stale_cur.rowcount or 0))
+            return deleted

@@ -119,6 +119,15 @@ async def open_connection(
         cursor = await db.execute("PRAGMA temp_store = MEMORY")
         await cursor.close()
         if apply_journal_mode:
+            # Enable incremental auto_vacuum on fresh DBs (and prepare existing DBs
+            # for their next VACUUM) so PRAGMA incremental_vacuum actually reclaims pages.
+            av_cursor = await db.execute("PRAGMA auto_vacuum")
+            av_row = await av_cursor.fetchone()
+            await av_cursor.close()
+            if av_row is None or int(av_row[0]) != 2:
+                av_set = await db.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                await av_set.fetchall()
+                await av_set.close()
             # This PRAGMA returns a row. Until its cursor is finalized it can
             # retain the mode-change lock and block the first separate writer.
             cursor = await db.execute(f"PRAGMA journal_mode = {_journal_mode}")

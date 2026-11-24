@@ -18,6 +18,9 @@ class SessionManagerConfig(BaseModel):
     context_window_size: int = Field(default=50, ge=1, le=1000)
     enable_full_group_capture: bool = True
     max_messages_per_session: int = Field(default=1000, ge=100, le=10000)
+    hard_max_messages_per_session: int | None = Field(
+        default=None, ge=100, le=50000
+    )
     cleanup_batch_size: int = Field(default=50, ge=1, le=1000)
 
 
@@ -135,6 +138,7 @@ class ForgettingAgentConfig(BaseModel):
     auto_archived_enabled: bool = True
     cleanup_days_threshold: int = Field(default=120, ge=1, le=3650)
     cleanup_importance_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    archived_retention_days: int = Field(default=90, ge=0, le=3650)
 
 
 class FilteringConfig(BaseModel):
@@ -233,6 +237,7 @@ class GraphMemoryConfig(BaseModel):
     expansion_hops: int = Field(default=1, ge=1, le=2)
     second_hop_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     dynamic_route_weighting: bool = True
+    graph_route_timeout_seconds: float = Field(default=1.5, ge=0.1, le=30.0)
     max_topics_per_memory: int = Field(default=6, ge=1, le=20)
     max_participants_per_memory: int = Field(default=8, ge=1, le=30)
     max_facts_per_memory: int = Field(default=8, ge=1, le=30)

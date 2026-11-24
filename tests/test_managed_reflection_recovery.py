@@ -130,7 +130,18 @@ async def test_three_errors_cool_down_and_retry_same_window_after_restart(
         handler.memory_processor.process_conversation.side_effect = RuntimeError(
             "temporary provider error"
         )
-        for _ in range(3):
+        for attempt in range(3):
+            if attempt > 0:
+                cur_pending = await manager.get_session_metadata(
+                    SESSION, "pending_summary"
+                )
+                assert cur_pending["retry_after"] > time.time()
+                # Advance past exponential retry_after backoff (60s -> 300s) for next attempt
+                await manager.update_session_metadata(
+                    SESSION,
+                    "pending_summary",
+                    {**cur_pending, "retry_after": 0},
+                )
             await run_receipt(handler)
         pending = await manager.get_session_metadata(SESSION, "pending_summary")
         assert pending["failure_stage"] == "retry_exhausted"

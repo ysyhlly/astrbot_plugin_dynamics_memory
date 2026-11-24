@@ -156,24 +156,23 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         await self.connection.commit()
 
     async def _create_indexes(self) -> None:
-        """创建索引以优化查询性能"""
-        # sessions 表索引
-        await self.connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_session_id ON sessions(session_id)"
-        )
+        """创建索引以优化查询性能，并清理冗余/无用索引。"""
+        # sessions.session_id 已声明 UNIQUE，自动建有唯一索引；移除冗余 idx_session_id
+        await self.connection.execute("DROP INDEX IF EXISTS idx_session_id")
         await self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_last_active ON sessions(last_active_at DESC)"
         )
 
-        # messages 表索引
+        # messages 表索引：
+        # - idx_msg_session (session_id, timestamp DESC) 服务按时间倒序/正序读取
+        # - idx_msg_session_id (session_id, id) 服务公开门面按 id 游标分页读取
+        # - 两者二级键不同，均保留；移除无 session_id 前缀的未用 idx_msg_timestamp
+        await self.connection.execute("DROP INDEX IF EXISTS idx_msg_timestamp")
         await self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id, timestamp DESC)"
         )
         await self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_sender ON messages(session_id, sender_id, timestamp DESC)"
-        )
-        await self.connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_timestamp ON messages(timestamp DESC)"
         )
         await self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_session_id ON messages(session_id, id)"
@@ -1699,6 +1698,107 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
         return (await self.load_narrative_events(scope, [source_event_id])).get(
             source_event_id.strip()
         )
+
+    async def prune_narrative_events(
+        self,
+        *,
+        retention_days: int = 30,
+        max_per_session: int = 5000,
+        now: float | None = None,
+    ) -> int:
+        """Prune aged and excess rows from ``narrative_events``."""
+        if self.connection is None:
+            return 0
+        now_ts = time.time() if now is None else float(now)
+        cutoff = now_ts - max(1, int(retention_days)) * 86400.0
+        cap = max(0, int(max_per_session))
+        deleted = 0
+        async with self._write_section():
+            cursor = await self.connection.execute(
+                "DELETE FROM narrative_events WHERE timestamp < ?",
+                (cutoff,),
+            )
+            deleted += max(0, int(cursor.rowcount or 0))
+            if cap > 0:
+                async with self.connection.execute(
+                    "SELECT session_id FROM narrative_events "
+                    "GROUP BY session_id HAVING COUNT(*) > ?",
+                    (cap,),
+                ) as s_cur:
+                    over_sessions = [str(r[0]) for r in await s_cur.fetchall()]
+                for sid in over_sessions:
+                    cursor = await self.connection.execute(
+                        "DELETE FROM narrative_events "
+                        "WHERE session_id = ? AND event_key NOT IN ("
+                        "  SELECT event_key FROM narrative_events "
+                        "  WHERE session_id = ? "
+                        "  ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+                        ")",
+                        (sid, sid, cap),
+                    )
+                    deleted += max(0, int(cursor.rowcount or 0))
+            await self.connection.commit()
+        return deleted
+
+    @staticmethod
+    def prune_narrative_events_file_sync(
+        db_path: str | Path,
+        *,
+        retention_days: int = 30,
+        max_per_session: int = 5000,
+        now: float | None = None,
+    ) -> int:
+        """Sync helper for daily maintenance to prune ``narrative_events`` on disk."""
+        import sqlite3
+
+        path = Path(db_path)
+        if not path.is_file():
+            return 0
+        now_ts = time.time() if now is None else float(now)
+        cutoff = now_ts - max(1, int(retention_days)) * 86400.0
+        cap = max(0, int(max_per_session))
+        deleted = 0
+        conn = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='narrative_events' LIMIT 1"
+            ).fetchone()
+            if not has_table:
+                return 0
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = conn.execute(
+                    "DELETE FROM narrative_events WHERE timestamp < ?", (cutoff,)
+                )
+                deleted += max(0, cur.rowcount)
+                if cap > 0:
+                    over_sessions = [
+                        str(r[0])
+                        for r in conn.execute(
+                            "SELECT session_id FROM narrative_events "
+                            "GROUP BY session_id HAVING COUNT(*) > ?",
+                            (cap,),
+                        ).fetchall()
+                    ]
+                    for sid in over_sessions:
+                        cur = conn.execute(
+                            "DELETE FROM narrative_events "
+                            "WHERE session_id = ? AND event_key NOT IN ("
+                            "  SELECT event_key FROM narrative_events "
+                            "  WHERE session_id = ? "
+                            "  ORDER BY timestamp DESC, rowid DESC LIMIT ?"
+                            ")",
+                            (sid, sid, cap),
+                        )
+                        deleted += max(0, cur.rowcount)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        finally:
+            conn.close()
+        return deleted
 
     @staticmethod
     def _narrative_source_plan(metadata: dict):

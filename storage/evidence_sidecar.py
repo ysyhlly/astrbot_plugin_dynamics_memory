@@ -75,6 +75,7 @@ class EvidenceSidecar:
         with self._lock, self._session() as db:
             try:
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+                db.execute("PRAGMA incremental_vacuum(128)").fetchall()
             except sqlite3.Error:
                 pass
 
@@ -160,6 +161,12 @@ class EvidenceSidecar:
             self._ready = False
         self._backup_before_schema_upgrade()
         with self._lock, self._session() as db:
+            try:
+                av_row = db.execute("PRAGMA auto_vacuum").fetchone()
+                if av_row is None or int(av_row[0]) != 2:
+                    db.execute("PRAGMA auto_vacuum=INCREMENTAL").fetchall()
+            except sqlite3.Error:
+                pass
             requested = (
                 JOURNAL_MODE_WAL
                 if journal_mode == JOURNAL_MODE_WAL
@@ -2147,4 +2154,255 @@ class EvidenceSidecar:
             "replacement_atom_id": replacement_atom_id,
             "affected_ids": affected_ids,
             "idempotent_replay": False,
+        }
+
+    async def prune_old(
+        self,
+        retention_days: int = 30,
+        *,
+        now: float | None = None,
+        queue_retention_days: int | None = None,
+        max_rows_per_scope: int = 2000,
+    ) -> dict[str, int]:
+        """清理过期失效/滞留 material、队列项、孤儿 atom/correction，并执行 WAL 截断与增量收缩。"""
+        return await asyncio.to_thread(
+            self._prune_old_sync,
+            retention_days,
+            now,
+            queue_retention_days,
+            max_rows_per_scope,
+        )
+
+    @classmethod
+    def prune_file_sync(
+        cls,
+        path: str | Path,
+        retention_days: int = 30,
+        now: float | None = None,
+        *,
+        queue_retention_days: int | None = None,
+        max_rows_per_scope: int = 2000,
+    ) -> dict[str, int]:
+        """对指定 sidecar SQLite 文件执行一次同步安全清理与 WAL 截断（不启动线程池）。"""
+        db_path = Path(path)
+        if not db_path.is_file():
+            return {
+                "materials_pruned": 0,
+                "atoms_pruned": 0,
+                "corrections_pruned": 0,
+                "queue_pruned": 0,
+                "admissions_pruned": 0,
+                "wal_checkpointed": 0,
+            }
+        db = sqlite3.connect(str(db_path), timeout=5.0, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=5000")
+            return cls._execute_prune_on_connection(
+                db,
+                retention_days=retention_days,
+                now=now,
+                queue_retention_days=queue_retention_days,
+                max_rows_per_scope=max_rows_per_scope,
+            )
+        finally:
+            db.close()
+
+    def _prune_old_sync(
+        self,
+        retention_days: int = 30,
+        now: float | None = None,
+        queue_retention_days: int | None = None,
+        max_rows_per_scope: int = 2000,
+    ) -> dict[str, int]:
+        with self._lock, self._session() as db:
+            stats = self._execute_prune_on_connection(
+                db,
+                retention_days=retention_days,
+                now=now,
+                queue_retention_days=queue_retention_days,
+                max_rows_per_scope=max_rows_per_scope,
+                on_committed=self._load_revision_cache,
+            )
+        return stats
+
+    @staticmethod
+    def _execute_prune_on_connection(
+        db: sqlite3.Connection,
+        *,
+        retention_days: int = 30,
+        now: float | None = None,
+        queue_retention_days: int | None = None,
+        max_rows_per_scope: int = 2000,
+        on_committed=None,
+    ) -> dict[str, int]:
+        now_ts = time.time() if now is None else float(now)
+        days = max(1, int(retention_days))
+        q_days = (
+            max(1, int(queue_retention_days))
+            if queue_retention_days is not None
+            else min(days, 14)
+        )
+        per_scope_cap = max(0, int(max_rows_per_scope))
+        cutoff = now_ts - days * 86400.0
+        queue_cutoff = now_ts - q_days * 86400.0
+        admissions_cutoff = min(cutoff, now_ts - 86400.0)
+
+        existing_tables = {
+            str(row[0])
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        atoms_pruned = 0
+        materials_pruned = 0
+        corrections_pruned = 0
+        queue_pruned = 0
+        admissions_pruned = 0
+
+        if {"evidence_materials", "evidence_atoms"} <= existing_tables:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                # 1. 清理已过期的非活跃 atom（保留所有活跃/待验证/替代 atom）
+                cur = db.execute(
+                    "DELETE FROM evidence_atoms "
+                    "WHERE status NOT IN ("
+                    "'active','verified','verified_utterance',"
+                    "'reported_unverified','pending_continuity','observed_user_boundary'"
+                    ") AND updated_at < ?",
+                    (cutoff,),
+                )
+                atoms_pruned += max(0, cur.rowcount)
+
+                # 2. 清理引用不存在 material 的孤儿 atom
+                cur = db.execute(
+                    "DELETE FROM evidence_atoms "
+                    "WHERE material_id NOT IN (SELECT material_id FROM evidence_materials)"
+                )
+                atoms_pruned += max(0, cur.rowcount)
+
+                # 3. 清理滞留/过期的推导队列项（queued/deferred/owner_wait）与按 scope 上限裁剪
+                if "evidence_derivation_queue" in existing_tables:
+                    cur = db.execute(
+                        "DELETE FROM evidence_derivation_queue "
+                        "WHERE status IN ('queued','deferred','owner_wait') AND updated_at < ?",
+                        (queue_cutoff,),
+                    )
+                    queue_pruned += max(0, cur.rowcount)
+                    if per_scope_cap > 0:
+                        q_scopes = [
+                            str(r[0])
+                            for r in db.execute(
+                                "SELECT scope_key FROM evidence_derivation_queue "
+                                "GROUP BY scope_key HAVING COUNT(*) > ?",
+                                (per_scope_cap,),
+                            ).fetchall()
+                        ]
+                        for sc in q_scopes:
+                            cur = db.execute(
+                                "DELETE FROM evidence_derivation_queue "
+                                "WHERE scope_key = ? AND status IN ('queued','deferred','owner_wait') "
+                                "AND material_id NOT IN ("
+                                "  SELECT material_id FROM evidence_derivation_queue "
+                                "  WHERE scope_key = ? "
+                                "  ORDER BY updated_at DESC LIMIT ?"
+                                ")",
+                                (sc, sc, per_scope_cap),
+                            )
+                            queue_pruned += max(0, cur.rowcount)
+
+                # 4. 清理已失效/终态/失败及滞留过期的 ready/queued/deferred/owner_wait material
+                #    （只要无剩余 atom 引用即可安全清理；活跃/替代 atom 仍被严格保护）
+                cur = db.execute(
+                    "DELETE FROM evidence_materials "
+                    "WHERE status IN ('invalidated','terminal','failed','ready','queued','deferred','owner_wait') "
+                    "AND updated_at < ? "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM evidence_atoms a WHERE a.material_id = evidence_materials.material_id"
+                    ")",
+                    (cutoff,),
+                )
+                materials_pruned += max(0, cur.rowcount)
+
+                # 按 scope 限制未被引用的历史 material 行数，防止高活跃群无限膨胀
+                if per_scope_cap > 0:
+                    m_scopes = [
+                        str(r[0])
+                        for r in db.execute(
+                            "SELECT scope_key FROM evidence_materials "
+                            "GROUP BY scope_key HAVING COUNT(*) > ?",
+                            (per_scope_cap,),
+                        ).fetchall()
+                    ]
+                    for sc in m_scopes:
+                        cur = db.execute(
+                            "DELETE FROM evidence_materials "
+                            "WHERE scope_key = ? "
+                            "AND NOT EXISTS ("
+                            "  SELECT 1 FROM evidence_atoms a WHERE a.material_id = evidence_materials.material_id"
+                            ") "
+                            "AND material_id NOT IN ("
+                            "  SELECT material_id FROM evidence_materials "
+                            "  WHERE scope_key = ? "
+                            "  ORDER BY updated_at DESC LIMIT ?"
+                            ")",
+                            (sc, sc, per_scope_cap),
+                        )
+                        materials_pruned += max(0, cur.rowcount)
+
+                # 5. 清理孤儿队列项与过期准入流水
+                if "evidence_derivation_queue" in existing_tables:
+                    cur = db.execute(
+                        "DELETE FROM evidence_derivation_queue "
+                        "WHERE material_id NOT IN (SELECT material_id FROM evidence_materials)"
+                    )
+                    queue_pruned += max(0, cur.rowcount)
+
+                if "evidence_queue_admissions" in existing_tables:
+                    cur = db.execute(
+                        "DELETE FROM evidence_queue_admissions WHERE admitted_at < ?",
+                        (admissions_cutoff,),
+                    )
+                    admissions_pruned += max(0, cur.rowcount)
+
+                # 6. 清理已过期且目标/替代 atom 均已不存在的孤儿 correction（绝不回退 scope_revisions）
+                if "evidence_corrections" in existing_tables:
+                    cur = db.execute(
+                        "DELETE FROM evidence_corrections "
+                        "WHERE created_at < ? "
+                        "AND target_id NOT IN (SELECT atom_id FROM evidence_atoms) "
+                        "AND target_id NOT IN (SELECT material_id FROM evidence_materials) "
+                        "AND (replacement_atom_id IS NULL "
+                        "     OR replacement_atom_id NOT IN (SELECT atom_id FROM evidence_atoms))",
+                        (cutoff,),
+                    )
+                    corrections_pruned += max(0, cur.rowcount)
+
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+            if callable(on_committed):
+                on_committed(db)
+
+        wal_checkpointed = 0
+        try:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            wal_checkpointed = 1
+        except sqlite3.Error:
+            pass
+        try:
+            db.execute("PRAGMA incremental_vacuum").fetchall()
+        except sqlite3.Error:
+            pass
+
+        return {
+            "materials_pruned": materials_pruned,
+            "atoms_pruned": atoms_pruned,
+            "corrections_pruned": corrections_pruned,
+            "queue_pruned": queue_pruned,
+            "admissions_pruned": admissions_pruned,
+            "wal_checkpointed": wal_checkpointed,
         }

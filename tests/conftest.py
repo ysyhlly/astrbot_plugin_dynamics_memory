@@ -15,9 +15,12 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PLUGINS_DIR = Path(__file__).resolve().parents[2]
-ASTRBOT_ROOT = Path(__file__).resolve().parents[4]
+_CONFTEST_PARENTS = Path(__file__).resolve().parents
+PROJECT_ROOT = _CONFTEST_PARENTS[1]
+PLUGINS_DIR = _CONFTEST_PARENTS[2] if len(_CONFTEST_PARENTS) > 2 else PROJECT_ROOT
+ASTRBOT_ROOT = (
+    _CONFTEST_PARENTS[4] if len(_CONFTEST_PARENTS) > 4 else _CONFTEST_PARENTS[-1]
+)
 
 for candidate in (PROJECT_ROOT, PLUGINS_DIR, ASTRBOT_ROOT):
     candidate_str = str(candidate)
@@ -79,13 +82,16 @@ def _install_astrbot_stubs() -> None:
             return None
 
     class _Filter:
-        def on_llm_request(self):
+        def on_llm_request(self, *args, **kwargs):
             return lambda func: func
 
-        def on_llm_response(self):
+        def on_llm_response(self, *args, **kwargs):
             return lambda func: func
 
-        def after_message_sent(self):
+        def after_message_sent(self, *args, **kwargs):
+            return lambda func: func
+
+        def on_astrbot_loaded(self, *args, **kwargs):
             return lambda func: func
 
         def platform_adapter_type(self, *args, **kwargs):
@@ -105,7 +111,29 @@ def _install_astrbot_stubs() -> None:
             return _CommandGroup()
 
     class AstrMessageEvent:
-        pass
+        def __init__(self, *args, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class AstrBotMessage:
+        def __init__(self, *args, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class MessageMember:
+        def __init__(self, user_id="", nickname="", **kwargs):
+            self.user_id = user_id
+            self.nickname = nickname
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class PlatformMetadata:
+        def __init__(self, name="", description="", id="", **kwargs):
+            self.name = name
+            self.description = description
+            self.id = id
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
     class MessageEventResult:
         pass
@@ -142,7 +170,8 @@ def _install_astrbot_stubs() -> None:
         pass
 
     class Star:
-        pass
+        def __init__(self, context=None, *args, **kwargs):
+            self.context = context
 
     class StarTools:
         pass
@@ -191,7 +220,8 @@ def _install_astrbot_stubs() -> None:
             return True
 
     class EmbeddingProvider:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
 
     class Provider:
         pass
@@ -298,6 +328,10 @@ def _install_astrbot_stubs() -> None:
 
     platform_mod = types.ModuleType("astrbot.api.platform")
     platform_mod.MessageType = MessageType
+    platform_mod.AstrBotMessage = AstrBotMessage
+    platform_mod.AstrMessageEvent = AstrMessageEvent
+    platform_mod.MessageMember = MessageMember
+    platform_mod.PlatformMetadata = PlatformMetadata
 
     provider_mod = types.ModuleType("astrbot.api.provider")
     provider_mod.ProviderRequest = ProviderRequest
@@ -308,6 +342,19 @@ def _install_astrbot_stubs() -> None:
     star_mod.Star = Star
     star_mod.StarTools = StarTools
     star_mod.register = register
+
+    if "quart" not in sys.modules:
+        try:
+            import quart  # noqa: F401
+        except ImportError:
+            quart_mod = types.ModuleType("quart")
+            quart_mod.request = None
+            quart_mod.jsonify = lambda data=None, **kw: data if data is not None else kw
+            sys.modules["quart"] = quart_mod
+
+    web_mod = types.ModuleType("astrbot.api.web")
+    web_mod.json_response = lambda data, status=200, **_kw: (data, status)
+    web_mod.request = None
 
     core_mod = _package("astrbot.core")
     core_mod.sp = api_mod.sp
@@ -375,6 +422,7 @@ def _install_astrbot_stubs() -> None:
             "astrbot.api.platform": platform_mod,
             "astrbot.api.provider": provider_mod,
             "astrbot.api.star": star_mod,
+            "astrbot.api.web": web_mod,
             "astrbot.core": core_mod,
             "astrbot.core.db": core_db_mod,
             "astrbot.core.db.sqlite": core_sqlite_mod,
@@ -404,6 +452,7 @@ def _install_astrbot_stubs() -> None:
     api_mod.platform = platform_mod
     api_mod.provider = provider_mod
     api_mod.star = star_mod
+    api_mod.web = web_mod
     api_mod.FunctionTool = FunctionTool
     api_mod.ToolSet = ToolSet
     api_mod.BaseFunctionToolExecutor = BaseFunctionToolExecutor

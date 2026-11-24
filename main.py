@@ -46,7 +46,12 @@ from .core.evidence_view import EvidenceViewService
 from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
-from .core.memory_scope import adapter_access
+from .core.event_handler_modules.memory_recall import should_skip_group_recall_query
+from .core.memory_scope import (
+    adapter_access,
+    is_event_excluded_by_series,
+    is_event_memory_allowed,
+)
 from .core.narrative_api import is_managed_event, scope_key
 from .core.page_api import PluginPageApi
 from .core.passive_group_capture import (
@@ -76,7 +81,12 @@ from .core.tools import (
     MemorySearchTool,
 )
 from .core.utils import _get_native_persona_id, set_persona_aliases
-from .series_panels import get_series_defaults
+from .series_panels import (
+    find_provider_silently,
+    get_series_defaults,
+    invalidate_presence_cache,
+    resolve_series_provider,
+)
 from .storage.evidence_sidecar import EvidenceSidecar
 
 _HISTORY_LOOKUP = re.compile(
@@ -180,8 +190,16 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             )
         i18n_init(raw_language)
 
-        # 初始化插件初始化器
-        self.initializer = PluginInitializer(context, self.config_manager, data_dir)
+        # 初始化插件初始化器（注入初始化完成回调，确保后台重试成功后第一时间装配运行期组件）
+        try:
+            self.initializer = PluginInitializer(
+                context,
+                self.config_manager,
+                data_dir,
+                on_initialized=self._on_initializer_ready,
+            )
+        except TypeError:
+            self.initializer = PluginInitializer(context, self.config_manager, data_dir)
 
         # 事件处理器和命令处理器（初始化后创建）
         self.event_handler: EventHandler | None = None
@@ -228,6 +246,34 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if exc is not None:
             logger.error(f"Background task failed: {exc}", exc_info=exc)
 
+    async def _on_initializer_ready(self) -> None:
+        """PluginInitializer 初始化（含后台重试成功）后的回调：装配运行期组件并刷新互通缓存。"""
+        if self._terminating:
+            return
+        await self._ensure_runtime_components()
+        try:
+            invalidate_presence_cache(
+                "astrbot_plugin_dynamics_memory", context=self.context
+            )
+        except Exception:
+            pass
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        """[Event Hook] AstrBot 加载完成后立即唤醒等待中的初始化/重试任务。"""
+        if self._terminating or not self.series_runtime_allowed():
+            return
+        initializer = getattr(self, "initializer", None)
+        if initializer is None:
+            return
+        if getattr(initializer, "is_initialized", False):
+            if not self.event_handler or not getattr(self, "evidence_service", None):
+                await self._ensure_runtime_components()
+            return
+        wake = getattr(initializer, "wake_retry", None)
+        if callable(wake):
+            wake(reset_attempts=True)
+
     async def _initialize_plugin(self):
         """初始化插件"""
         if not self.series_runtime_allowed():
@@ -262,44 +308,52 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if not self.initializer.is_initialized:
             return False
 
-        async with self._component_init_lock:
+        lock = getattr(self, "_component_init_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._component_init_lock = lock
+
+        async with lock:
             if self._terminating:
                 return False
             # 检查必要组件是否初始化成功
             if not all(
                 [
-                    self.initializer.memory_engine,
-                    self.initializer.memory_processor,
-                    self.initializer.conversation_manager,
+                    getattr(self.initializer, "memory_engine", None),
+                    getattr(self.initializer, "memory_processor", None),
+                    getattr(self.initializer, "conversation_manager", None),
                 ]
             ):
                 logger.error("插件初始化不完整：部分核心组件未能初始化")
                 return False
 
             # 创建事件处理器（幂等）
-            if not self.event_handler:
+            if not getattr(self, "event_handler", None):
                 self.event_handler = EventHandler(
                     context=self.context,
                     config_manager=self.config_manager,
                     memory_engine=self.initializer.memory_engine,  # type: ignore[arg-type]
                     memory_processor=self.initializer.memory_processor,  # type: ignore[arg-type]
                     conversation_manager=self.initializer.conversation_manager,  # type: ignore[arg-type]
-                    consolidation_manager=self.initializer.consolidation_manager,
+                    consolidation_manager=getattr(
+                        self.initializer, "consolidation_manager", None
+                    ),
                     evidence_filter=self._native_memory_evidence_filter,
                     recall_runtime=getattr(self, "_recall_runtime", None),
                     evidence_revision_provider=self.peek_evidence_revision,
                     summary_guard=self._install_private_summary_guard,
                 )
-                self._create_tracked_task(self._recover_managed_reflections())
+                if getattr(self, "_background_tasks", None) is not None:
+                    self._create_tracked_task(self._recover_managed_reflections())
 
             # 创建命令处理器（幂等）
-            if not self.command_handler:
+            if not getattr(self, "command_handler", None):
                 self.command_handler = CommandHandler(
                     context=self.context,
                     config_manager=self.config_manager,
                     memory_engine=self.initializer.memory_engine,
                     conversation_manager=self.initializer.conversation_manager,
-                    index_validator=self.initializer.index_validator,
+                    index_validator=getattr(self.initializer, "index_validator", None),
                     memory_processor=self.initializer.memory_processor,
                     initialization_status_callback=self._get_initialization_status_message,
                 )
@@ -327,6 +381,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     await service.initialize()
                     self.evidence_service = service
                     self._blocking_policy_gate.wakeup = service.defer_policy_wakeup
+                    scheduler = getattr(self.initializer, "decay_scheduler", None)
+                    if scheduler is not None:
+                        scheduler.evidence_sidecar = sidecar
                 except Exception as exc:
                     # Evidence sidecar failure must not disable the existing memory path.
                     logger.warning(
@@ -388,7 +445,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         """
         if not self.series_runtime_allowed():
             return
-        if self._llm_tools_registered:
+        if getattr(self, "_llm_tools_registered", False):
             return
         if not self.initializer.memory_engine or not self.initializer.memory_processor:
             return
@@ -449,7 +506,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if tools:
             for tool in tools:
                 tool._series_owner_guard = self.series_runtime_allowed
-            self.context.add_llm_tools(*tools)
+            add_tools = getattr(self.context, "add_llm_tools", None)
+            if callable(add_tools):
+                add_tools(*tools)
         # 标记注册流程完成，后续不再重复检查。
         # 若用户中途修改 agent_tools 开关，需要重载插件才能生效。
         self._llm_tools_registered = True
@@ -609,12 +668,80 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         # instead of letting an optional remote search consume that time.
         budget = RecallDeadline.start(total_seconds=6.0, final_reserve_seconds=1.5)
         self._install_private_injection_getter(event, req)
-        if (
-            not getattr(self.initializer, "is_initialized", False)
-            or not self.event_handler
+        if getattr(self.initializer, "is_initialized", False) and not getattr(
+            self, "event_handler", None
+        ):
+            await self._ensure_runtime_components()
+        if not getattr(self.initializer, "is_initialized", False) or not getattr(
+            self, "event_handler", None
         ):
             setattr(req, "_lm_private_hook_outcome_v1", "disabled")
             return
+        # Run cheap access policy and input checks (~1ms) BEFORE expensive
+        # _prepare_native_memory_projection (~490ms) so excluded/empty/noise
+        # group messages exit immediately without wasting sidecar/IO work.
+        if is_event_excluded_by_series(
+            getattr(self, "context", None), event
+        ) or not is_event_memory_allowed(self.config_manager, event):
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "policy_denied")
+            except Exception:
+                pass
+            return
+        get_extra = getattr(event, "get_extra", None)
+        blocking_context = (
+            get_extra("_autonomous_blocking_context_v1", None)
+            if callable(get_extra)
+            else None
+        )
+        is_projection_restricted = (
+            isinstance(blocking_context, dict)
+            and blocking_context.get("schema_version") == 1
+            and blocking_context.get("projection_restricted") is True
+        )
+        msg_utils = getattr(self.event_handler, "message_utils", None) or getattr(
+            self.event_handler, "_message_utils", None
+        )
+        resolve_input = getattr(msg_utils, "resolve_original_input", None)
+        if callable(resolve_input):
+            try:
+                maybe_coro = resolve_input(event)
+                original = (
+                    await asyncio.wait_for(
+                        maybe_coro,
+                        timeout=budget.search_remaining(),
+                    )
+                    if inspect.isawaitable(maybe_coro)
+                    else None
+                )
+            except asyncio.TimeoutError:
+                setattr(req, "_lm_private_hook_outcome_v1", "deadline_exceeded")
+                return
+            if original is not None and isinstance(
+                getattr(original, "status", None), str
+            ):
+                try:
+                    setattr(req, "_lm_resolved_original_input_v1", original)
+                except Exception:
+                    pass
+                if original.status == "unavailable":
+                    setattr(
+                        req, "_lm_private_hook_outcome_v1", "original_input_unavailable"
+                    )
+                    return
+                if not is_projection_restricted:
+                    actual_query = str(
+                        getattr(original, "query_text", "") or ""
+                    ).strip()
+                    if not actual_query:
+                        setattr(req, "_lm_private_hook_outcome_v1", "empty")
+                        return
+                    skip_reason = should_skip_group_recall_query(event, actual_query)
+                    if skip_reason is not None:
+                        setattr(
+                            req, "_lm_private_hook_outcome_v1", f"skipped_{skip_reason}"
+                        )
+                        return
         try:
             receipt = await timed_recall_phase(
                 req,
@@ -641,17 +768,7 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             except Exception:
                 pass
             return
-        get_extra = getattr(event, "get_extra", None)
-        blocking_context = (
-            get_extra("_autonomous_blocking_context_v1", None)
-            if callable(get_extra)
-            else None
-        )
-        if (
-            isinstance(blocking_context, dict)
-            and blocking_context.get("schema_version") == 1
-            and blocking_context.get("projection_restricted") is True
-        ):
+        if is_projection_restricted:
             # Stage canonical READY sources before the optional summary search.
             # This is read-only and does not append the request surface yet.
             try:
@@ -1061,6 +1178,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 "scope_not_allowed", purpose, card_version
             )
         auth_done = time.perf_counter()
+        if getattr(self.initializer, "is_initialized", False) and not getattr(
+            self, "evidence_service", None
+        ):
+            await self._ensure_runtime_components()
         if not self.initializer.is_initialized or not self.evidence_service:
             return EvidenceViewService._empty_view(
                 "service_unavailable", purpose, card_version
@@ -1260,6 +1381,8 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             return empty_reply("scope_not_allowed", "unavailable")
         if not self.initializer.is_initialized:
             return empty_reply("service_unavailable", "unavailable")
+        if getattr(self, "evidence_service", None) is None:
+            await self._ensure_runtime_components()
         auth_started = loop.time()
         auth_personas = persona_names(scope)
         revision_started = loop.time()
@@ -2088,3 +2211,220 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             f"纠正已追加：{result['action']} {result['target_id']}；"
             f"revision={result['correction_revision']}；依赖项已失效。"
         )
+
+    def get_series_health(self) -> dict[str, Any]:
+        """同步只读健康诊断：返回就绪状态、Embedding/LLM Provider 绑定状态与降级原因。"""
+
+        def _provider_id(provider) -> str:
+            if provider is None:
+                return ""
+            meta = getattr(provider, "meta", None)
+            if callable(meta):
+                try:
+                    meta = meta()
+                except Exception:
+                    meta = None
+            if meta is not None:
+                for attr in ("id", "provider_id"):
+                    val = getattr(meta, attr, None)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+            cfg = getattr(provider, "provider_config", None)
+            if isinstance(cfg, dict):
+                val = cfg.get("id")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            for attr in ("id", "provider_id"):
+                val = getattr(provider, attr, None)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return ""
+
+        def _silent_lookup(pid: str):
+            if not pid:
+                return None
+            try:
+                return find_provider_silently(self.context, pid)
+            except Exception:
+                return None
+
+        init = getattr(self, "initializer", None)
+        cfg = getattr(self, "config_manager", None)
+        is_initialized = bool(getattr(init, "is_initialized", False))
+        is_failed = bool(getattr(init, "is_failed", False))
+        error_message = getattr(init, "error_message", None)
+        attempts = int(getattr(init, "_provider_check_attempts", 0) or 0)
+        slow_probe = bool(getattr(init, "in_slow_probe_mode", False))
+        terminating = bool(getattr(self, "_terminating", False))
+        series_enabled = getattr(self, "_series_enabled", False) is True
+        conflicts = self.series_conflicts()
+        runtime_allowed = self.series_runtime_allowed()
+        has_event_handler = getattr(self, "event_handler", None) is not None
+        has_evidence_service = getattr(self, "evidence_service", None) is not None
+        llm_tools_registered = bool(getattr(self, "_llm_tools_registered", False))
+
+        providers: list[dict[str, Any]] = []
+        issues: list[str] = []
+
+        # Embedding Provider
+        configured_emb_id = (
+            str(cfg.get("provider_settings.embedding_provider_id") or "").strip()
+            if cfg is not None
+            else ""
+        )
+        bound_emb = getattr(init, "embedding_provider", None)
+        emb_id = _provider_id(bound_emb) or configured_emb_id
+        if bound_emb is not None:
+            emb_detail = (
+                "configured" if configured_emb_id else "fallback_first_embedding"
+            )
+            providers.append(
+                {
+                    "role": "embedding",
+                    "provider_id": emb_id,
+                    "status": "ready",
+                    "detail": emb_detail,
+                }
+            )
+        else:
+            providers.append(
+                {
+                    "role": "embedding",
+                    "provider_id": configured_emb_id,
+                    "status": "missing",
+                    "detail": "embedding_provider_not_ready",
+                }
+            )
+            issues.append("embedding_provider_missing")
+
+        # LLM Provider
+        configured_llm_id = (
+            str(cfg.get("provider_settings.llm_provider_id") or "").strip()
+            if cfg is not None
+            else ""
+        )
+        resolved_llm_id = resolve_series_provider(
+            getattr(self, "context", None),
+            configured_llm_id,
+            role="reply",
+        )
+        bound_llm = getattr(init, "llm_provider", None)
+        llm_id = _provider_id(bound_llm) or resolved_llm_id
+        if bound_llm is not None:
+            llm_detail = (
+                "configured"
+                if configured_llm_id
+                else ("shared_series" if resolved_llm_id else "default_provider")
+            )
+            providers.append(
+                {
+                    "role": "llm",
+                    "provider_id": llm_id,
+                    "status": "ready",
+                    "detail": llm_detail,
+                }
+            )
+        else:
+            providers.append(
+                {
+                    "role": "llm",
+                    "provider_id": resolved_llm_id,
+                    "status": "missing",
+                    "detail": "llm_provider_not_ready",
+                }
+            )
+            issues.append("llm_provider_missing")
+
+        # Optional background LLM Provider
+        bg_llm_id = (
+            str(cfg.get("provider_settings.background_llm_provider_id") or "").strip()
+            if cfg is not None
+            else ""
+        )
+        if bg_llm_id:
+            bg_provider = _silent_lookup(bg_llm_id)
+            providers.append(
+                {
+                    "role": "background_llm",
+                    "provider_id": bg_llm_id,
+                    "status": "ready" if bg_provider is not None else "missing",
+                    "detail": "bound" if bg_provider is not None else "not_found",
+                }
+            )
+            if bg_provider is None:
+                issues.append("background_llm_provider_missing")
+
+        # Optional Rerank Provider
+        rerank_enabled = bool(
+            cfg.get("recall_engine.rerank_enabled", False) if cfg is not None else False
+        )
+        if rerank_enabled:
+            rerank_id = (
+                str(cfg.get("recall_engine.rerank_provider_id") or "").strip()
+                if cfg is not None
+                else ""
+            )
+            rerank_provider = _silent_lookup(rerank_id) if rerank_id else None
+            providers.append(
+                {
+                    "role": "rerank",
+                    "provider_id": rerank_id,
+                    "status": "ready" if rerank_provider is not None else "degraded",
+                    "detail": "bound" if rerank_provider is not None else "not_found",
+                }
+            )
+            if rerank_provider is None:
+                issues.append("rerank_provider_missing")
+
+        if terminating:
+            issues.append("plugin_terminating")
+        if not series_enabled:
+            issues.append("series_runtime_disabled")
+        if conflicts:
+            issues.append(f"plugin_conflicts:{','.join(conflicts[:3])}")
+        if not is_initialized:
+            if is_failed:
+                issues.append("initialization_failed")
+            elif slow_probe:
+                issues.append("initializing_slow_probe")
+            else:
+                issues.append("initializing")
+            if isinstance(error_message, str) and error_message.strip():
+                issues.append(error_message.strip()[:200])
+        else:
+            if not has_event_handler:
+                issues.append("event_handler_missing")
+            if not has_evidence_service:
+                issues.append("evidence_service_unavailable")
+
+        maintenance_status = (
+            getattr(init, "index_maintenance_status", None)
+            if init is not None
+            else None
+        )
+        maintenance_state = (
+            str(maintenance_status.get("state") or "idle")
+            if isinstance(maintenance_status, dict)
+            else "idle"
+        )
+        if maintenance_state in {"rebuilding", "failed", "partial"}:
+            issues.append(f"index_maintenance:{maintenance_state}")
+
+        ready = bool(runtime_allowed and is_initialized and has_event_handler)
+        degraded = bool(issues) or not ready
+
+        return {
+            "plugin_id": "astrbot_plugin_dynamics_memory",
+            "ready": ready,
+            "degraded": degraded,
+            "providers": providers,
+            "issues": issues,
+            "metrics": {
+                "provider_check_attempts": attempts,
+                "slow_probe_mode": slow_probe,
+                "event_handler_ready": has_event_handler,
+                "evidence_service_ready": has_evidence_service,
+                "llm_tools_registered": llm_tools_registered,
+                "index_maintenance_state": maintenance_state,
+            },
+        }

@@ -41,6 +41,9 @@ class DualRouteRetriever:
         self.dynamic_route_weighting = bool(
             self.config.get("dynamic_route_weighting", True)
         )
+        self.graph_route_timeout = float(
+            self.config.get("graph_route_timeout_seconds", 1.5)
+        )
 
     async def search(
         self,
@@ -62,13 +65,22 @@ class DualRouteRetriever:
             if execution_context is not None
             else self.config.get("retrieval_timeout_seconds", 10.0) * 2 + 1
         )
+        graph_timeout = (
+            min(timeout, self.graph_route_timeout)
+            if self.graph_route_timeout > 0
+            else timeout
+        )
         graph_context = execution_context
         if getattr(execution_context, "remote_deadline", None) is not None:
             budget = execution_context.budget
             reserve = min(0.2, budget.search_remaining() * 0.20)
-            graph_context = execution_context.with_deadline(
-                budget.search_deadline - reserve
+            capped_deadline = min(
+                budget.search_deadline - reserve,
+                asyncio.get_running_loop().time() + graph_timeout
+                if hasattr(budget, "search_deadline")
+                else budget.search_deadline - reserve,
             )
+            graph_context = execution_context.with_deadline(capped_deadline)
         outer_cache = (
             query_embeddings.get()
             if relevance_only or execution_context is not None
@@ -201,11 +213,18 @@ class DualRouteRetriever:
                     limit = min(limit * 2, narrative_plan.graph_ceiling)
 
             def graph_route():
+                # Give graph route a tight sub-budget and graceful degradation
+                # so slow graph expansion never stalls document-route recall.
+                sub_timeout = (
+                    min(timeout, self.graph_route_timeout)
+                    if self.graph_route_timeout > 0
+                    else timeout
+                )
                 return search_route(
                     "graph",
                     graph_candidates(),
-                    timeout,
-                    safe_errors=execution_context is not None,
+                    sub_timeout,
+                    safe_errors=True,
                 )
 
             graph_skipped = False

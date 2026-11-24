@@ -1,6 +1,7 @@
 """#385: bounded reflection input, convergent retention and serialized writes."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -307,11 +308,20 @@ async def test_native_retry_keeps_failed_rows_after_trim_while_model_runs(tmp_pa
         handler.memory_processor.process_conversation.assert_awaited_once()
         handler.memory_engine.add_memory.assert_not_awaited()
 
+        assert pending["retry_after"] > time.time()
+        # Backoff blocks immediate retry until retry_after elapses
+        assert (
+            await reflection._build_reflection_plan_for_cursor(
+                sid, 6, 0, pending, revision, None, sid
+            )
+            is None
+        )
+        pending_ready = {**pending, "retry_after": 0}
         retry = await reflection._build_reflection_plan_for_cursor(
             sid,
             6,
             0,
-            pending,
+            pending_ready,
             revision,
             None,
             sid,

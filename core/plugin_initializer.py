@@ -6,6 +6,7 @@
 import asyncio
 import inspect
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
-from ..series_panels import resolve_series_provider
+from ..series_panels import find_provider_silently, resolve_series_provider
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
 from ..storage.sqlite_connection import open_connection, resolve_journal_mode
@@ -41,7 +42,14 @@ FaissVecDB: Any = None
 class PluginInitializer(InitializerFaissMixin):
     """插件初始化器"""
 
-    def __init__(self, context: Context, config_manager: ConfigManager, data_dir: str):
+    def __init__(
+        self,
+        context: Context,
+        config_manager: ConfigManager,
+        data_dir: str,
+        *,
+        on_initialized: Callable[[], Awaitable[Any] | Any] | None = None,
+    ):
         """
         初始化插件初始化器
 
@@ -49,10 +57,13 @@ class PluginInitializer(InitializerFaissMixin):
             context: AstrBot上下文
             config_manager: 配置管理器
             data_dir: 插件数据目录路径
+            on_initialized: 可选回调，初始化完成（含后台重试成功）后触发
         """
         self.context = context
         self.config_manager = config_manager
         self.data_dir = data_dir
+        self._on_initialized = on_initialized
+        self._on_initialized_notified = False
 
         # 组件实例
         self.embedding_provider: EmbeddingProvider | None = None
@@ -77,6 +88,9 @@ class PluginInitializer(InitializerFaissMixin):
         self._providers_ready = False
         self._provider_check_attempts = 0
         self._max_provider_attempts = 60
+        self._long_retry_interval = 300.0
+        self._in_slow_probe_mode = False
+        self._wakeup_event = asyncio.Event()
         self._retry_task: asyncio.Task | None = None
         self._index_maintenance_task: asyncio.Task | None = None
         self._graph_index_requires_rebuild = False
@@ -164,6 +178,117 @@ class PluginInitializer(InitializerFaissMixin):
             # 防御性处理：读取 task.exception() 时不应阻断主流程
             pass
 
+    def wake_retry(self, *, reset_attempts: bool = False) -> None:
+        """立即唤醒等待中的初始化/重试任务；可选重置计数与失败标记并确保重试任务运行。"""
+        if self._initialization_complete:
+            return
+        if reset_attempts:
+            self._provider_check_attempts = 0
+            self._initialization_failed = False
+            self._initialization_error = None
+            self._in_slow_probe_mode = False
+        self._wakeup_event.set()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._start_retry_task_if_needed()
+
+    def reset_retry(self) -> None:
+        """外部重置重试状态并立即触发重新探测。"""
+        self.wake_retry(reset_attempts=True)
+
+    async def _sleep_or_wake(self, delay: float) -> bool:
+        """等待 delay 秒，或在 _wakeup_event 触发时立即返回 True。"""
+        if self._wakeup_event.is_set():
+            self._wakeup_event.clear()
+            return True
+        if delay <= 0:
+            return False
+        sleep_task = asyncio.create_task(asyncio.sleep(delay))
+        wake_task = asyncio.create_task(self._wakeup_event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                (sleep_task, wake_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if wake_task in done and not wake_task.cancelled():
+                self._wakeup_event.clear()
+                return True
+            if sleep_task in done:
+                if sleep_task.cancelled():
+                    raise asyncio.CancelledError
+                exc = sleep_task.exception()
+                if exc is not None:
+                    raise exc
+            return False
+        except asyncio.CancelledError:
+            for task in (sleep_task, wake_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
+            raise
+
+    def _describe_missing_providers(self, *, detailed: bool) -> list[str]:
+        missing = []
+        if not self.embedding_provider:
+            missing.append(
+                "Embedding Provider（请先在 AstrBot 后台「LLM 配置」中创建并启用 "
+                "Embedding Provider，再在插件配置 provider_settings.embedding_provider_id 中填写其 ID）"
+                if detailed
+                else "Embedding Provider"
+            )
+        if not self.llm_provider:
+            missing.append(
+                "LLM Provider（请配置语言模型）" if detailed else "LLM Provider"
+            )
+        return missing
+
+    def _record_provider_timeout_error(self) -> None:
+        missing = self._describe_missing_providers(detailed=True)
+        if missing:
+            logger.warning(
+                f"以下 Provider 在 {self._provider_check_attempts} 次尝试后仍未就绪，"
+                f"降频为每 {self._long_retry_interval:.0f}s 探测一次: {', '.join(missing)}"
+            )
+            self._initialization_error = (
+                "Provider 初始化超时（已转入低频探测）。"
+                f"未就绪 Provider: {', '.join(missing)}。"
+                "请检查 provider_settings 配置和 AstrBot 默认 Provider。"
+            )
+        else:
+            logger.warning(
+                f"初始化在 {self._provider_check_attempts} 次尝试后仍未完成，"
+                f"降频为每 {self._long_retry_interval:.0f}s 探测一次"
+            )
+            if not self._initialization_error:
+                self._initialization_error = (
+                    f"初始化在 {self._provider_check_attempts} 次尝试后仍未完成（已转入低频探测）"
+                )
+
+    async def _notify_initialized(self) -> None:
+        """触发可选的初始化完成回调（幂等，异常不回滚初始化状态）。"""
+        if self._on_initialized_notified or not self._initialization_complete:
+            return
+        callback = getattr(self, "_on_initialized", None)
+        if not callable(callback):
+            return
+        self._on_initialized_notified = True
+        try:
+            res = callback()
+            if inspect.isawaitable(res):
+                await res
+        except asyncio.CancelledError:
+            self._on_initialized_notified = False
+            raise
+        except Exception as exc:
+            self._on_initialized_notified = False
+            logger.error(f"初始化完成回调执行失败: {exc}", exc_info=True)
+
     async def _wait_for_providers_non_blocking(self, max_wait: float = 5.0) -> bool:
         """非阻塞地检查 Provider 是否可用"""
         start_time = time.time()
@@ -179,7 +304,7 @@ class PluginInitializer(InitializerFaissMixin):
                 self._providers_ready = True
                 return True
 
-            await asyncio.sleep(check_interval)
+            await self._sleep_or_wake(check_interval)
             self._provider_check_attempts += 1
 
         logger.debug(
@@ -190,33 +315,38 @@ class PluginInitializer(InitializerFaissMixin):
         return False
 
     async def _retry_initialization(self):
-        """后台重试初始化任务（指数退避策略）"""
+        """后台重试初始化任务（指数退避 -> 300s 低频探测，避免永久锁死）"""
         base_interval = 2.0
         max_interval = 30.0
         current_interval = base_interval
         log_interval = 5
+        slow_probe_logged = False
 
-        while (
-            not self._initialization_complete
-            and not self._initialization_failed
-            and self._provider_check_attempts < self._max_provider_attempts
-        ):
-            await asyncio.sleep(current_interval)
+        while not self._initialization_complete and not self._initialization_failed:
+            in_slow_probe = (
+                self._provider_check_attempts >= self._max_provider_attempts
+            )
+            if in_slow_probe:
+                self._in_slow_probe_mode = True
+                if not slow_probe_logged:
+                    self._record_provider_timeout_error()
+                    slow_probe_logged = True
+                sleep_interval = self._long_retry_interval
+            else:
+                self._in_slow_probe_mode = False
+                slow_probe_logged = False
+                sleep_interval = current_interval
+
+            woken = await self._sleep_or_wake(sleep_interval)
+            if self._initialization_complete or self._initialization_failed:
+                break
+            if woken and self._provider_check_attempts == 0:
+                current_interval = base_interval
+                slow_probe_logged = False
+                in_slow_probe = False
 
             await self._initialize_providers(silent=True)
             self._provider_check_attempts += 1
-
-            if self._provider_check_attempts % log_interval == 0:
-                missing = []
-                if not self.embedding_provider:
-                    missing.append("Embedding Provider")
-                if not self.llm_provider:
-                    missing.append("LLM Provider")
-                logger.info(
-                    f"等待 Provider 就绪（未就绪: {', '.join(missing)}）..."
-                    f"（已尝试 {self._provider_check_attempts}/{self._max_provider_attempts} 次，"
-                    f"下次重试间隔 {current_interval:.1f}s）"
-                )
 
             if self.embedding_provider and self.llm_provider:
                 logger.info(
@@ -234,33 +364,32 @@ class PluginInitializer(InitializerFaissMixin):
                     # 清理半初始化资源后继续重试，避免瞬态错误永久禁用插件。
                     await self._teardown_partial_init()
                 else:
+                    if self._initialization_complete:
+                        self._in_slow_probe_mode = False
+                        await self._notify_initialized()
                     break
-
-            # 指数退避，最大30秒
-            current_interval = min(current_interval * 1.5, max_interval)
-
-        if not self._initialization_complete:
-            missing = []
-            if not self.embedding_provider:
-                missing.append(
-                    "Embedding Provider（请先在 AstrBot 后台「LLM 配置」中创建并启用 "
-                    "Embedding Provider，再在插件配置 provider_settings.embedding_provider_id 中填写其 ID）"
-                )
-            if not self.llm_provider:
-                missing.append("LLM Provider（请配置语言模型）")
-            if missing:
-                logger.error(
-                    f"以下 Provider 在 {self._provider_check_attempts} 次尝试后仍未就绪，初始化失败: "
-                    f"{', '.join(missing)}"
-                )
-                self._initialization_error = (
-                    "Provider 初始化超时。"
-                    f"未就绪 Provider: {', '.join(missing)}。"
-                    "请检查 provider_settings 配置和 AstrBot 默认 Provider。"
-                )
             else:
-                logger.error(f"初始化在 {self._provider_check_attempts} 次尝试后仍失败")
-            self._initialization_failed = True
+                if (
+                    not in_slow_probe
+                    and self._provider_check_attempts % log_interval == 0
+                ):
+                    missing = self._describe_missing_providers(detailed=False)
+                    logger.info(
+                        f"等待 Provider 就绪（未就绪: {', '.join(missing)}）..."
+                        f"（已尝试 {self._provider_check_attempts}/{self._max_provider_attempts} 次，"
+                        f"下次重试间隔 {current_interval:.1f}s）"
+                    )
+                elif in_slow_probe:
+                    missing = self._describe_missing_providers(detailed=False)
+                    logger.warning(
+                        f"低频探测 Provider 仍未就绪（未就绪: {', '.join(missing)}，"
+                        f"累计尝试 {self._provider_check_attempts} 次，"
+                        f"下次探测间隔 {self._long_retry_interval:.0f}s）"
+                    )
+
+            # 指数退避，最大30秒；超过阈值后按 300s 低频探测，不设置永久失败锁死
+            if not in_slow_probe:
+                current_interval = min(current_interval * 1.5, max_interval)
 
     async def _initialize_providers(self, silent: bool = False):
         """初始化 Embedding 和 LLM provider"""
@@ -354,16 +483,31 @@ class PluginInitializer(InitializerFaissMixin):
                 self.llm_provider = None
 
     def _get_provider_by_id(self, provider_id: str, *, silent: bool):
-        """静默检查阶段绕过会打印 warning 的 AstrBot 查询接口。"""
+        """静默检查或冷启动阶段优先使用 find_provider_silently，避免刷屏未找到日志。"""
         if not provider_id:
             return None
-        if not silent:
-            return self.context.get_provider_by_id(provider_id)
-        provider_manager = getattr(self.context, "provider_manager", None)
-        inst_map = getattr(provider_manager, "inst_map", None)
-        if isinstance(inst_map, dict):
-            return inst_map.get(provider_id)
-        return None
+        use_silent = silent or not self._initialization_complete
+        try:
+            found = find_provider_silently(
+                self.context, provider_id, allow_fallback=not use_silent
+            )
+            if found is not None or use_silent:
+                return found
+        except TypeError:
+            provider_manager = getattr(self.context, "provider_manager", None)
+            inst_map = getattr(provider_manager, "inst_map", None)
+            if isinstance(inst_map, dict):
+                found = inst_map.get(provider_id)
+                if found is not None or use_silent:
+                    return found
+            getter = getattr(self.context, "get_provider_by_id", None)
+            return getter(provider_id) if callable(getter) else None
+        return self.context.get_provider_by_id(provider_id)
+
+    @property
+    def in_slow_probe_mode(self) -> bool:
+        """是否已进入 300s 低频探测阶段"""
+        return bool(self._in_slow_probe_mode)
 
     @property
     def is_initialized(self) -> bool:
@@ -447,10 +591,14 @@ class PluginInitializer(InitializerFaissMixin):
             await self._init_index_and_scheduling(storage)
 
             self._initialization_complete = True
+            self._initialization_failed = False
+            self._initialization_error = None
+            self._in_slow_probe_mode = False
             logger.info("LivingMemory 插件初始化成功。")
         except Exception as e:
             logger.error(f"完整初始化流程失败: {e}", exc_info=True)
             raise InitializationError(f"初始化失败: {e}") from e
+        await self._notify_initialized()
 
     async def _open_vector_storage(self) -> dict[str, Any]:
         """校验 Provider、打开 FAISS 存储并安装异步落盘。"""

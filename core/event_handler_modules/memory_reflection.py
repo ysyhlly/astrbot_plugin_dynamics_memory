@@ -569,12 +569,16 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         ):
             logger.warning("Summary paused; original input retained")
             return None
+        # Enforce retry_after backoff across all failure stages (retries 1-3 + cooldown).
+        if (
+            pending_summary
+            and time.time() < float(pending_summary.get("retry_after", 0) or 0)
+        ):
+            return None
         if (
             pending_summary
             and pending_summary.get("failure_stage") == "retry_exhausted"
         ):
-            if time.time() < float(pending_summary.get("retry_after", 0) or 0):
-                return None
             pending_summary = {
                 **pending_summary,
                 "failure_stage": "model",

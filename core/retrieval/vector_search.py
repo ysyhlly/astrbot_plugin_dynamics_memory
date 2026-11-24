@@ -3,13 +3,132 @@
 import asyncio
 import hashlib
 import json
+import time
 from contextvars import ContextVar
 from types import SimpleNamespace
 
+from ...series_panels import record_series_llm_usage
 from ..faiss_async_persist import get_async_persister
 from ..memory_scope import adapter_sql, current_adapter_access
+from ..passive_group_capture import get_active_plugin
 
 query_embeddings = ContextVar("livingmemory_query_embeddings", default=None)
+
+_TELEMETRY_PLUGIN_ID = "astrbot_plugin_dynamics_memory"
+
+
+def _extract_embedding_provider_meta(provider) -> tuple[str, str]:
+    """Extract (provider_id, model) from an AstrBot EmbeddingProvider."""
+    provider_id = ""
+    model = ""
+    if provider is None:
+        return "embedding", ""
+    meta = getattr(provider, "meta", None)
+    if callable(meta):
+        try:
+            meta = meta()
+        except Exception:
+            meta = None
+    if meta is not None:
+        for attr in ("id", "provider_id"):
+            val = getattr(meta, attr, None)
+            if isinstance(val, str) and val.strip():
+                provider_id = val.strip()
+                break
+        meta_model = getattr(meta, "model", None)
+        if isinstance(meta_model, str) and meta_model.strip():
+            model = meta_model.strip()
+    cfg = getattr(provider, "provider_config", None)
+    if isinstance(cfg, dict):
+        if not provider_id:
+            val = cfg.get("id")
+            if isinstance(val, str) and val.strip():
+                provider_id = val.strip()
+        if not model:
+            for key in ("embedding_model", "model"):
+                val = cfg.get(key)
+                if isinstance(val, str) and val.strip():
+                    model = val.strip()
+                    break
+            if not model:
+                model_cfg = cfg.get("model_config")
+                if isinstance(model_cfg, dict):
+                    val = model_cfg.get("model")
+                    if isinstance(val, str) and val.strip():
+                        model = val.strip()
+    if not provider_id:
+        for attr in ("id", "provider_id"):
+            val = getattr(provider, attr, None)
+            if isinstance(val, str) and val.strip():
+                provider_id = val.strip()
+                break
+    if not model:
+        getter = getattr(provider, "get_model", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if isinstance(val, str) and val.strip():
+                    model = val.strip()
+            except Exception:
+                pass
+        if not model:
+            val = getattr(provider, "model_name", None) or getattr(
+                provider, "model", None
+            )
+            if isinstance(val, str) and val.strip():
+                model = val.strip()
+    return provider_id or "embedding", model
+
+
+def report_embedding_usage(
+    provider,
+    *,
+    elapsed_seconds: float,
+    ok: bool,
+    error_type: str = "",
+    context=None,
+) -> bool:
+    """Report one embedding call's duration and outcome to series telemetry."""
+    resolved_ctx = context
+    if resolved_ctx is None:
+        plugin = get_active_plugin()
+        resolved_ctx = getattr(plugin, "context", None) if plugin is not None else None
+    if resolved_ctx is None:
+        resolved_ctx = getattr(provider, "context", None)
+    provider_id, model = _extract_embedding_provider_meta(provider)
+    return record_series_llm_usage(
+        resolved_ctx,
+        plugin_id=_TELEMETRY_PLUGIN_ID,
+        provider_id=provider_id,
+        purpose="embedding",
+        generation_seconds=max(0.0, float(elapsed_seconds)),
+        ok=bool(ok),
+        error_type=error_type,
+        model=model,
+    )
+
+
+async def call_embedding_with_telemetry(provider, text: str, *, context=None):
+    """Invoke ``provider.get_embedding(text)`` and report telemetry."""
+    started = time.monotonic()
+    try:
+        value = await provider.get_embedding(text)
+    except BaseException as exc:
+        report_embedding_usage(
+            provider,
+            elapsed_seconds=time.monotonic() - started,
+            ok=False,
+            error_type=type(exc).__name__,
+            context=context,
+        )
+        raise
+    report_embedding_usage(
+        provider,
+        elapsed_seconds=time.monotonic() - started,
+        ok=True,
+        context=context,
+    )
+    return value
 
 
 async def retrieve_documents(
@@ -107,14 +226,16 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         provider = db.embedding_provider
         cache = query_embeddings.get()
         if cache is None:
-            embedding = await provider.get_embedding(query)
+            embedding = await call_embedding_with_telemetry(provider, query)
         else:
             key = (id(provider), query)
             if key not in cache:
                 if isinstance(cache, QueryEmbeddingCache):
                     cache[key] = cache.start(provider, query)
                 else:
-                    cache[key] = asyncio.create_task(provider.get_embedding(query))
+                    cache[key] = asyncio.create_task(
+                        call_embedding_with_telemetry(provider, query)
+                    )
                     cache[key].add_done_callback(_observe_embedding)
             embedding = await asyncio.shield(cache[key])
         vector = np.asarray(embedding, dtype=np.float32).ravel()
@@ -160,12 +281,28 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
             exhausted = len(ids) < fetch_k
         else:
             # Older host adapters expose only retrieve; preserve their public API.
-            raw = await db.retrieve(
-                query=query,
-                k=fetch_k,
-                fetch_k=fetch_k,
-                rerank=False,
-                metadata_filters=storage_filters or None,
+            fallback_provider = getattr(db, "embedding_provider", None)
+            retrieve_started = time.monotonic()
+            try:
+                raw = await db.retrieve(
+                    query=query,
+                    k=fetch_k,
+                    fetch_k=fetch_k,
+                    rerank=False,
+                    metadata_filters=storage_filters or None,
+                )
+            except BaseException as exc:
+                report_embedding_usage(
+                    fallback_provider,
+                    elapsed_seconds=time.monotonic() - retrieve_started,
+                    ok=False,
+                    error_type=type(exc).__name__,
+                )
+                raise
+            report_embedding_usage(
+                fallback_provider,
+                elapsed_seconds=time.monotonic() - retrieve_started,
+                ok=True,
             )
             exhausted = not filters and len(raw) < fetch_k
 
@@ -212,7 +349,7 @@ class QueryEmbeddingCache(dict):
             if loop.time() >= self.deadline:
                 raise TimeoutError("query_embedding_deadline")
             async with asyncio.timeout_at(self.deadline):
-                value = await provider.get_embedding(query)
+                value = await call_embedding_with_telemetry(provider, query)
             if loop.time() >= self.deadline:
                 raise TimeoutError("query_embedding_deadline")
             return value

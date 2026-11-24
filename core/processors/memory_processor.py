@@ -17,6 +17,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ...series_panels import (
+    find_provider_silently,
     is_provider_budget_busy_error,
     resolve_series_provider,
     resolve_series_timezone,
@@ -320,12 +321,19 @@ class MemoryProcessor:
                 return self._llm_provider
             return None
 
+        def _lookup_provider(pid: str):
+            try:
+                return find_provider_silently(self.context, pid)
+            except TypeError:
+                getter = getattr(self.context, "get_provider_by_id", None)
+                return getter(pid) if callable(getter) else None
+
         background_provider_id = str(
             self.config.get("background_llm_provider_id", "") or ""
         ).strip()
         if background_provider_id:
             try:
-                provider = self.context.get_provider_by_id(background_provider_id)
+                provider = _lookup_provider(background_provider_id)
             except Exception:
                 provider = None
             if (
@@ -347,7 +355,7 @@ class MemoryProcessor:
         # 优先使用配置中指定的Provider ID（字符串）
         if isinstance(self._llm_provider, str) and self._llm_provider:
             try:
-                provider = self.context.get_provider_by_id(self._llm_provider)
+                provider = _lookup_provider(self._llm_provider)
                 if (
                     provider
                     and getattr(provider, "is_systemone_provider", False) is not True
@@ -360,7 +368,7 @@ class MemoryProcessor:
         shared_provider_id = resolve_series_provider(self.context, "", role="reply")
         if shared_provider_id:
             try:
-                provider = self.context.get_provider_by_id(shared_provider_id)
+                provider = _lookup_provider(shared_provider_id)
                 if (
                     provider
                     and getattr(provider, "is_systemone_provider", False) is not True
@@ -803,6 +811,7 @@ class MemoryProcessor:
         is_group_chat: bool = False,
         persona_id: str | None = None,
         quality_feedback: str | None = None,
+        allow_degraded_quality: bool = False,
     ) -> tuple[str, dict[str, Any], float]:
         """
         处理对话历史,生成结构化记忆
@@ -879,22 +888,51 @@ class MemoryProcessor:
 
             # 4.5 质量校验：低质量总结默认不写入主库，由调用方按可重试失败处理
             quality_check = check_summary_quality(structured_data)
+            degraded_warning = quality_check.degraded_warning
             if quality_check.reason_code:
-                global _low_quality_rejections
-                _low_quality_rejections += 1
-                logger.warning(
-                    "[MemoryProcessor] 总结质量不达标（low），拒绝写入主库: "
-                    f"reason={quality_check.reason_code}, "
-                    f"summary_chars={quality_check.summary_chars}, "
-                    f"fact_count={quality_check.fact_count}, "
-                    f"importance_valid={quality_check.importance_valid}, "
-                    f"matched_generic_terms={quality_check.matched_generic_terms}, "
-                    f"rejected_total={_low_quality_rejections}"
-                )
-                raise LowQualityMemoryError(
-                    "总结质量不达标", error_code=quality_check.reason_code
-                )
-            structured_data["_quality"] = "normal"
+                if (
+                    allow_degraded_quality
+                    and quality_check.reason_code == "summary_generic_reference"
+                    and quality_check.summary_chars >= 10
+                    and quality_check.fact_count >= 1
+                    and quality_check.importance_valid
+                ):
+                    degraded_warning = "summary_generic_reference_degraded_after_retry"
+                    logger.warning(
+                        "[MemoryProcessor] 重试耗尽前放行降级摘要以防游标死锁: "
+                        f"reason={quality_check.reason_code}, "
+                        f"summary_chars={quality_check.summary_chars}, "
+                        f"fact_count={quality_check.fact_count}, "
+                        f"matched_generic_terms={quality_check.matched_generic_terms}"
+                    )
+                else:
+                    global _low_quality_rejections
+                    _low_quality_rejections += 1
+                    logger.warning(
+                        "[MemoryProcessor] 总结质量不达标（low），拒绝写入主库: "
+                        f"reason={quality_check.reason_code}, "
+                        f"summary_chars={quality_check.summary_chars}, "
+                        f"fact_count={quality_check.fact_count}, "
+                        f"importance_valid={quality_check.importance_valid}, "
+                        f"matched_generic_terms={quality_check.matched_generic_terms}, "
+                        f"rejected_total={_low_quality_rejections}"
+                    )
+                    raise LowQualityMemoryError(
+                        "总结质量不达标", error_code=quality_check.reason_code
+                    )
+            if degraded_warning:
+                if not quality_check.reason_code:
+                    logger.warning(
+                        "[MemoryProcessor] 长摘要单次命中泛化词，降级告警写入: "
+                        f"warning={degraded_warning}, "
+                        f"summary_chars={quality_check.summary_chars}, "
+                        f"fact_count={quality_check.fact_count}, "
+                        f"matched_generic_terms={quality_check.matched_generic_terms}"
+                    )
+                structured_data["_quality"] = "degraded"
+                structured_data["_quality_warning"] = degraded_warning
+            else:
+                structured_data["_quality"] = "normal"
 
             # 5. 构建存储格式
             fallback_excerpt = (
@@ -916,6 +954,8 @@ class MemoryProcessor:
             )
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
+            if structured_data.get("_quality_warning"):
+                metadata["summary_quality_warning"] = structured_data["_quality_warning"]
 
             importance = float(structured_data.get("importance", 0.5))
 

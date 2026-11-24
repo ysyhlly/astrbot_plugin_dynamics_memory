@@ -1,4 +1,10 @@
-# astrbot_plugin_dynamics_memory 0.2.0-rc.7
+# astrbot_plugin_dynamics_memory 0.2.0-rc.8
+
+## [0.2.0-rc.8] - 2026-11-24
+
+- 全面落地存储生命周期治理：全部 SQLite 启用 `PRAGMA auto_vacuum=INCREMENTAL` + 定期增量收缩与 WAL 截断；每日备份改为 `.db.gz` 压缩并调用 `BackupManager.prune()`；`evidence_sidecar` 按 `(scope_key, conversation_id, text_hash)` 去重并对滞留队列/材料按 TTL 与单群上限裁剪；`conversations.db` 强制消息上限与 `narrative_events` TTL 裁剪；`livingmemory.db` 定期剥离老旧 `memory_write_ops` payload 与清除过期归档。
+- 修复反思质检对「有人」习语误杀并增加指数退避与游标脱死锁机制；前置便宜的权限/命令/`@他人` 过滤以减少无效 Projection 与 Embedding。
+- `GraphStore` 升级 4 连接 WAL 并发读池、索引前缀/FTS5 三元组与 `1.5s` 超时优雅降级；同步最新 `series_panels.py`。
 
 ## [0.2.0-rc.7] - 2026-11-22
 

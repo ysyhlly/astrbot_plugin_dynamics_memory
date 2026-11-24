@@ -5,6 +5,7 @@
 
 import asyncio
 import contextvars
+import re
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -45,6 +46,84 @@ if TYPE_CHECKING:
     from ..managers.conversation_manager import ConversationManager
     from ..managers.memory_engine import MemoryEngine
     from .message_utils import MessageUtils
+
+
+_GROUP_COMMAND_PREFIXES = ("/", "!", ".", "！")
+_MEANINGFUL_CHAR_RE = re.compile(r"[0-9A-Za-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def should_skip_group_recall_query(
+    event: AstrMessageEvent, actual_query: str
+) -> str | None:
+    """Return a skip reason when a group message should bypass recall/embedding.
+
+    Skips when:
+    - Raw message components contain ``At`` targeting only other bots/users (not ``self_id``);
+    - ``actual_query`` starts with a command prefix (``/``, ``!``, ``.``, ``！``);
+    - ``actual_query`` has fewer than 2 meaningful alphanumeric/CJK characters.
+    """
+    get_msg_type = getattr(event, "get_message_type", None)
+    try:
+        is_group = callable(get_msg_type) and get_msg_type() == MessageType.GROUP_MESSAGE
+    except Exception:
+        is_group = False
+    if not is_group:
+        return None
+
+    # 1. Inspect raw message components for At targeting only other bots/users
+    raw_components = None
+    msg_obj = getattr(event, "message_obj", None)
+    if msg_obj is not None:
+        raw_components = getattr(msg_obj, "message", None)
+    if not isinstance(raw_components, (list, tuple)):
+        get_messages = getattr(event, "get_messages", None)
+        if callable(get_messages):
+            try:
+                raw_components = get_messages()
+            except Exception:
+                raw_components = None
+    if isinstance(raw_components, (list, tuple)):
+        at_targets: set[str] = set()
+        mentions_all = False
+        for comp in raw_components:
+            if type(comp).__name__ != "At":
+                continue
+            target = str(
+                getattr(comp, "qq", None)
+                or getattr(comp, "target", None)
+                or getattr(comp, "user_id", None)
+                or ""
+            ).strip()
+            if not target:
+                continue
+            if target.lower() == "all":
+                mentions_all = True
+                break
+            at_targets.add(target)
+        if at_targets and not mentions_all:
+            get_self_id = getattr(event, "get_self_id", None)
+            try:
+                self_id = (
+                    str(get_self_id() or "").strip()
+                    if callable(get_self_id)
+                    else str(getattr(event, "self_id", "") or "").strip()
+                )
+            except Exception:
+                self_id = ""
+            if self_id and self_id not in at_targets:
+                return "at_other"
+
+    # 2. Skip command-prefixed messages (e.g. /今日运势, !ping, .help, ！菜单)
+    stripped = (actual_query or "").strip()
+    if not stripped:
+        return "empty"
+    if stripped[0] in _GROUP_COMMAND_PREFIXES:
+        return "command_prefix"
+
+    # 3. Skip trivially short messages (<2 meaningful chars)
+    if len(_MEANINGFUL_CHAR_RE.findall(stripped)) < 2:
+        return "trivial_short"
+    return None
 
 
 class MemoryRecall:
@@ -139,14 +218,18 @@ class MemoryRecall:
             # Never use ProviderRequest.prompt: CD may have rewritten it into a
             # planning envelope. The authenticated sidecar resolver is the only
             # input for owned clones; ordinary host events use direct Plain parts.
-            try:
-                original = await asyncio.wait_for(
-                    self.message_utils.resolve_original_input(event),
-                    timeout=deadline.search_remaining(),
-                )
-            except asyncio.TimeoutError:
-                self._set_recall_outcome(req, "deadline_exceeded")
-                return
+            cached_original = getattr(req, "_lm_resolved_original_input_v1", None)
+            if cached_original is not None:
+                original = cached_original
+            else:
+                try:
+                    original = await asyncio.wait_for(
+                        self.message_utils.resolve_original_input(event),
+                        timeout=deadline.search_remaining(),
+                    )
+                except asyncio.TimeoutError:
+                    self._set_recall_outcome(req, "deadline_exceeded")
+                    return
             if original.status == "unavailable":
                 self._set_recall_outcome(req, "original_input_unavailable")
                 return
@@ -181,6 +264,15 @@ class MemoryRecall:
 
                 if not actual_query:
                     self._set_recall_outcome(req, "empty")
+                    return
+
+                skip_reason = should_skip_group_recall_query(event, actual_query)
+                if skip_reason is not None:
+                    logger.debug(
+                        "[LMRecall] route=noise_filter outcome=skipped reason=%s",
+                        skip_reason,
+                    )
+                    self._set_recall_outcome(req, f"skipped_{skip_reason}")
                     return
 
                 # Store only real original private user text. Owned CD DTOs are

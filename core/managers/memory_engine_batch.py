@@ -282,6 +282,68 @@ class MemoryEngineBatchMixin:
             logger.error("[清理] 清理旧记忆失败", exc_info=True)
             return 0
 
+    async def purge_expired_archived_memories(
+        self, retention_days: int | None = None
+    ) -> int:
+        """Permanently purge ``status='archived'`` documents (and graph/atom rows) past retention TTL."""
+        days_raw = (
+            self.config.get("archived_retention_days", 90)
+            if retention_days is None
+            else retention_days
+        )
+        try:
+            days = int(days_raw)
+        except (TypeError, ValueError):
+            days = 90
+        if days <= 0 or self.db_connection is None:
+            return 0
+
+        cutoff_time = time.time() - (days * 86400)
+        ownership, ownership_params = adapter_sql("metadata")
+        try:
+            batch_size = 500
+            last_id = 0
+            expired_ids: list[int] = []
+            while True:
+                cursor = await self.db_connection.execute(
+                    f"""
+                    SELECT id, metadata FROM documents
+                    WHERE id > ? AND {ownership}
+                      AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'archived'
+                    ORDER BY id LIMIT ?
+                    """,
+                    (last_id, *ownership_params, batch_size),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    break
+                last_id = int(rows[-1]["id"])
+                raw_metadata = [r["metadata"] for r in rows]
+                parsed = await asyncio.to_thread(
+                    lambda: [safe_json_dict(m) for m in raw_metadata]
+                )
+                for row, metadata in zip(rows, parsed):
+                    archived_ts = safe_float(
+                        metadata.get("archived_at")
+                        or metadata.get("last_access_time")
+                        or metadata.get("create_time"),
+                        0.0,
+                    )
+                    if archived_ts > 0 and archived_ts < cutoff_time:
+                        expired_ids.append(int(row["id"]))
+
+            if not expired_ids:
+                return 0
+            logger.info(
+                f"[归档清理] 发现 {len(expired_ids)} 条超期归档记忆（TTL={days}天），开始彻底清除"
+            )
+            return await self.batch_delete_memories(expired_ids)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error("[归档清理] 清除过期归档记忆失败", exc_info=True)
+            return 0
+
     async def archive_memories(
         self,
         memory_ids: list[int],

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tarfile
 import time
 from pathlib import Path
 
@@ -12,6 +13,20 @@ from astrbot_plugin_dynamics_memory.core.managers.backup_manager import (
     PLUGIN_VERSION,
     BackupManager,
 )
+
+
+def _read_tar_members(archive_path: Path) -> tuple[dict[str, bytes], dict]:
+    """Read all member bytes and parsed backup_info.json from a .tar.gz backup."""
+    contents: dict[str, bytes] = {}
+    with tarfile.open(archive_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is not None:
+                contents[Path(member.name).name] = extracted.read()
+    info = json.loads(contents[_BACKUP_INFO_FILE].decode("utf-8"))
+    return contents, info
 
 
 def test_get_stored_version_first_run(tmp_path: Path) -> None:
@@ -54,30 +69,33 @@ def test_backup_if_needed_creates_backup_dir(tmp_path: Path) -> None:
     (tmp_path / "livingmemory.db").write_text("mock db content")
     (tmp_path / "livingmemory.index").write_text("mock index")
     (tmp_path / "conversations.db").write_text("mock conversations")
+    (tmp_path / "evidence_sidecar.sqlite3").write_text("mock sidecar")
     (tmp_path / "decay_state.json").write_text('{"last_run": "2025-01-01"}')
 
     mgr = BackupManager(str(tmp_path))
     # Simulate previous version
     mgr.version_file.write_text("2.0.0", encoding="utf-8")
 
-    backup_dir = mgr.backup_if_needed()
-    assert backup_dir is not None
-    assert os.path.isdir(backup_dir)
-    assert "v2.0.0" in backup_dir
+    archive = mgr.backup_if_needed()
+    assert archive is not None
+    archive_path = Path(archive)
+    assert archive_path.is_file()
+    assert archive_path.name == "v2.0.0.tar.gz"
 
-    # Verify files were copied
-    backup_path = Path(backup_dir)
-    assert (backup_path / "livingmemory.db").exists()
-    assert (backup_path / "conversations.db").exists()
-    assert (backup_path / "decay_state.json").exists()
+    # Verify files were archived (FAISS .index skipped by default, evidence_sidecar included)
+    contents, info = _read_tar_members(archive_path)
+    assert "livingmemory.db" in contents
+    assert "conversations.db" in contents
+    assert "evidence_sidecar.sqlite3" in contents
+    assert "decay_state.json" in contents
+    assert "livingmemory.index" not in contents
 
     # Verify backup info was written
-    info_path = backup_path / _BACKUP_INFO_FILE
-    assert info_path.exists()
-    info = json.loads(info_path.read_text(encoding="utf-8"))
     assert info["plugin_version"] == PLUGIN_VERSION
     assert info["previous_version"] == "2.0.0"
-    assert info["files_copied"] >= 3
+    assert info["format"] == "tar.gz"
+    assert info["include_faiss"] is False
+    assert info["files_copied"] >= 4
 
     # Verify version file was updated
     assert mgr.get_stored_version() == PLUGIN_VERSION
@@ -87,9 +105,10 @@ def test_backup_if_needed_first_install(tmp_path: Path) -> None:
     (tmp_path / "livingmemory.db").write_text("fresh install")
 
     mgr = BackupManager(str(tmp_path))
-    backup_dir = mgr.backup_if_needed()
-    assert backup_dir is not None
-    assert "unknown" in backup_dir
+    backup_archive = mgr.backup_if_needed()
+    assert backup_archive is not None
+    assert "unknown" in backup_archive
+    assert Path(backup_archive).is_file()
 
     # Version file should now be written
     assert mgr.get_stored_version() == PLUGIN_VERSION
@@ -101,10 +120,10 @@ def test_backup_handles_missing_files_gracefully(tmp_path: Path) -> None:
     mgr.version_file.write_text("1.0.0", encoding="utf-8")
 
     result = mgr.backup_if_needed()
-    assert result is not None  # backup dir still created
-    backup_path = Path(result)
-    assert backup_path.exists()
-    info = json.loads((backup_path / _BACKUP_INFO_FILE).read_text(encoding="utf-8"))
+    assert result is not None  # backup archive still created
+    archive_path = Path(result)
+    assert archive_path.is_file()
+    _, info = _read_tar_members(archive_path)
     assert info["files_copied"] == 0
 
 
@@ -114,10 +133,10 @@ def test_backup_preserves_file_content(tmp_path: Path) -> None:
 
     mgr = BackupManager(str(tmp_path))
     mgr.version_file.write_text("1.0.0", encoding="utf-8")
-    backup_dir = mgr.backup_if_needed()
+    backup_archive = mgr.backup_if_needed()
 
-    backup_file = Path(backup_dir) / "livingmemory.db"
-    assert backup_file.read_text(encoding="utf-8") == original_content
+    contents, _ = _read_tar_members(Path(backup_archive))
+    assert contents["livingmemory.db"].decode("utf-8") == original_content
 
 
 def test_list_backups_empty(tmp_path: Path) -> None:
@@ -126,7 +145,7 @@ def test_list_backups_empty(tmp_path: Path) -> None:
 
 
 def test_list_backups_with_data(tmp_path: Path) -> None:
-    # Create a fake backup directory
+    # Create a fake backup directory (legacy format remains readable)
     backup_root = tmp_path / "backups" / "v1.0.0"
     backup_root.mkdir(parents=True)
     (backup_root / "livingmemory.db").write_text("old backup")
@@ -147,26 +166,33 @@ def test_list_backups_with_data(tmp_path: Path) -> None:
 
 
 def test_backup_includes_graph_files(tmp_path: Path) -> None:
-    """图数据库文件应被通配符匹配并备份。"""
+    """图数据库默认备份；FAISS 索引默认跳过，显式 include_faiss=True 时纳入。"""
     (tmp_path / "livingmemory_graph_documents.db").write_text("graph docs")
     (tmp_path / "livingmemory_graph.index").write_text("graph index")
 
     mgr = BackupManager(str(tmp_path))
     mgr.version_file.write_text("2.0.0", encoding="utf-8")
-    backup_dir = mgr.backup_if_needed()
+    default_archive = mgr.backup_if_needed()
+    contents, _ = _read_tar_members(Path(default_archive))
+    assert "livingmemory_graph_documents.db" in contents
+    assert "livingmemory_graph.index" not in contents
 
-    backup_path = Path(backup_dir)
+    # Explicit include_faiss=True & compress=False directory mode
+    mgr.version_file.write_text("2.0.1", encoding="utf-8")
+    full_dir = mgr.backup_if_needed(compress=False, include_faiss=True)
+    backup_path = Path(full_dir)
+    assert backup_path.is_dir()
     assert (backup_path / "livingmemory_graph_documents.db").exists()
     assert (backup_path / "livingmemory_graph.index").exists()
 
 
 def test_backup_includes_wal_shm_files(tmp_path: Path) -> None:
-    """WAL 和 SHM 日志文件应通过通配符被备份。"""
+    """非 SQLite 占位文件回退普通复制时仍保留伴生 WAL/SHM 文件。"""
     (tmp_path / "livingmemory.db").write_text("main")
     (tmp_path / "livingmemory.db-wal").write_text("wal")
     (tmp_path / "livingmemory.db-shm").write_text("shm")
 
-    mgr = BackupManager(str(tmp_path))
+    mgr = BackupManager(str(tmp_path), compress=False)
     mgr.version_file.write_text("2.0.0", encoding="utf-8")
     backup_dir = mgr.backup_if_needed()
 
@@ -192,12 +218,12 @@ def test_backup_continues_on_copy_failure(tmp_path: Path) -> None:
     mgr.version_file.write_text("1.0.0", encoding="utf-8")
 
     # 用一个不存在的假路径模拟失败——实际场景中 copy2 抛 OSError 会被捕获
-    # 这里我们验证正常文件被复制而整体流程不中断
-    backup_dir = mgr.backup_if_needed()
-    assert backup_dir is not None
-    backup_path = Path(backup_dir)
-    assert (backup_path / "livingmemory.db").exists()
-    assert (backup_path / "conversations.db").exists()
+    # 这里我们验证正常文件被归档而整体流程不中断
+    backup_archive = mgr.backup_if_needed()
+    assert backup_archive is not None
+    contents, _ = _read_tar_members(Path(backup_archive))
+    assert "livingmemory.db" in contents
+    assert "conversations.db" in contents
 
 
 def test_list_backups_multiple_sorted_desc(tmp_path: Path) -> None:
@@ -264,11 +290,9 @@ def test_backup_info_json_contains_all_fields(tmp_path: Path) -> None:
     mgr = BackupManager(str(tmp_path))
     previous_version = "0.0.0"
     mgr.version_file.write_text(previous_version, encoding="utf-8")
-    backup_dir = mgr.backup_if_needed()
+    backup_archive = mgr.backup_if_needed()
 
-    info = json.loads(
-        (Path(backup_dir) / _BACKUP_INFO_FILE).read_text(encoding="utf-8")
-    )
+    _, info = _read_tar_members(Path(backup_archive))
     required_fields = [
         "plugin_version",
         "previous_version",
@@ -276,11 +300,15 @@ def test_backup_info_json_contains_all_fields(tmp_path: Path) -> None:
         "backup_unix_time",
         "files_copied",
         "data_dir",
+        "format",
+        "include_faiss",
     ]
     for field in required_fields:
         assert field in info, f"Missing field: {field}"
     assert info["previous_version"] == previous_version
     assert info["plugin_version"] == PLUGIN_VERSION
+    assert info["format"] == "tar.gz"
+    assert info["include_faiss"] is False
     assert isinstance(info["backup_unix_time"], float)
 
 

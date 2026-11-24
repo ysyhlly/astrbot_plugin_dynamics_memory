@@ -31,13 +31,18 @@ def history_material_id(
     position: int,
     text: str,
 ) -> str:
+    """Stable deduplication ID for host-history materials across sliding turns.
+
+    Keyed by ``(scope_key, conversation_id, text_hash)`` instead of per-turn
+    ``snapshot_fingerprint``/``position`` so unchanged turns upsert in place
+    rather than multiplying sidecar rows on every message.
+    """
+    _ = snapshot_fingerprint, position
     return stable_id(
         "mat1:",
         [
             scope_key,
             conversation_id,
-            snapshot_fingerprint,
-            int(position),
             content_hash(text),
         ],
     )

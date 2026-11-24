@@ -114,7 +114,10 @@ def test_plugin_init_wires_runtime_dependencies(tmp_path, monkeypatch):
     star_tools.get_data_dir.assert_called_once_with("astrbot_plugin_dynamics_memory")
     main_module.BackupManager.assert_called_once_with(str(data_dir))
     main_module.PluginInitializer.assert_called_once_with(
-        context, plugin.config_manager, str(data_dir)
+        context,
+        plugin.config_manager,
+        str(data_dir),
+        on_initialized=plugin._on_initializer_ready,
     )
     page_api.register_routes.assert_called_once_with()
     set_active_plugin.assert_called_once_with(plugin)
@@ -423,8 +426,10 @@ async def test_recall_hook_requires_ready_plugin_and_event_handler():
     plugin.event_handler.handle_memory_recall.assert_not_called()
 
     plugin._ensure_plugin_ready = AsyncMock(return_value=(True, ""))
+    plugin._ensure_runtime_components = AsyncMock(return_value=False)
     plugin.event_handler = None
     await plugin.handle_memory_recall(event, request)
+    plugin._ensure_runtime_components.assert_awaited_once()
 
     plugin._ensure_plugin_ready = AsyncMock(return_value=(True, ""))
     plugin.event_handler = Mock()

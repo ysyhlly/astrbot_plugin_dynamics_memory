@@ -3,6 +3,9 @@
 """
 
 import asyncio
+import gzip
+import os
+import shutil
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -647,33 +650,60 @@ class DBMigration:
             logger.error(f"获取迁移信息失败: {e}", exc_info=True)
             return {"error": str(e)}
 
-    async def create_backup(self) -> str | None:
+    @staticmethod
+    def _gzip_file_sync(src: Path, dst_tmp: Path, dst_final: Path) -> None:
+        try:
+            with src.open("rb") as f_in, gzip.open(
+                dst_tmp, "wb", compresslevel=6
+            ) as f_out:
+                shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
+            os.replace(dst_tmp, dst_final)
+        finally:
+            dst_tmp.unlink(missing_ok=True)
+
+    async def create_backup(self, *, compress: bool = True) -> str | None:
         """
-        创建数据库备份
+        创建数据库备份（默认 gzip 压缩为 ``.db.gz``，并清理临时 staging 文件）。
 
         Returns:
             Optional[str]: 备份文件路径，失败返回None
         """
+        staged_path: Path | None = None
         try:
             db_path = Path(self.db_path)
             backup_dir = db_path.parent / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = (
-                backup_dir / f"{db_path.stem}_backup_{timestamp}{db_path.suffix}"
+            base_name = f"{db_path.stem}_backup_{timestamp}{db_path.suffix}"
+            staged_path = backup_dir / f".tmp_{base_name}"
+            final_path = (
+                backup_dir / f"{base_name}.gz" if compress else backup_dir / base_name
             )
 
-            logger.info(f"正在创建数据库备份: {backup_path}")
+            logger.info(f"正在创建数据库备份: {final_path}")
 
-            # 使用SQLite的备份API
+            # 使用SQLite在线备份API写到临时staging文件，避免留下半成品或未压缩巨文件
             async with self._open_db(self.db_path) as source:
-                async with self._open_db(str(backup_path)) as dest:
+                async with self._open_db(str(staged_path)) as dest:
                     await source.backup(dest)
 
-            logger.info(f"数据库备份成功: {backup_path}")
-            return str(backup_path)
+            if compress:
+                gz_tmp = backup_dir / f".tmp_{base_name}.gz"
+                await asyncio.to_thread(
+                    self._gzip_file_sync, staged_path, gz_tmp, final_path
+                )
+            else:
+                os.replace(staged_path, final_path)
+                staged_path = None
+
+            logger.info(f"数据库备份成功: {final_path}")
+            return str(final_path)
 
         except Exception as e:
             logger.error(f"数据库备份失败: {e}", exc_info=True)
             return None
+        finally:
+            if staged_path is not None:
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    Path(f"{staged_path}{suffix}").unlink(missing_ok=True)

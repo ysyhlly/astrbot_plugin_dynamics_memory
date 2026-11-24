@@ -6,11 +6,16 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..faiss_async_persist import get_async_persister
-from .vector_search import retrieve_vectors
+from .vector_search import (
+    call_embedding_with_telemetry,
+    report_embedding_usage,
+    retrieve_vectors,
+)
 
 if TYPE_CHECKING:
     from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
@@ -156,8 +161,6 @@ class VectorRetriever:
                 if field == "importance":
                     metadata[field] = 0.5
                 elif field in ["create_time", "last_access_time"]:
-                    import time
-
                     metadata[field] = time.time()
                 else:  # session_id, persona_id
                     metadata[field] = None
@@ -177,7 +180,24 @@ class VectorRetriever:
                 _MAX_CONTENT_CHARS,
             )
         if embedding is None and insert_content == content and source_validator is None:
-            return await self.faiss_db.insert(content=content, metadata=metadata)
+            emb_provider = getattr(self.faiss_db, "embedding_provider", None)
+            insert_started = time.monotonic()
+            try:
+                doc_id = await self.faiss_db.insert(content=content, metadata=metadata)
+            except BaseException as exc:
+                report_embedding_usage(
+                    emb_provider,
+                    elapsed_seconds=time.monotonic() - insert_started,
+                    ok=False,
+                    error_type=type(exc).__name__,
+                )
+                raise
+            report_embedding_usage(
+                emb_provider,
+                elapsed_seconds=time.monotonic() - insert_started,
+                ok=True,
+            )
+            return doc_id
 
         # The document is the source of truth; only the embedding input is bounded.
         import asyncio
@@ -186,8 +206,8 @@ class VectorRetriever:
         import numpy as np
 
         if embedding is None:
-            embedding = await self.faiss_db.embedding_provider.get_embedding(
-                insert_content
+            embedding = await call_embedding_with_telemetry(
+                self.faiss_db.embedding_provider, insert_content
             )
         vector = np.asarray(embedding, dtype=np.float32)
         storage = self.faiss_db.embedding_storage

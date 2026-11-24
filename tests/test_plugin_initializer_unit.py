@@ -104,13 +104,26 @@ async def test_wait_for_providers_and_retry_initialization(monkeypatch, tmp_path
     assert await init._wait_for_providers_non_blocking(max_wait=5.0) is True
     assert init._providers_ready is True
 
-    # Retry loop failure -> _initialization_failed = True
+    # Retry loop enters 300s slow-probe mode instead of permanently locking out
     retry_init = PluginInitializer(_context(), ConfigManager(), str(tmp_path))
-    retry_init._max_provider_attempts = 5
+    retry_init._max_provider_attempts = 2
+    probe_delays: list[float] = []
+
+    async def slow_probe_sleep(delay: float):
+        probe_delays.append(delay)
+        if delay >= 300.0:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", slow_probe_sleep)
     monkeypatch.setattr(retry_init, "_initialize_providers", AsyncMock())
-    await retry_init._retry_initialization()
-    assert retry_init.is_failed is True
+    with pytest.raises(asyncio.CancelledError):
+        await retry_init._retry_initialization()
+    assert retry_init.is_failed is False
+    assert retry_init.in_slow_probe_mode is True
+    assert 300.0 in probe_delays
     assert await retry_init.ensure_initialized(timeout=0.05) is False
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
     # Retry loop succeeds on 2nd attempt after transient teardown
     ok_init = PluginInitializer(_context(), ConfigManager(), str(tmp_path))

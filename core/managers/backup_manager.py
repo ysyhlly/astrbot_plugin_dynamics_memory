@@ -10,8 +10,12 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import os
 import re
 import shutil
+import sqlite3
+import tarfile
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +61,23 @@ _BACKUP_INFO_FILE = "backup_info.json"
 _VERSION_DIR_RE = re.compile(r"^v\d")
 _ADAPTER_BACKUP_PREFIX = "adapter_ownership_"
 _SCOPE_BACKUP_PREFIX = "scope_migration_"
-_DAILY_BACKUP_GLOB = "*_backup_*.db"
+_DAILY_BACKUP_GLOBS: tuple[str, ...] = ("*_backup_*.db", "*_backup_*.db.gz")
+
+
+def _is_daily_backup(entry: _BackupEntry) -> bool:
+    if entry.is_dir:
+        return False
+    name = entry.path.name
+    return any(fnmatch.fnmatch(name, pat) for pat in _DAILY_BACKUP_GLOBS)
+
+
+def _is_staging_or_bak(entry: _BackupEntry) -> bool:
+    name = entry.path.name
+    return (
+        name.startswith(".tmp_")
+        or name.endswith(".tmp")
+        or name.endswith(".bak")
+    )
 
 
 class _BackupEntry(NamedTuple):
@@ -69,25 +89,92 @@ class _BackupEntry(NamedTuple):
     size: int
 
 
-# Files/patterns to include in a full backup (relative to data_dir).
-_BACKUP_PATTERNS: list[str] = [
+_SQLITE_HEADER = b"SQLite format 3\x00"
+
+# SQLite databases backed up via SQLite online backup API (`src.backup(dst)`).
+_SQLITE_DB_FILES: tuple[str, ...] = (
     "livingmemory.db",
-    "livingmemory.index",
     "livingmemory_graph_documents.db",
-    "livingmemory_graph.index",
     "conversations.db",
-    "decay_state.json",
-    "*.db-wal",
-    "*.db-shm",
+    "evidence_sidecar.sqlite3",
+)
+
+# Plain metadata files included in every backup.
+_PLAIN_BACKUP_FILES: tuple[str, ...] = ("decay_state.json",)
+
+# Rebuildable FAISS vector indexes (skipped by default to keep backups compact).
+_FAISS_INDEX_FILES: tuple[str, ...] = (
+    "livingmemory.index",
+    "livingmemory_graph.index",
+)
+
+# Kept for backward-compatible introspection.
+_BACKUP_PATTERNS: list[str] = [
+    *_SQLITE_DB_FILES,
+    *_PLAIN_BACKUP_FILES,
+    *_FAISS_INDEX_FILES,
 ]
+
+
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except OSError:
+        return False
+
+
+def _backup_sqlite_file(src: Path, dst: Path) -> bool:
+    """Back up a SQLite file using the online backup API for WAL consistency.
+
+    Returns True when SQLite online backup was used, False when it fell back
+    to a raw file copy (e.g. non-SQLite placeholder files in tests).
+    """
+    if _is_sqlite_file(src):
+        src_conn: sqlite3.Connection | None = None
+        dst_conn: sqlite3.Connection | None = None
+        try:
+            src_conn = sqlite3.connect(str(src), timeout=5.0)
+            src_conn.execute("PRAGMA busy_timeout=5000")
+            dst_conn = sqlite3.connect(str(dst), timeout=5.0)
+            src_conn.backup(dst_conn)
+            return True
+        except sqlite3.Error as exc:
+            logger.warning(
+                f"[BackupManager] SQLite online backup 失败 ({src.name})，回退普通复制: {exc}"
+            )
+            dst.unlink(missing_ok=True)
+        finally:
+            if dst_conn is not None:
+                dst_conn.close()
+            if src_conn is not None:
+                src_conn.close()
+    shutil.copy2(src, dst)
+    return False
+
+
+def _is_version_backup(entry: _BackupEntry) -> bool:
+    """Return True if an entry is a version backup directory or .tar.gz archive."""
+    name = entry.path.name
+    if entry.is_dir:
+        return bool(_VERSION_DIR_RE.match(name))
+    return name.endswith(".tar.gz") and bool(_VERSION_DIR_RE.match(name))
 
 
 class BackupManager:
     """Detect version changes and create full data backups."""
 
-    def __init__(self, data_dir: str) -> None:
+    def __init__(
+        self,
+        data_dir: str,
+        *,
+        compress: bool = True,
+        include_faiss: bool = False,
+    ) -> None:
         self.data_dir = Path(data_dir)
         self.version_file = self.data_dir / _VERSION_FILE
+        self.compress = bool(compress)
+        self.include_faiss = bool(include_faiss)
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,36 +201,134 @@ class BackupManager:
             return True  # first install — backup for safety
         return stored != PLUGIN_VERSION
 
-    def backup_if_needed(self) -> str | None:
-        """Create a full backup when the version changed. Returns backup dir path or None."""
+    def _stage_backup_files(
+        self, target_dir: Path, *, include_faiss: bool
+    ) -> tuple[int, list[str], list[str]]:
+        """Populate ``target_dir`` with consistent DB snapshots and plain files."""
+        copied_count = 0
+        backed_up_files: list[str] = []
+        online_backed_up: list[str] = []
+
+        for db_name in _SQLITE_DB_FILES:
+            src = self.data_dir / db_name
+            if not src.is_file():
+                continue
+            dest = target_dir / db_name
+            try:
+                used_online = _backup_sqlite_file(src, dest)
+                copied_count += 1
+                backed_up_files.append(db_name)
+                if used_online:
+                    online_backed_up.append(db_name)
+                else:
+                    # Non-SQLite fallback: preserve any companion -wal/-shm files
+                    for suffix in ("-wal", "-shm"):
+                        side = self.data_dir / f"{db_name}{suffix}"
+                        if side.is_file():
+                            shutil.copy2(side, target_dir / side.name)
+                            copied_count += 1
+                            backed_up_files.append(side.name)
+            except OSError as exc:
+                logger.error(f"[BackupManager] 备份数据库失败 {db_name}: {exc}")
+
+        plain_files: tuple[str, ...] = (
+            (*_PLAIN_BACKUP_FILES, *_FAISS_INDEX_FILES)
+            if include_faiss
+            else _PLAIN_BACKUP_FILES
+        )
+        for name in plain_files:
+            src = self.data_dir / name
+            if not src.is_file():
+                continue
+            try:
+                shutil.copy2(src, target_dir / name)
+                copied_count += 1
+                backed_up_files.append(name)
+            except OSError as exc:
+                logger.error(f"[BackupManager] 备份文件失败 {name}: {exc}")
+
+        return copied_count, backed_up_files, online_backed_up
+
+    def backup_if_needed(
+        self,
+        *,
+        compress: bool | None = None,
+        include_faiss: bool | None = None,
+    ) -> str | None:
+        """Create a version backup when the version changed.
+
+        By default creates a compressed ``v<old>.tar.gz`` archive using SQLite
+        online backup (``src.backup(dst)``) for WAL consistency, includes
+        ``evidence_sidecar.sqlite3``, and skips rebuildable FAISS ``.index``
+        files unless ``include_faiss=True``.
+        """
         if not self.needs_backup():
             return None
 
+        use_compress = self.compress if compress is None else bool(compress)
+        use_faiss = self.include_faiss if include_faiss is None else bool(include_faiss)
+
         stored = self.get_stored_version()
         old_label = stored or "unknown"
-        backup_dir = self.data_dir / "backups" / f"v{old_label}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        backups_root = self.data_dir / "backups"
+        backups_root.mkdir(parents=True, exist_ok=True)
 
+        if use_compress:
+            archive_path = backups_root / f"v{old_label}.tar.gz"
+            logger.info(
+                f"[BackupManager] 检测到版本变更 ({old_label} → {PLUGIN_VERSION})，"
+                f"正在创建压缩备份 {archive_path} (include_faiss={use_faiss}) ..."
+            )
+            with tempfile.TemporaryDirectory(
+                dir=str(backups_root), prefix=f".tmp_v{old_label}_"
+            ) as staging_str:
+                staging_dir = Path(staging_str)
+                copied_count, backed_up_files, online_backed_up = (
+                    self._stage_backup_files(staging_dir, include_faiss=use_faiss)
+                )
+                info = {
+                    "plugin_version": PLUGIN_VERSION,
+                    "previous_version": old_label,
+                    "backup_timestamp": datetime.now(timezone.utc).isoformat(),
+                    "backup_unix_time": time.time(),
+                    "files_copied": copied_count,
+                    "data_dir": str(self.data_dir),
+                    "format": "tar.gz",
+                    "include_faiss": use_faiss,
+                    "sqlite_online_backup": online_backed_up,
+                    "files": sorted(backed_up_files),
+                }
+                info_path = staging_dir / _BACKUP_INFO_FILE
+                info_path.write_text(
+                    json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+
+                tmp_archive = backups_root / f".v{old_label}.tar.gz.tmp"
+                try:
+                    with tarfile.open(tmp_archive, "w:gz") as tar:
+                        for item in sorted(staging_dir.iterdir()):
+                            if item.is_file():
+                                tar.add(item, arcname=item.name)
+                    os.replace(tmp_archive, archive_path)
+                finally:
+                    if tmp_archive.exists():
+                        tmp_archive.unlink(missing_ok=True)
+
+            self.write_current_version()
+            logger.info(
+                f"[BackupManager] 压缩备份完成: {copied_count} 个文件 → {archive_path}"
+            )
+            return str(archive_path)
+
+        backup_dir = backups_root / f"v{old_label}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
             f"[BackupManager] 检测到版本变更 ({old_label} → {PLUGIN_VERSION})，"
-            f"正在备份数据到 {backup_dir} ..."
+            f"正在备份数据到 {backup_dir} (include_faiss={use_faiss}) ..."
         )
-
-        copied_count = 0
-        for pattern in _BACKUP_PATTERNS:
-            for file_path in self.data_dir.glob(pattern):
-                if not file_path.is_file():
-                    continue
-                dest = backup_dir / file_path.name
-                try:
-                    shutil.copy2(file_path, dest)
-                    copied_count += 1
-                except OSError as exc:
-                    logger.error(
-                        f"[BackupManager] 备份文件失败 {file_path.name}: {exc}"
-                    )
-
-        # Write backup metadata
+        copied_count, backed_up_files, online_backed_up = self._stage_backup_files(
+            backup_dir, include_faiss=use_faiss
+        )
         info = {
             "plugin_version": PLUGIN_VERSION,
             "previous_version": old_label,
@@ -151,21 +336,31 @@ class BackupManager:
             "backup_unix_time": time.time(),
             "files_copied": copied_count,
             "data_dir": str(self.data_dir),
+            "format": "directory",
+            "include_faiss": use_faiss,
+            "sqlite_online_backup": online_backed_up,
+            "files": sorted(backed_up_files),
         }
         info_path = backup_dir / _BACKUP_INFO_FILE
         info_path.write_text(
             json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-
-        # Update stored version AFTER successful backup
         self.write_current_version()
-
         logger.info(f"[BackupManager] 备份完成: {copied_count} 个文件 → {backup_dir}")
         return str(backup_dir)
 
-    async def backup_if_needed_async(self) -> str | None:
+    async def backup_if_needed_async(
+        self,
+        *,
+        compress: bool | None = None,
+        include_faiss: bool | None = None,
+    ) -> str | None:
         """异步版本：通过 asyncio.to_thread 将同步文件 I/O 卸载到线程池。"""
-        return await asyncio.to_thread(self.backup_if_needed)
+        return await asyncio.to_thread(
+            self.backup_if_needed,
+            compress=compress,
+            include_faiss=include_faiss,
+        )
 
     @staticmethod
     def prune(
@@ -260,20 +455,27 @@ class BackupManager:
             else:
                 stats["files_removed"] += 1
 
+        # Remove leftover .bak / .tmp_* / *.tmp staging files unconditionally.
+        for entry in entries:
+            if _is_staging_or_bak(entry):
+                _remove(entry)
+
         # Category retention: keep the newest entries of each backup source.
-        version_dirs = sorted(
-            (e for e in entries if e.is_dir and _VERSION_DIR_RE.match(e.path.name)),
+        version_entries = sorted(
+            (e for e in entries if e.path not in removed and _is_version_backup(e)),
             key=lambda e: e.mtime,
             reverse=True,
         )
-        for entry in version_dirs[KEEP_VERSION_BACKUPS:]:
+        for entry in version_entries[KEEP_VERSION_BACKUPS:]:
             _remove(entry)
 
         adapter_dirs = sorted(
             (
                 e
                 for e in entries
-                if e.is_dir and e.path.name.startswith(_ADAPTER_BACKUP_PREFIX)
+                if e.path not in removed
+                and e.is_dir
+                and e.path.name.startswith(_ADAPTER_BACKUP_PREFIX)
             ),
             key=lambda e: e.mtime,
             reverse=True,
@@ -285,7 +487,9 @@ class BackupManager:
             (
                 e
                 for e in entries
-                if not e.is_dir and e.path.name.startswith(_SCOPE_BACKUP_PREFIX)
+                if e.path not in removed
+                and not e.is_dir
+                and e.path.name.startswith(_SCOPE_BACKUP_PREFIX)
             ),
             key=lambda e: e.mtime,
             reverse=True,
@@ -296,30 +500,35 @@ class BackupManager:
         cutoff = time.time() - keep_days * 86400
         for entry in entries:
             if (
-                not entry.is_dir
-                and fnmatch.fnmatch(entry.path.name, _DAILY_BACKUP_GLOB)
+                entry.path not in removed
+                and _is_daily_backup(entry)
                 and entry.mtime < cutoff
             ):
                 _remove(entry)
 
         # Total size cap: drop oldest entries first, never the protected ones.
+        # Prefer protecting compressed archives (.tar.gz / .db.gz) over legacy
+        # uncompressed files/dirs so giant uncompressed copies are not exempt
+        # from the total size cap once a compressed backup exists.
         remaining = [e for e in entries if e.path not in removed]
         total_bytes = sum(e.size for e in remaining)
         limit = max_total_mb * 1024 * 1024
         if total_bytes > limit:
             protected: set[Path] = set()
-            kept_versions = [
-                e for e in remaining if e.is_dir and _VERSION_DIR_RE.match(e.path.name)
-            ]
+            kept_versions = [e for e in remaining if _is_version_backup(e)]
             if kept_versions:
-                protected.add(max(kept_versions, key=lambda e: e.mtime).path)
-            kept_daily = [
-                e
-                for e in remaining
-                if not e.is_dir and fnmatch.fnmatch(e.path.name, _DAILY_BACKUP_GLOB)
-            ]
+                compressed_versions = [
+                    e for e in kept_versions if not e.is_dir and e.path.name.endswith(".tar.gz")
+                ]
+                pool = compressed_versions or kept_versions
+                protected.add(max(pool, key=lambda e: e.mtime).path)
+            kept_daily = [e for e in remaining if _is_daily_backup(e)]
             if kept_daily:
-                protected.add(max(kept_daily, key=lambda e: e.mtime).path)
+                compressed_daily = [
+                    e for e in kept_daily if e.path.name.endswith(".db.gz")
+                ]
+                pool = compressed_daily or kept_daily
+                protected.add(max(pool, key=lambda e: e.mtime).path)
             for entry in sorted(remaining, key=lambda e: e.mtime):
                 if total_bytes <= limit:
                     break
@@ -366,29 +575,62 @@ class BackupManager:
 
     @staticmethod
     def list_backups(data_dir: str) -> list[dict]:
-        """Enumerate existing backups with their metadata."""
+        """Enumerate existing backups (both .tar.gz archives and legacy directories)."""
         backups_path = Path(data_dir) / "backups"
         if not backups_path.exists():
             return []
 
         result: list[dict] = []
-        for backup_dir in sorted(backups_path.iterdir(), reverse=True):
-            if not backup_dir.is_dir():
-                continue
-            info_path = backup_dir / _BACKUP_INFO_FILE
-            info: dict = {}
-            if info_path.exists():
+        for entry in sorted(backups_path.iterdir(), reverse=True):
+            if entry.is_dir():
+                info_path = entry / _BACKUP_INFO_FILE
+                info: dict = {}
+                if info_path.exists():
+                    try:
+                        info = json.loads(info_path.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                info.setdefault("directory", str(entry))
+                info.setdefault("name", entry.name)
+                info.setdefault("format", "directory")
+                files = [p.name for p in entry.iterdir() if p.is_file()]
+                info.setdefault("files", files)
+                info.setdefault("file_count", len(files))
+                result.append(info)
+            elif entry.is_file() and entry.name.endswith(".tar.gz"):
+                info = {}
+                files: list[str] = []
                 try:
-                    info = json.loads(info_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
+                    with tarfile.open(entry, "r:gz") as tar:
+                        for member in tar.getmembers():
+                            if not member.isfile():
+                                continue
+                            basename = Path(member.name).name
+                            files.append(basename)
+                            if basename == _BACKUP_INFO_FILE:
+                                extracted = tar.extractfile(member)
+                                if extracted is not None:
+                                    try:
+                                        info = json.loads(
+                                            extracted.read().decode("utf-8")
+                                        )
+                                    except (
+                                        json.JSONDecodeError,
+                                        UnicodeDecodeError,
+                                        OSError,
+                                    ):
+                                        pass
+                except (tarfile.TarError, OSError):
                     pass
-            info.setdefault("directory", str(backup_dir))
-            info.setdefault("name", backup_dir.name)
-            files = [p.name for p in backup_dir.iterdir() if p.is_file()]
-            info.setdefault("files", files)
-            info.setdefault("file_count", len(files))
-            result.append(info)
+                info.setdefault("archive", str(entry))
+                info.setdefault("directory", str(entry))
+                info.setdefault("name", entry.name[: -len(".tar.gz")])
+                info.setdefault("format", "tar.gz")
+                info.setdefault("files", files)
+                info.setdefault("file_count", len(files))
+                result.append(info)
 
+        result.sort(key=lambda item: str(item.get("name", "")), reverse=True)
         return result
 
 

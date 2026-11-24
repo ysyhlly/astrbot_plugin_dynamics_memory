@@ -23,17 +23,22 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
 
     _SQLITE_BATCH_SIZE = 500
     _NODE_TOKEN_QUERY_BATCH_SIZE = 200
+    _READ_POOL_SIZE = 4
 
     # initialize() 中赋值：trigram tokenizer 不可用时保持 False，供节点检索选择回退路径
     _node_fts_available: bool
 
     def __init__(self, db_path: str, *, cache_reads: bool = False):
         self.db_path = db_path
-        # 召回链路只读查询复用同一条连接：每次召回 5～6 次 open/PRAGMA 的开销
-        # 在小库上也有毫秒级成本。写路径仍按操作单独连接以隔离事务。
-        # 默认关闭，只有长生命周期的 MemoryEngine 实例显式开启；临时 shadow
-        # store 与短生命周期测试不需要多占一条连接。
+        # 召回链路只读查询使用小型连接池并发执行 WAL 读（最多 4 条），既避免每次
+        # open/PRAGMA 开销，也不再把 5-7 个图查询串行锁在同一把 _read_lock 上。
+        # 写路径仍按操作单独连接以隔离事务。
         self._cache_reads = cache_reads
+        self._read_pool: list[aiosqlite.Connection] = []
+        self._read_semaphore: asyncio.Semaphore | None = None
+        self._read_pool_closed: bool = False
+        self._closing_tasks: set[asyncio.Task[Any]] = set()
+        # Backward-compat alias for callers/tests inspecting _read_conn.
         self._read_conn: aiosqlite.Connection | None = None
         self._read_lock: asyncio.Lock | None = None
 
@@ -41,6 +46,11 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
         if self._read_lock is None:
             self._read_lock = asyncio.Lock()
         return self._read_lock
+
+    def _get_read_semaphore(self) -> asyncio.Semaphore:
+        if self._read_semaphore is None:
+            self._read_semaphore = asyncio.Semaphore(self._READ_POOL_SIZE)
+        return self._read_semaphore
 
     async def initialize(self) -> None:
         """Create tables used by the graph-memory layer."""
@@ -120,24 +130,88 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
         finally:
             await db.close()
 
+    @staticmethod
+    def _interrupt_conn_quietly(conn: aiosqlite.Connection) -> None:
+        try:
+            raw_conn = getattr(conn, "_conn", None)
+            interrupt = getattr(raw_conn, "interrupt", None)
+            if callable(interrupt):
+                interrupt()
+        except Exception:
+            pass
+
+    @staticmethod
+    async def _close_conn_quietly(conn: aiosqlite.Connection) -> None:
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+    def _schedule_close_conn(self, conn: aiosqlite.Connection) -> None:
+        self._interrupt_conn_quietly(conn)
+        try:
+            task = asyncio.create_task(self._close_conn_quietly(conn))
+        except RuntimeError:
+            return
+        self._closing_tasks.add(task)
+        task.add_done_callback(self._closing_tasks.discard)
+
     @asynccontextmanager
     async def _read_connect(self):
-        """复用长期只读连接并加锁保护并发查询；未开启缓存时按操作建连。"""
+        """Borrow a pooled read-only WAL connection for concurrent reads."""
         if not self._cache_reads:
             async with self._connect() as db:
                 yield db
             return
-        async with self._get_read_lock():
-            if self._read_conn is None:
-                self._read_conn = await open_connection(self.db_path)
-            yield self._read_conn
+        self._read_pool_closed = False
+        sem = self._get_read_semaphore()
+        async with sem:
+            from_pool = bool(self._read_pool)
+            conn = (
+                self._read_pool.pop()
+                if from_pool
+                else await open_connection(self.db_path)
+            )
+            self._read_conn = conn
+            broken = False
+            cancelled = False
+            try:
+                if not from_pool:
+                    try:
+                        cur = await conn.execute("PRAGMA query_only = ON")
+                        await cur.close()
+                    except Exception:
+                        pass
+                yield conn
+            except BaseException as exc:
+                broken = True
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                raise
+            finally:
+                if (
+                    broken
+                    or self._read_pool_closed
+                    or len(self._read_pool) >= self._READ_POOL_SIZE
+                ):
+                    if cancelled:
+                        self._schedule_close_conn(conn)
+                    else:
+                        await self._close_conn_quietly(conn)
+                else:
+                    self._read_pool.append(conn)
+                self._read_conn = self._read_pool[-1] if self._read_pool else None
 
     async def close(self) -> None:
-        """关闭复用的只读连接（插件卸载 / 临时 shadow store 清理时调用）。"""
-        async with self._get_read_lock():
-            if self._read_conn is not None:
-                await self._read_conn.close()
-                self._read_conn = None
+        """关闭所有复用的只读连接（插件卸载 / 临时 shadow store 清理时调用）。"""
+        self._read_pool_closed = True
+        conns = list(self._read_pool)
+        self._read_pool.clear()
+        self._read_conn = None
+        for conn in conns:
+            await self._close_conn_quietly(conn)
+        if self._closing_tasks:
+            pending = list(self._closing_tasks)
+            await asyncio.gather(*pending, return_exceptions=True)
 
     @staticmethod
     def _now_iso() -> str:

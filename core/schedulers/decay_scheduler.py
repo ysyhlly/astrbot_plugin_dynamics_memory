@@ -5,12 +5,17 @@
 
 import asyncio
 import json
+import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
+
+from ...storage.conversation_store import ConversationStore
+from ...storage.evidence_sidecar import EvidenceSidecar
+from ..managers.backup_manager import BackupManager
 
 if TYPE_CHECKING:
     from ...storage.db_migration import DBMigration
@@ -39,6 +44,8 @@ class DecayScheduler:
         backup_enabled: bool = True,
         backup_keep_days: int = 7,
         consolidation_manager=None,
+        evidence_sidecar=None,
+        evidence_retention_days: int = 30,
     ):
         """
         初始化衰减调度器
@@ -53,6 +60,8 @@ class DecayScheduler:
             backup_enabled: 是否启用每日自动备份
             backup_keep_days: 备份保留天数，超期自动删除
             consolidation_manager: 记忆整合管理器（用于每日整合触发）
+            evidence_sidecar: 可选 EvidenceSidecar 实例（用于每日过期清理与 WAL 维护）
+            evidence_retention_days: sidecar 过期失效数据保留天数
         """
         self.memory_engine = memory_engine
         self.decay_rate = decay_rate
@@ -63,6 +72,8 @@ class DecayScheduler:
         self.backup_enabled = backup_enabled
         self.backup_keep_days = backup_keep_days
         self.consolidation_manager = consolidation_manager
+        self.evidence_sidecar = evidence_sidecar
+        self.evidence_retention_days = max(1, int(evidence_retention_days))
 
         self._state_file = self.data_dir / "decay_state.json"
         self._task: asyncio.Task | None = None
@@ -182,6 +193,23 @@ class DecayScheduler:
                         f"[衰减调度] 自动清理失败: {cleanup_err}", exc_info=True
                     )
 
+            # 每日清理超期归档文档及其图谱/原子关联行
+            purge_archived = getattr(
+                self.memory_engine, "purge_expired_archived_memories", None
+            )
+            if callable(purge_archived):
+                try:
+                    purged = await purge_archived()
+                    if purged:
+                        logger.info(
+                            f"[衰减调度] 超期归档记忆清除完成，彻底删除 {purged} 条"
+                        )
+                except Exception as purge_err:
+                    logger.warning(
+                        f"[衰减调度] 超期归档记忆清除失败: {purge_err}",
+                        exc_info=True,
+                    )
+
             await self._set_last_decay_date(self._get_today_str())
 
             # 每日执行记忆整合
@@ -203,27 +231,129 @@ class DecayScheduler:
             if self.backup_enabled and self.db_migration:
                 await self._run_backup()
 
+            maintained_companions: set[str] = set()
             try:
                 maintenance_result = await self.memory_engine.maintain_storage()
-                if maintenance_result.get("success"):
+                if isinstance(maintenance_result, dict) and maintenance_result.get(
+                    "success"
+                ):
                     reclaimed = int(maintenance_result.get("bytes_reclaimed", 0))
+                    companion_map = maintenance_result.get("companion_dbs")
+                    if isinstance(companion_map, dict):
+                        maintained_companions.update(
+                            name
+                            for name, detail in companion_map.items()
+                            if isinstance(detail, dict) and detail.get("success")
+                        )
                     logger.info(
                         f"[衰减调度] 存储维护完成，释放 {reclaimed / 1024 / 1024:.2f} MB"
                     )
                 else:
-                    logger.warning(
-                        f"[衰减调度] 存储维护失败: {maintenance_result.get('error')}"
+                    err = (
+                        maintenance_result.get("error")
+                        if isinstance(maintenance_result, dict)
+                        else "unknown"
                     )
+                    logger.warning(f"[衰减调度] 存储维护失败: {err}")
             except Exception as maintenance_err:
                 logger.warning(
                     f"[衰减调度] 存储维护异常: {maintenance_err}",
                     exc_info=True,
                 )
 
+            await self._maintain_companion_databases(
+                already_checkpointed=maintained_companions
+            )
+
             return True
         except Exception as e:
             logger.error(f"[衰减调度] 执行衰减失败: {e}", exc_info=True)
             return False
+
+    @staticmethod
+    def _checkpoint_sqlite_file_sync(db_file: Path) -> bool:
+        """对单个 SQLite 库执行安全的 WAL 截断与增量回收（不影响现有数据）。"""
+        if not db_file.is_file():
+            return False
+        conn = sqlite3.connect(str(db_file), timeout=5.0, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
+            return True
+        finally:
+            conn.close()
+
+    async def _maintain_companion_databases(
+        self, *, already_checkpointed: set[str] | None = None
+    ) -> dict[str, dict]:
+        """每日伴生库安全维护：清理 evidence_sidecar 过期数据并对所有伴生库执行 WAL 截断。"""
+        done_set = set(already_checkpointed or ())
+        report: dict[str, dict] = {}
+
+        # 1. evidence_sidecar.sqlite3 清理过期失效记录并执行 WAL 截断
+        sidecar_path = self.data_dir / "evidence_sidecar.sqlite3"
+        try:
+            if self.evidence_sidecar is not None:
+                prune_stats = await self.evidence_sidecar.prune_old(
+                    retention_days=self.evidence_retention_days
+                )
+                report["evidence_sidecar.sqlite3"] = {
+                    "success": True,
+                    "pruned": prune_stats,
+                }
+                done_set.add("evidence_sidecar.sqlite3")
+            elif sidecar_path.is_file():
+                prune_stats = await asyncio.to_thread(
+                    EvidenceSidecar.prune_file_sync,
+                    sidecar_path,
+                    self.evidence_retention_days,
+                )
+                report["evidence_sidecar.sqlite3"] = {
+                    "success": True,
+                    "pruned": prune_stats,
+                }
+                done_set.add("evidence_sidecar.sqlite3")
+        except Exception as exc:
+            logger.warning(f"[衰减调度] evidence_sidecar 维护失败: {exc}")
+            report["evidence_sidecar.sqlite3"] = {"success": False, "error": str(exc)}
+
+        # 2. conversations.db 清理过期/超量 narrative_events
+        conv_path = self.data_dir / "conversations.db"
+        if conv_path.is_file():
+            try:
+                narrative_pruned = await asyncio.to_thread(
+                    ConversationStore.prune_narrative_events_file_sync,
+                    conv_path,
+                    retention_days=self.evidence_retention_days,
+                )
+                report["conversations.db"] = {
+                    "success": True,
+                    "narrative_events_pruned": narrative_pruned,
+                }
+            except Exception as exc:
+                logger.warning(f"[衰减调度] conversations.db narrative_events 维护失败: {exc}")
+
+        # 3. 对 conversations.db / livingmemory_graph_documents.db / evidence_sidecar.sqlite3 兜底 WAL 截断
+        for db_name in (
+            "conversations.db",
+            "livingmemory_graph_documents.db",
+            "evidence_sidecar.sqlite3",
+        ):
+            if db_name in done_set:
+                continue
+            db_file = self.data_dir / db_name
+            if not db_file.is_file():
+                continue
+            try:
+                ok = await asyncio.to_thread(self._checkpoint_sqlite_file_sync, db_file)
+                prev = report.get(db_name, {})
+                report[db_name] = {**prev, "success": ok}
+            except Exception as exc:
+                logger.warning(f"[衰减调度] 伴生库 {db_name} WAL 维护失败: {exc}")
+                report[db_name] = {"success": False, "error": str(exc)}
+
+        return report
 
     async def _check_and_execute(self) -> None:
         """检查并执行衰减（启动时调用）"""
@@ -243,7 +373,7 @@ class DecayScheduler:
         await self._execute_decay(total_days)
 
     async def _run_backup(self) -> None:
-        """执行数据库备份并清理过期备份"""
+        """执行数据库备份并清理过期备份（含总量上限裁剪与临时文件清理）"""
         if not self.db_migration:
             return
         try:
@@ -253,11 +383,17 @@ class DecayScheduler:
                 await self._cleanup_old_backups()
             else:
                 logger.warning("[衰减调度] 每日备份失败")
+            try:
+                await BackupManager(str(self.data_dir)).prune_async(
+                    keep_days=self.backup_keep_days
+                )
+            except Exception as prune_err:
+                logger.warning(f"[衰减调度] BackupManager.prune 失败: {prune_err}")
         except Exception as e:
             logger.error(f"[衰减调度] 备份异常: {e}", exc_info=True)
 
     async def _cleanup_old_backups(self) -> None:
-        """删除超过保留天数的旧备份文件"""
+        """删除超过保留天数的旧备份文件（兼容 .db 与 .db.gz）及遗留临时文件"""
         if not self.db_migration:
             return
         try:
@@ -268,10 +404,14 @@ class DecayScheduler:
 
             cutoff = datetime.now().timestamp() - self.backup_keep_days * 86400
             removed = 0
-            for f in backup_dir.glob(f"{db_path.stem}_backup_*.db"):
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    removed += 1
+            for pattern in (
+                f"{db_path.stem}_backup_*.db",
+                f"{db_path.stem}_backup_*.db.gz",
+            ):
+                for f in backup_dir.glob(pattern):
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
 
             if removed:
                 logger.info(

@@ -331,11 +331,17 @@ def get_default_structured_data(is_group_chat: bool) -> dict[str, Any]:
 
 
 _SUMMARY_GENERIC_TERMS = ("某用户", "某人", "用户说", "对方说", "群成员", "某群成员")
-# 只豁免有明确起点的“所有人”和“没有人”。例如“派出所有人打来电话”
-# 中的“所”可能属于“派出所”，此时继续检测“有人”。
+# 豁免常见固定搭配/成语/泛指复合词（有没有人、还有人、总有人、是否有人、如果有人等），
+# 以及“所有人”“没有人”（包括“告诉所有人”“几乎没有人”等动词后用法）；
+# 仅排除“派出所/研究所/诊所”+“有人”及“沉没”+“有人”等跨词边界误拼。
 _SUMMARY_PERSON_REFERENCE = re.compile(
-    r"""(?:^|[\s,，。.!！?？、:：;；"“'‘「『《〈(（\[【])"""
-    r"(?:所有人|没有人)|(?P<anonymous>有人)"
+    r"(?<![出究诊])所有人"
+    r"|(?<!沉)没有人"
+    r"|(?:有没有人|还有人|总有人|是否有人|如果有人|要是有人|若有人|万一有人|"
+    r"常有人|老有人|真有人|哪有人|怎么有人|好像有人|似乎有人|听说有人|据说有人|"
+    r"不乏有人|一直有人|只要有人|就算有人|哪怕有人|除非有人|"
+    r"有人吗|有人在吗|有人知道吗)"
+    r"|(?P<anonymous>有人)"
 )
 
 
@@ -346,6 +352,7 @@ class SummaryQualityCheck:
     fact_count: int
     importance_valid: bool
     matched_generic_terms: tuple[str, ...]
+    degraded_warning: str | None = None
 
 
 def check_summary_quality(structured_data: dict[str, Any]) -> SummaryQualityCheck:
@@ -354,18 +361,28 @@ def check_summary_quality(structured_data: dict[str, Any]) -> SummaryQualityChec
     summary_chars = len(summary)
     key_facts = structured_data.get("key_facts", [])
     fact_count = len(ensure_list(key_facts))
+    participants = [
+        str(p).strip()
+        for p in ensure_list(structured_data.get("participants", []))
+        if str(p or "").strip()
+    ]
     importance = structured_data.get("importance", 0.5)
     importance_valid = isinstance(importance, (int, float)) and 0.0 <= importance <= 1.0
     matched_generic_terms = tuple(
         term for term in _SUMMARY_GENERIC_TERMS if term in summary
     )
-    if any(
-        match.group("anonymous") is not None
+    generic_hit_count = sum(summary.count(term) for term in matched_generic_terms)
+    anonymous_hits = sum(
+        1
         for match in _SUMMARY_PERSON_REFERENCE.finditer(summary)
-    ):
+        if match.group("anonymous") is not None
+    )
+    if anonymous_hits > 0:
         matched_generic_terms += ("有人",)
+        generic_hit_count += anonymous_hits
 
     reason_code = None
+    degraded_warning = None
     if summary_chars < 10:
         reason_code = "summary_too_short"
     elif not key_facts:
@@ -373,10 +390,24 @@ def check_summary_quality(structured_data: dict[str, Any]) -> SummaryQualityChec
     elif not importance_valid:
         reason_code = "invalid_importance"
     elif matched_generic_terms:
-        reason_code = "summary_generic_reference"
+        # 对内容充实且有明确参与者的长摘要，单次命中降级为告警而非硬拒收
+        if (
+            summary_chars >= 100
+            and fact_count >= 3
+            and bool(participants)
+            and generic_hit_count == 1
+        ):
+            degraded_warning = "summary_generic_reference_degraded"
+        else:
+            reason_code = "summary_generic_reference"
 
     return SummaryQualityCheck(
-        reason_code, summary_chars, fact_count, importance_valid, matched_generic_terms
+        reason_code,
+        summary_chars,
+        fact_count,
+        importance_valid,
+        matched_generic_terms,
+        degraded_warning=degraded_warning,
     )
 
 

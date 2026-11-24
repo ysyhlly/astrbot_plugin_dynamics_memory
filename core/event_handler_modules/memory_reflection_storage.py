@@ -24,6 +24,7 @@ from ..models.conversation_models import Message
 
 _DEFAULT_MEMORY_SCOPE = object()
 MANAGED_WINDOW_REFUSED = object()
+_SUMMARY_RETRY_BACKOFF_SECONDS = (60, 300, 900)
 
 
 class MemoryReflectionStorageMixin:
@@ -392,6 +393,30 @@ class MemoryReflectionStorageMixin:
                         quality_options["quality_feedback"] = (
                             "summary_generic_reference"
                         )
+                    prev_exhausted_cycles = (
+                        int(pending.get("exhausted_cycles", 0) or 0)
+                        if isinstance(pending, dict)
+                        and pending.get("start_index") == start_index
+                        and pending.get("end_index") == end_index
+                        else 0
+                    )
+                    if retry_count >= SUMMARY_RETRY_LIMIT - 1 or prev_exhausted_cycles >= 1:
+                        proc_fn = getattr(
+                            self.memory_processor, "process_conversation", None
+                        )
+                        try:
+                            sig_params = inspect.signature(proc_fn).parameters
+                            accepts_degraded = (
+                                "allow_degraded_quality" in sig_params
+                                or any(
+                                    p.kind == inspect.Parameter.VAR_KEYWORD
+                                    for p in sig_params.values()
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            accepts_degraded = False
+                        if accepts_degraded:
+                            quality_options["allow_degraded_quality"] = True
                     (
                         content,
                         metadata,
@@ -702,6 +727,21 @@ class MemoryReflectionStorageMixin:
             return False
 
         new_retry_count = current_retry_count + 1
+        existing_pending = await self.conversation_manager.get_session_metadata(
+            session_id, "pending_summary", None
+        )
+        prev_exhausted_cycles = (
+            int(existing_pending.get("exhausted_cycles", 0) or 0)
+            if isinstance(existing_pending, dict)
+            and existing_pending.get("start_index") == start_index
+            and existing_pending.get("end_index") == end_index
+            else 0
+        )
+        now_ts = time.time()
+        backoff_idx = min(
+            max(new_retry_count, 1) - 1, len(_SUMMARY_RETRY_BACKOFF_SECONDS) - 1
+        )
+        retry_delay = _SUMMARY_RETRY_BACKOFF_SECONDS[backoff_idx]
         pending_summary = {
             "start_index": start_index,
             "end_index": end_index,
@@ -709,24 +749,45 @@ class MemoryReflectionStorageMixin:
             "failure_stage": failure_stage,
             "error_code": error_code,
         }
+        if prev_exhausted_cycles > 0:
+            pending_summary["exhausted_cycles"] = prev_exhausted_cycles
         managed_scope = session_id.startswith("narrative:v1:")
-        if (
-            managed_scope
-            and not retry_refused
-            and failure_stage not in TERMINAL_SUMMARY_STAGES
-        ):
-            pending_summary["recovery_after"] = time.time() + 60
+        if not retry_refused and failure_stage not in TERMINAL_SUMMARY_STAGES:
+            pending_summary["retry_after"] = now_ts + retry_delay
+            if managed_scope:
+                pending_summary["recovery_after"] = pending_summary["retry_after"]
         if failure_stage == "retry_exhausted" or (
             new_retry_count >= SUMMARY_RETRY_LIMIT
             and failure_stage not in TERMINAL_SUMMARY_STAGES
             and not retry_refused
         ):
-            # Retain the failed segment and retry on a later normal trigger,
-            # rather than permanently stalling or pretending it was summarized.
-            pending_summary["retry_after"] = time.time() + SUMMARY_COOLDOWN_SECONDS
+            next_exhausted_cycles = prev_exhausted_cycles + 1
+            # After repeated exhaustion cycles on a native session (first cycle
+            # cools down and retries; a second exhausted cycle proves the window
+            # is persistently poisoned), advance the cursor past the poisoned
+            # range so last_summarized_index never deadlocks conversations.db.
+            if not managed_scope and next_exhausted_cycles >= 2 and window_messages:
+                last_msg = window_messages[-1]
+                advanced = await self.conversation_manager.commit_summary_cursor(
+                    session_id,
+                    last_msg,
+                    expected_revision,
+                    window_messages=window_messages,
+                )
+                if advanced:
+                    logger.warning(
+                        f"[{session_id}] 总结窗口连续 {next_exhausted_cycles} 轮重试耗尽，"
+                        f"已跳过毒化范围 [{start_index}:{end_index}] 并推进游标以解除死锁 "
+                        f"(error_code={error_code})"
+                    )
+                    return True
+            # Retain the failed segment and retry after cooldown on first exhaustion.
+            cooldown = max(SUMMARY_COOLDOWN_SECONDS, _SUMMARY_RETRY_BACKOFF_SECONDS[-1])
+            pending_summary["retry_after"] = now_ts + cooldown
             if managed_scope:
                 pending_summary["recovery_after"] = pending_summary["retry_after"]
             pending_summary["exhausted_retry_count"] = new_retry_count
+            pending_summary["exhausted_cycles"] = next_exhausted_cycles
             # Older code ignores the cooldown marker and skips a whole backlog
             # at retry_count >= 3. A source rollback must resume, never skip it.
             pending_summary["retry_count"] = 0

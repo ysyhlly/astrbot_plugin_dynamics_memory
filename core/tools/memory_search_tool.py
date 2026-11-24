@@ -1,6 +1,7 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
 import asyncio
+import copy
 import inspect
 import time
 from dataclasses import field
@@ -30,13 +31,119 @@ from ..recall_runtime import (
     BoundedRecallTaskPool,
     RecallDeadline,
 )
+from ..retrieval.vector_search import QueryEmbeddingCache
 from ..summary_source import AtomProjectionProof, summary_metadata_sha256, text_sha256
 from ..tool_recall_guard import (
     make_managed_evidence_validator,
     make_memory_source_validator,
 )
 from ..utils import get_persona_id
-from .agentic_recall_common import json_result as _json_result
+from .agentic_recall_common import json_result as _raw_json_result
+from .memory_evidence_output import fitting_prefix
+
+DEFAULT_RESULT_CHAR_BUDGET = 6000
+SOURCE_RESULT_CHAR_BUDGET = 12000
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[: max(0, limit)]
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _json_result(
+    payload: dict[str, Any], *, max_chars: int | None = DEFAULT_RESULT_CHAR_BUDGET
+) -> str:
+    """序列化工具返回并强制执行字符预算：优先保留高分记忆并截断超长文本。"""
+    raw = _raw_json_result(payload)
+    if max_chars is None or max_chars <= 0 or len(raw) <= max_chars:
+        return raw
+
+    bounded = copy.deepcopy(payload)
+    diagnostics = bounded.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        diagnostics["truncated"] = True
+        diagnostics["char_budget"] = max_chars
+
+    results = bounded.get("results")
+    if isinstance(results, list) and results:
+        original_count = len(results)
+
+        # 1. 先按档位截断超长正文与原文片段，尽量保留更多高分条目
+        for content_cap, source_cap, max_sources in (
+            (1200, 400, 4),
+            (600, 240, 3),
+            (320, 160, 2),
+        ):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                if isinstance(item.get("content"), str):
+                    item["content"] = _truncate_text(item["content"], content_cap)
+                sources = item.get("source_messages")
+                if isinstance(sources, list):
+                    trimmed_sources = []
+                    for msg in sources[:max_sources]:
+                        if isinstance(msg, dict) and isinstance(
+                            msg.get("content"), str
+                        ):
+                            msg["content"] = _truncate_text(msg["content"], source_cap)
+                        trimmed_sources.append(msg)
+                    item["source_messages"] = trimmed_sources
+            encoded = _raw_json_result(bounded)
+            if len(encoded) <= max_chars:
+                return encoded
+
+        # 2. 若仍超出预算，从尾部（低分记忆）开始丢弃，优先保留头部高分记忆
+        while len(results) > 1 and len(_raw_json_result(bounded)) > max_chars:
+            results.pop()
+            bounded["count"] = len(results)
+            if isinstance(diagnostics, dict):
+                diagnostics["omitted_count"] = original_count - len(results)
+
+        encoded = _raw_json_result(bounded)
+        if len(encoded) <= max_chars:
+            return encoded
+
+        # 3. 即使只剩最高分 1 条仍超限：先裁剪其 source_messages，再二分截断正文
+        top_item = results[0]
+        if isinstance(top_item, dict):
+            if isinstance(top_item.get("source_messages"), list):
+                while (
+                    top_item["source_messages"]
+                    and len(_raw_json_result(bounded)) > max_chars
+                ):
+                    top_item["source_messages"].pop()
+                if not top_item["source_messages"]:
+                    top_item.pop("source_messages", None)
+            if len(_raw_json_result(bounded)) > max_chars and isinstance(
+                top_item.get("content"), str
+            ):
+                original_text = top_item["content"]
+
+                def _fits_content(candidate: str) -> bool:
+                    top_item["content"] = candidate
+                    return len(_raw_json_result(bounded)) <= max_chars
+
+                top_item["content"] = fitting_prefix(original_text, _fits_content)
+
+        encoded = _raw_json_result(bounded)
+        if len(encoded) <= max_chars:
+            return encoded
+
+    # 4. 兜底：若 query 过长导致超限，截断 query
+    if isinstance(bounded.get("query"), str) and len(_raw_json_result(bounded)) > max_chars:
+        query_text = bounded["query"]
+
+        def _fits_query(candidate: str) -> bool:
+            bounded["query"] = candidate
+            return len(_raw_json_result(bounded)) <= max_chars
+
+        bounded["query"] = fitting_prefix(query_text, _fits_query)
+
+    return _raw_json_result(bounded)
 
 
 @dataclass
@@ -111,6 +218,12 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             closed_seen = False
             partial_seen = False
 
+            char_budget = (
+                SOURCE_RESULT_CHAR_BUDGET
+                if include_source
+                else DEFAULT_RESULT_CHAR_BUDGET
+            )
+
             def reply(status: str, results=None, *, error=None, applied_filters=None):
                 result_count = len(results or [])
                 logger.info(
@@ -139,7 +252,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     payload["error"] = error
                 if applied_filters is not None:
                     payload["applied_filters"] = applied_filters
-                return _json_result(payload)
+                return _json_result(payload, max_chars=char_budget)
 
             if not cleaned_query:
                 return reply("empty", error="query is empty")
@@ -462,6 +575,10 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     if isinstance(cd_receipt, dict)
                     else ""
                 )
+                remote_deadline = deadline.search_deadline - min(
+                    1.0, deadline.search_remaining() * 0.35
+                )
+                embedding_cache = QueryEmbeddingCache(remote_deadline, owner=runtime)
                 search_context = BoundedRecallSearchContext(
                     runtime,
                     deadline,
@@ -472,17 +589,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     correction_revision=correction_revision,
                     persona_ids=(guard_persona,) if guard_persona else (),
                     origin="memory-search-tool",
+                    max_parallel=3,
+                    hard_deadline=True,
+                    remote_deadline=remote_deadline,
+                    embedding_cache=embedding_cache,
                 )
 
                 memories_by_id = {}
                 source_scope_by_id = {}
                 search_context_by_id = {}
                 readonly_by_id = {}
-                scope_count = 0
+
+                scope_jobs = []
                 for read_scope in policy.read_scopes:
-                    if deadline.search_remaining() <= 0:
-                        timeout_seen = True
-                        break
                     scope_session_id = (
                         read_scope.session_ids[0]
                         if read_scope.session_ids and len(read_scope.session_ids) == 1
@@ -518,7 +637,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     if not isinstance(source_scope, dict):
                         partial_seen = True
                         continue
-                    scope_count += 1
+                    scope_label = f"scope_{len(scope_jobs) + 1}"
                     revision_info = (
                         plugin.peek_evidence_revision(source_scope)
                         if (
@@ -529,14 +648,30 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         )
                         else None
                     )
-                    scope_context = search_context.for_scope(
-                        source_scope,
-                        (
+                    # 每个 scope 拥有独立的 metrics 字典，同时共享 embedding_cache、remote_deadline 与并发信号量
+                    scope_context = BoundedRecallSearchContext(
+                        runtime,
+                        deadline,
+                        scope=source_scope,
+                        query=cleaned_query,
+                        purpose="reply",
+                        card_version=card_version,
+                        correction_revision=(
                             revision_info.get("correction_revision")
                             if isinstance(revision_info, dict)
                             and revision_info.get("available")
                             else None
                         ),
+                        persona_ids=search_context.persona_ids,
+                        origin=search_context.origin,
+                        _parallel=search_context._parallel,
+                        _metrics=({}, {}, {}),
+                        hard_deadline=True,
+                        embedding_cache=embedding_cache,
+                        local_only=search_context.local_only,
+                        adapter_access_snapshot=search_context.adapter_access_snapshot,
+                        remote_deadline=remote_deadline,
+                        _remote_parallel=search_context._remote_parallel,
                     )
                     search_kwargs = {
                         "query": cleaned_query,
@@ -556,64 +691,169 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         search_kwargs["source_session_id"] = (
                             read_scope.source_session_id
                         )
-                    scope_label = f"scope_{scope_count}"
-                    engine_timeout = min(
-                        deadline.remaining(),
-                        max(0.0, deadline.search_remaining() + 0.25),
+                    scope_jobs.append(
+                        (
+                            scope_label,
+                            read_scope,
+                            source_scope,
+                            scope_context,
+                            search_kwargs,
+                        )
                     )
-                    if engine_timeout <= 0:
+
+                if scope_jobs:
+                    if deadline.search_remaining() <= 0:
                         timeout_seen = True
-                        route_states[scope_label] = "deadline_exceeded"
-                        break
-                    try:
-                        found = await asyncio.wait_for(
-                            self.memory_engine.search_memories(**search_kwargs),
-                            timeout=engine_timeout,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except asyncio.TimeoutError:
-                        timeout_seen = True
-                        route_states[scope_label] = "deadline_exceeded"
-                        break
-                    except Exception as exc:
-                        route_states[scope_label] = "error"
-                        logger.info(
-                            "[LMToolRecall] route=search phase=scope outcome=error elapsed_ms=%d exception_class=%s",
-                            int((time.monotonic() - call_started) * 1000),
-                            type(exc).__name__,
-                        )
-                        continue
-                    failures = dict(scope_context.route_failures)
-                    if failures:
-                        route_states[scope_label] = next(iter(failures.values()))
-                        timeout_seen = timeout_seen or any(
-                            value == "timeout" for value in failures.values()
-                        )
-                        busy_seen = busy_seen or any(
-                            value == "busy" for value in failures.values()
-                        )
-                        closed_seen = closed_seen or any(
-                            value == "closed" for value in failures.values()
-                        )
-                        partial_seen = True
+                        route_states[scope_jobs[0][0]] = "deadline_exceeded"
                     else:
-                        route_states[scope_label] = "completed"
-                    for memory in found if isinstance(found, list) else []:
-                        memory_id = getattr(memory, "doc_id", None)
-                        if isinstance(memory_id, bool) or not isinstance(
-                            memory_id, int
-                        ):
-                            continue
-                        previous = memories_by_id.get(memory_id)
-                        if (
-                            previous is None
-                            or memory.final_score > previous.final_score
-                        ):
-                            memories_by_id[memory_id] = memory
-                            source_scope_by_id[memory_id] = dict(source_scope)
-                            search_context_by_id[memory_id] = scope_context
-                            readonly_by_id[memory_id] = bool(read_scope.read_only)
+                        scope_sem = asyncio.Semaphore(min(3, len(scope_jobs)))
+
+                        async def _run_one_scope(job):
+                            (
+                                s_label,
+                                r_scope,
+                                s_scope,
+                                s_ctx,
+                                s_kwargs,
+                            ) = job
+                            async with scope_sem:
+                                rem = min(
+                                    deadline.remaining(),
+                                    max(0.0, deadline.search_remaining() + 0.25),
+                                )
+                                if rem <= 0:
+                                    return (
+                                        s_label,
+                                        r_scope,
+                                        s_scope,
+                                        s_ctx,
+                                        "deadline_exceeded",
+                                        [],
+                                    )
+                                try:
+                                    found = await asyncio.wait_for(
+                                        self.memory_engine.search_memories(**s_kwargs),
+                                        timeout=rem,
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except asyncio.TimeoutError:
+                                    return (
+                                        s_label,
+                                        r_scope,
+                                        s_scope,
+                                        s_ctx,
+                                        "deadline_exceeded",
+                                        [],
+                                    )
+                                except Exception as exc:
+                                    logger.info(
+                                        "[LMToolRecall] route=search phase=scope outcome=error elapsed_ms=%d exception_class=%s",
+                                        int((time.monotonic() - call_started) * 1000),
+                                        type(exc).__name__,
+                                    )
+                                    return (
+                                        s_label,
+                                        r_scope,
+                                        s_scope,
+                                        s_ctx,
+                                        "error",
+                                        [],
+                                    )
+                                return (
+                                    s_label,
+                                    r_scope,
+                                    s_scope,
+                                    s_ctx,
+                                    "completed",
+                                    found if isinstance(found, list) else [],
+                                )
+
+                        scope_tasks = [
+                            asyncio.create_task(_run_one_scope(job))
+                            for job in scope_jobs
+                        ]
+                        outer_timeout = min(
+                            deadline.remaining(),
+                            max(0.0, deadline.search_remaining() + 0.25),
+                        )
+                        try:
+                            done_tasks, pending_tasks = await asyncio.wait(
+                                scope_tasks, timeout=outer_timeout
+                            )
+                        finally:
+                            for task in scope_tasks:
+                                if not task.done():
+                                    task.cancel()
+                            pending_cleanup = [t for t in scope_tasks if not t.done()]
+                            if pending_cleanup:
+                                await asyncio.gather(
+                                    *pending_cleanup, return_exceptions=True
+                                )
+
+                        if pending_tasks:
+                            timeout_seen = True
+
+                        for job, task in zip(scope_jobs, scope_tasks):
+                            s_label = job[0]
+                            if task not in done_tasks:
+                                timeout_seen = True
+                                route_states[s_label] = "deadline_exceeded"
+                                continue
+                            if task.cancelled():
+                                raise asyncio.CancelledError
+                            try:
+                                (
+                                    s_label,
+                                    r_scope,
+                                    s_scope,
+                                    s_ctx,
+                                    outcome_state,
+                                    found,
+                                ) = task.result()
+                            except Exception:
+                                route_states[s_label] = "error"
+                                continue
+
+                            if outcome_state == "deadline_exceeded":
+                                timeout_seen = True
+                                route_states[s_label] = "deadline_exceeded"
+                                continue
+                            if outcome_state == "error":
+                                route_states[s_label] = "error"
+                                continue
+
+                            failures = dict(s_ctx.route_failures)
+                            if failures:
+                                route_states[s_label] = next(iter(failures.values()))
+                                timeout_seen = timeout_seen or any(
+                                    value == "timeout" for value in failures.values()
+                                )
+                                busy_seen = busy_seen or any(
+                                    value == "busy" for value in failures.values()
+                                )
+                                closed_seen = closed_seen or any(
+                                    value == "closed" for value in failures.values()
+                                )
+                                partial_seen = True
+                            else:
+                                route_states[s_label] = "completed"
+
+                            for memory in found:
+                                memory_id = getattr(memory, "doc_id", None)
+                                if isinstance(memory_id, bool) or not isinstance(
+                                    memory_id, int
+                                ):
+                                    continue
+                                previous = memories_by_id.get(memory_id)
+                                if (
+                                    previous is None
+                                    or memory.final_score > previous.final_score
+                                ):
+                                    memories_by_id[memory_id] = memory
+                                    source_scope_by_id[memory_id] = dict(s_scope)
+                                    search_context_by_id[memory_id] = s_ctx
+                                    readonly_by_id[memory_id] = bool(r_scope.read_only)
 
                 memories = sorted(
                     memories_by_id.values(),
@@ -626,6 +866,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                 document_snapshots = []
                 source_row_snapshots = []
                 serialized_results = []
+                valid_entries: list[tuple[Any, dict, dict, str, dict]] = []
                 for memory in memories:
                     metadata = (
                         memory.metadata if isinstance(memory.metadata, dict) else {}
@@ -698,100 +939,147 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                             ),
                         }
                     )
-                    if include_source:
-                        source_messages = []
-                        if (
-                            plugin is not None
-                            and callable(
-                                getattr(plugin, "_native_memory_source_row_ids", None)
-                            )
-                            and callable(
-                                getattr(plugin, "_native_verified_source_row", None)
-                            )
-                        ):
-                            try:
-                                source_context = search_context_by_id.get(memory.doc_id)
-                                if source_context is None:
-                                    raise asyncio.TimeoutError
-                                ids_outcome = await source_context.run(
-                                    "tool-source-ids",
-                                    plugin._native_memory_source_row_ids,
-                                    self.memory_engine,
-                                    memory.doc_id,
-                                    dict(metadata),
-                                    source_umo,
-                                    discriminator=memory.doc_id,
-                                )
-                                if ids_outcome.get("state") != "completed":
-                                    source_ids = []
-                                    route_states["source_ids"] = str(
-                                        ids_outcome.get("state", "error")
-                                    )
-                                    timeout_seen |= (
-                                        ids_outcome.get("state") == "timeout"
-                                    )
-                                    busy_seen |= ids_outcome.get("state") == "busy"
-                                    closed_seen |= ids_outcome.get("state") == "closed"
-                                    partial_seen = True
-                                else:
-                                    route_states["source_ids"] = "completed"
-                                    source_ids = ids_outcome.get("value") or []
-                                    if not source_ids:
-                                        partial_seen = True
-                            except asyncio.CancelledError:
-                                raise
-                            except asyncio.TimeoutError:
-                                timeout_seen = True
-                                source_ids = []
-                            except Exception:
-                                partial_seen = True
-                                source_ids = []
-                            for row_id in source_ids[
-                                : max(0, min(4, 32 - len(source_row_snapshots)))
-                            ]:
+                    valid_entries.append(
+                        (memory, metadata, source_scope, source_umo, item)
+                    )
+                    serialized_results.append(item)
+
+                if include_source and valid_entries:
+                    can_load_sources = (
+                        plugin is not None
+                        and callable(
+                            getattr(plugin, "_native_memory_source_row_ids", None)
+                        )
+                        and callable(
+                            getattr(plugin, "_native_verified_source_row", None)
+                        )
+                    )
+                    if not can_load_sources:
+                        partial_seen = True
+                    else:
+                        source_sem = asyncio.Semaphore(4)
+
+                        async def _fetch_source_ids(entry_idx, entry):
+                            mem, meta, _s_scope, s_umo, _item = entry
+                            async with source_sem:
                                 if deadline.search_remaining() <= 0:
-                                    timeout_seen = True
-                                    partial_seen = True
-                                    break
+                                    return entry_idx, "timeout", []
+                                source_context = search_context_by_id.get(mem.doc_id)
+                                if source_context is None:
+                                    return entry_idx, "timeout", []
                                 try:
-                                    source_context = search_context_by_id.get(
-                                        memory.doc_id
+                                    ids_outcome = await source_context.run(
+                                        "tool-source-ids",
+                                        plugin._native_memory_source_row_ids,
+                                        self.memory_engine,
+                                        mem.doc_id,
+                                        dict(meta),
+                                        s_umo,
+                                        discriminator=mem.doc_id,
                                     )
-                                    if source_context is None:
-                                        raise asyncio.TimeoutError
-                                    row_outcome = await source_context.run(
-                                        "tool-source-row",
-                                        plugin._native_verified_source_row,
-                                        source_scope,
-                                        memory.doc_id,
-                                        row_id,
-                                        persona_id=guard_persona,
-                                        persona_filtering=plugin_filtering,
-                                        discriminator=(memory.doc_id, row_id),
-                                    )
-                                    if row_outcome.get("state") != "completed":
-                                        route_states["source_rows"] = str(
-                                            row_outcome.get("state", "error")
-                                        )
-                                        timeout_seen |= (
-                                            row_outcome.get("state") == "timeout"
-                                        )
-                                        busy_seen |= row_outcome.get("state") == "busy"
-                                        closed_seen |= (
-                                            row_outcome.get("state") == "closed"
-                                        )
-                                        partial_seen = True
-                                        continue
-                                    route_states["source_rows"] = "completed"
-                                    row = row_outcome.get("value")
                                 except asyncio.CancelledError:
                                     raise
                                 except asyncio.TimeoutError:
-                                    timeout_seen = True
-                                    partial_seen = True
-                                    break
+                                    return entry_idx, "timeout", []
                                 except Exception:
-                                    row = None
+                                    return entry_idx, "error", []
+                                state = str(ids_outcome.get("state", "error"))
+                                if state != "completed":
+                                    return entry_idx, state, []
+                                return (
+                                    entry_idx,
+                                    "completed",
+                                    list(ids_outcome.get("value") or []),
+                                )
+
+                        id_results = await asyncio.gather(
+                            *(
+                                _fetch_source_ids(idx, entry)
+                                for idx, entry in enumerate(valid_entries)
+                            )
+                        )
+
+                        # 按高分记忆顺序分配全局最多 32 条原文行（每条记忆最多 4 条），再受控并发批量拉取
+                        row_jobs: list[tuple[int, Any, dict, Any]] = []
+                        planned_total = 0
+                        for entry_idx, state, source_ids in id_results:
+                            if state != "completed":
+                                route_states["source_ids"] = state
+                                timeout_seen |= state == "timeout"
+                                busy_seen |= state == "busy"
+                                closed_seen |= state == "closed"
+                                partial_seen = True
+                                continue
+                            route_states["source_ids"] = "completed"
+                            if not source_ids:
+                                partial_seen = True
+                                continue
+                            mem, _meta, s_scope, _s_umo, _item = valid_entries[
+                                entry_idx
+                            ]
+                            allowance = max(0, min(4, 32 - planned_total))
+                            for row_id in source_ids[:allowance]:
+                                row_jobs.append((entry_idx, mem, s_scope, row_id))
+                                planned_total += 1
+
+                        async def _fetch_verified_row(job):
+                            entry_idx, mem, s_scope, row_id = job
+                            async with source_sem:
+                                if deadline.search_remaining() <= 0:
+                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                source_context = search_context_by_id.get(mem.doc_id)
+                                if source_context is None:
+                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                try:
+                                    row_outcome = await source_context.run(
+                                        "tool-source-row",
+                                        plugin._native_verified_source_row,
+                                        s_scope,
+                                        mem.doc_id,
+                                        row_id,
+                                        persona_id=guard_persona,
+                                        persona_filtering=plugin_filtering,
+                                        discriminator=(mem.doc_id, row_id),
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except asyncio.TimeoutError:
+                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                except Exception:
+                                    return entry_idx, mem, s_scope, row_id, "error", None
+                                state = str(row_outcome.get("state", "error"))
+                                if state != "completed":
+                                    return entry_idx, mem, s_scope, row_id, state, None
+                                return (
+                                    entry_idx,
+                                    mem,
+                                    s_scope,
+                                    row_id,
+                                    "completed",
+                                    row_outcome.get("value"),
+                                )
+
+                        if row_jobs:
+                            fetched_rows = await asyncio.gather(
+                                *(_fetch_verified_row(job) for job in row_jobs)
+                            )
+                            source_messages_by_entry: dict[int, list[dict]] = {}
+                            for (
+                                entry_idx,
+                                mem,
+                                s_scope,
+                                row_id,
+                                state,
+                                row,
+                            ) in fetched_rows:
+                                if state != "completed":
+                                    route_states["source_rows"] = state
+                                    timeout_seen |= state == "timeout"
+                                    busy_seen |= state == "busy"
+                                    closed_seen |= state == "closed"
+                                    partial_seen = True
+                                    continue
+                                route_states["source_rows"] = "completed"
                                 if (
                                     not isinstance(row, dict)
                                     or row.get("role") != "user"
@@ -805,17 +1093,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                                     continue
                                 source_row_snapshots.append(
                                     {
-                                        "document_id": memory.doc_id,
-                                        "scope": dict(source_scope),
-                                        "scope_key": scope_key(source_scope),
+                                        "document_id": mem.doc_id,
+                                        "scope": dict(s_scope),
+                                        "scope_key": scope_key(s_scope),
                                         "row_id": row_id,
                                         "row_hash": row_hash,
                                         "read_only": readonly_by_id.get(
-                                            memory.doc_id, False
+                                            mem.doc_id, False
                                         ),
                                     }
                                 )
-                                source_messages.append(
+                                source_messages_by_entry.setdefault(
+                                    entry_idx, []
+                                ).append(
                                     {
                                         key: row.get(key)
                                         for key in (
@@ -829,11 +1119,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                                         )
                                     }
                                 )
-                        else:
-                            partial_seen = True
-                        if source_messages:
-                            item["source_messages"] = source_messages
-                    serialized_results.append(item)
+                            for entry_idx, msgs in source_messages_by_entry.items():
+                                if msgs:
+                                    valid_entries[entry_idx][4]["source_messages"] = (
+                                        msgs
+                                    )
 
                 registrar = getattr(event, "_cd_tool_memory_sources_register_v1", None)
                 if serialized_results:

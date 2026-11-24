@@ -280,13 +280,27 @@ async def test_retry_task_done_callback_clears_state(initializer):
 
 
 @pytest.mark.asyncio
-async def test_retry_initialization_timeout_sets_actionable_error(initializer):
+async def test_retry_initialization_timeout_sets_actionable_error(
+    monkeypatch, initializer
+):
+    """超过最大快速重试次数后不永久锁死，而是记录可操作错误并降频到 300s 长间隔探测。"""
     initializer._max_provider_attempts = 0
     initializer._provider_check_attempts = 0
+    seen_delays: list[float] = []
 
-    await initializer._retry_initialization()
+    async def fake_sleep(delay: float):
+        seen_delays.append(delay)
+        if len(seen_delays) >= 2:
+            raise asyncio.CancelledError
 
-    assert initializer.is_failed is True
+    monkeypatch.setattr(plugin_initializer_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await initializer._retry_initialization()
+
+    assert initializer.is_failed is False
+    assert initializer.in_slow_probe_mode is True
+    assert seen_delays and all(d == 300.0 for d in seen_delays)
     assert initializer.error_message is not None
     assert "Provider 初始化超时" in initializer.error_message
     assert "请检查 provider_settings 配置" in initializer.error_message

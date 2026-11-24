@@ -272,6 +272,75 @@ class MemoryEngineStatsMixin:
             "archived_count": archived_count,
         }
 
+    def _companion_sqlite_paths(self) -> list[Path]:
+        """返回与主库同目录的伴生 SQLite 文件路径列表（去重、仅已存在文件）。"""
+        db_path = Path(self.db_path)
+        data_dir = db_path.parent
+        candidates: list[Path] = [
+            data_dir / "conversations.db",
+            data_dir / "livingmemory_graph_documents.db",
+            data_dir / "evidence_sidecar.sqlite3",
+        ]
+        graph_doc_cfg = self.config.get("graph_document_path") if isinstance(self.config, dict) else None
+        if graph_doc_cfg and str(graph_doc_cfg).strip() not in {"", ":memory:"}:
+            candidates.append(Path(str(graph_doc_cfg)))
+
+        seen: set[Path] = set()
+        try:
+            primary_resolved = db_path.resolve()
+        except OSError:
+            primary_resolved = db_path
+        result: list[Path] = []
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
+            if resolved == primary_resolved or resolved in seen:
+                continue
+            seen.add(resolved)
+            result.append(candidate)
+        return result
+
+    @staticmethod
+    async def _maintain_companion_sqlite(
+        companion_path: Path, *, vacuum: bool = False
+    ) -> dict[str, Any]:
+        """对伴生 SQLite 库执行只收缩不删数据的安全维护（WAL 截断 + 增量回收）。"""
+        wal_path = Path(f"{companion_path}-wal")
+        before_db = companion_path.stat().st_size if companion_path.is_file() else 0
+        before_wal = wal_path.stat().st_size if wal_path.is_file() else 0
+        connection = await open_connection(str(companion_path), isolation_level=None)
+        try:
+            for pragma in (
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+                "PRAGMA incremental_vacuum",
+            ):
+                cursor = await connection.execute(pragma)
+                await cursor.fetchall()
+                await cursor.close()
+            if vacuum:
+                av_cur = await connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                await av_cur.fetchall()
+                await av_cur.close()
+                await connection.execute("VACUUM")
+        finally:
+            await connection.close()
+        after_db = companion_path.stat().st_size if companion_path.is_file() else 0
+        after_wal = wal_path.stat().st_size if wal_path.is_file() else 0
+        return {
+            "success": True,
+            "db_size_before": before_db,
+            "db_size_after": after_db,
+            "wal_size_before": before_wal,
+            "wal_size_after": after_wal,
+            "bytes_reclaimed": max(
+                0, before_db + before_wal - after_db - after_wal
+            ),
+        }
+
     async def maintain_storage(self, *, vacuum: bool = False) -> dict[str, Any]:
         """Run SQLite storage maintenance and return size diagnostics."""
         try:
@@ -304,23 +373,54 @@ class MemoryEngineStatsMixin:
                         exc_info=True,
                     )
 
-            checkpoint_cursor = await self.db_connection.execute(
-                "PRAGMA wal_checkpoint(TRUNCATE)"
-            )
-            await checkpoint_cursor.fetchall()
-            await checkpoint_cursor.close()
+            for pragma in (
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+                "PRAGMA incremental_vacuum",
+            ):
+                pragma_cursor = await self.db_connection.execute(pragma)
+                await pragma_cursor.fetchall()
+                await pragma_cursor.close()
 
             if vacuum:
                 if self.db_connection.in_transaction:
                     await self.db_connection.commit()
+                av_cur = await self.db_connection.execute(
+                    "PRAGMA auto_vacuum = INCREMENTAL"
+                )
+                await av_cur.fetchall()
+                await av_cur.close()
                 await self.db_connection.execute("VACUUM")
 
             cleanup_ops = getattr(self, "cleanup_write_ops", None)
             if callable(cleanup_ops):
                 await cleanup_ops()
 
+            companion_dbs: dict[str, dict[str, Any]] = {}
+            companion_reclaimed = 0
+            for companion_path in self._companion_sqlite_paths():
+                try:
+                    c_res = await self._maintain_companion_sqlite(
+                        companion_path, vacuum=vacuum
+                    )
+                    companion_dbs[companion_path.name] = c_res
+                    companion_reclaimed += int(c_res.get("bytes_reclaimed", 0))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        f"[StorageMaintenance] 伴生库维护跳过 ({companion_path.name}): {exc}"
+                    )
+                    companion_dbs[companion_path.name] = {
+                        "success": False,
+                        "error": str(exc),
+                    }
+
             after_size = db_path.stat().st_size if db_path.exists() else 0
             after_wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+            primary_reclaimed = max(
+                0,
+                before_size + before_wal_size - after_size - after_wal_size,
+            )
             return {
                 "success": True,
                 "vacuum": vacuum,
@@ -328,10 +428,8 @@ class MemoryEngineStatsMixin:
                 "db_size_after": after_size,
                 "wal_size_before": before_wal_size,
                 "wal_size_after": after_wal_size,
-                "bytes_reclaimed": max(
-                    0,
-                    before_size + before_wal_size - after_size - after_wal_size,
-                ),
+                "bytes_reclaimed": primary_reclaimed + companion_reclaimed,
+                "companion_dbs": companion_dbs,
             }
         except asyncio.CancelledError:
             raise
