@@ -138,13 +138,14 @@ class HybridRetriever:
         k: int = 10,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
         execution_context=None,
         diagnostics: dict[str, Any] | None = None,
         relevance_only: bool = False,
         narrative_plan=None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[HybridResult]:
         """
         执行混合检索
@@ -186,6 +187,9 @@ class HybridRetriever:
             "interaction_type": interaction_type,
             "source_platform": source_platform,
             "source_session_id": source_session_id,
+            "excluded_session_ids": tuple(excluded_session_ids)
+            if excluded_session_ids
+            else None,
         }
 
         route_kwargs = {

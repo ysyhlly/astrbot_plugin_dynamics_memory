@@ -619,7 +619,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         read_scope.interaction_types[0]
                         if read_scope.interaction_types
                         and len(read_scope.interaction_types) == 1
-                        else None
+                        else read_scope.interaction_types
                     )
                     if plugin is not None and callable(
                         getattr(plugin, "_native_scope_from_request", None)
@@ -690,6 +690,10 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     if read_scope.source_session_id is not None:
                         search_kwargs["source_session_id"] = (
                             read_scope.source_session_id
+                        )
+                    if read_scope.excluded_session_ids:
+                        search_kwargs["excluded_session_ids"] = (
+                            read_scope.excluded_session_ids
                         )
                     scope_jobs.append(
                         (

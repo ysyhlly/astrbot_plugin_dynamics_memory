@@ -65,11 +65,12 @@ class GraphRetriever:
         session_id: str | None = None,
         persona_id: str | None = None,
         source_platform: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_session_id: str | None = None,
         execution_context=None,
         diagnostics: dict[str, Any] | None = None,
         relevance_only: bool = False,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[GraphResult]:
         """Run graph keyword and vector retrieval in parallel."""
         if not query or not query.strip():
@@ -90,6 +91,8 @@ class GraphRetriever:
             keyword_filters["interaction_type"] = interaction_type
         if source_session_id is not None:
             keyword_filters["source_session_id"] = source_session_id
+        if excluded_session_ids:
+            keyword_filters["excluded_session_ids"] = tuple(excluded_session_ids)
         vector_filters = (
             {"source_platform": source_platform} if source_platform is not None else {}
         )
@@ -109,6 +112,9 @@ class GraphRetriever:
                     "source_platform": source_platform,
                     "interaction_type": interaction_type,
                     "source_session_id": source_session_id,
+                    "excluded_session_ids": tuple(excluded_session_ids)
+                    if excluded_session_ids
+                    else None,
                 },
                 **kwargs,
             )

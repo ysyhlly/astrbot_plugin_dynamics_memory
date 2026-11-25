@@ -185,7 +185,7 @@ class PluginPageApi:
                 self.plugin,
                 self.plugin.context.register_web_api,
                 f"{PAGE_API_PREFIX}/{suffix}",
-                self._scoped(handler),
+                self._scoped(handler, methods=methods),
                 methods,
                 description,
             )
@@ -198,7 +198,7 @@ class PluginPageApi:
                 self.plugin,
                 self.plugin.context.register_web_api,
                 f"{PAGE_API_PREFIX}/{suffix}",
-                self._scoped(handler),
+                self._scoped(handler, methods=methods),
                 methods,
                 suffix,
             )
@@ -210,11 +210,38 @@ class PluginPageApi:
             target = getattr(target, part)
         return target
 
-    def _scoped(self, handler):
-        """把页面请求的 adapter_id 映射为一次请求局部的访问范围。"""
+    def _scoped(self, handler, *, methods=None):
+        """校验 Dashboard 管理员鉴权与 CSRF，并把 adapter_id 映射为一次请求局部的访问范围。"""
+        from ..series_panels import (
+            CSRF_PROTECTED_METHODS,
+            _web_json_response,
+            require_series_admin,
+        )
+
+        check_csrf = (
+            True
+            if methods is None
+            else any(
+                str(method or "").strip().upper() in CSRF_PROTECTED_METHODS
+                for method in methods
+            )
+        )
 
         @wraps(handler)
         async def scoped_handler(*args, **kwargs):
+            try:
+                await require_series_admin(
+                    self.plugin.context,
+                    check_csrf=check_csrf,
+                )
+            except PermissionError as exc:
+                return _web_json_response(
+                    {
+                        "status": "error",
+                        "message": str(exc) or "需要 Dashboard 管理员登录",
+                    },
+                    status_code=403,
+                )
             adapter_id = request.args.get("adapter_id")
             if not adapter_id:
                 return await handler(*args, **kwargs)

@@ -264,5 +264,7 @@ export function atomLabel(type) {
     preference: window.t("atom.preference"),
     topic: window.t("atom.topic"),
   };
-  return labels[normalized] || type || "--";
+  return Object.prototype.hasOwnProperty.call(labels, normalized)
+    ? labels[normalized]
+    : (type || "--");
 }

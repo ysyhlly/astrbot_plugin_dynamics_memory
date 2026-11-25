@@ -326,8 +326,25 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
     ] == "scope_or_owner_unavailable"
     s._series_enabled = True
 
+    import sys
+    import types
     import astrbot.api.web as web_mod
-    import astrbot.dashboard.api.auth as auth_mod
+
+    try:
+        import astrbot.dashboard.api.auth as auth_mod
+    except ModuleNotFoundError:
+        dashboard_pkg = sys.modules.get("astrbot.dashboard") or types.ModuleType(
+            "astrbot.dashboard"
+        )
+        api_pkg = sys.modules.get("astrbot.dashboard.api") or types.ModuleType(
+            "astrbot.dashboard.api"
+        )
+        auth_mod = types.ModuleType("astrbot.dashboard.api.auth")
+        dashboard_pkg.api = api_pkg
+        api_pkg.auth = auth_mod
+        monkeypatch.setitem(sys.modules, "astrbot.dashboard", dashboard_pkg)
+        monkeypatch.setitem(sys.modules, "astrbot.dashboard.api", api_pkg)
+        monkeypatch.setitem(sys.modules, "astrbot.dashboard.api.auth", auth_mod)
 
     monkeypatch.setattr(web_mod, "request", NS(_request=None), raising=False)
     monkeypatch.setattr(
@@ -345,11 +362,35 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
 
     assert (await s._series_route(s.series_status)())[0] == 403
 
+    # POST series/resolve without CSRF headers -> 403
     monkeypatch.setattr(
         web_mod,
         "request",
         NS(
-            _request=object(),
+            _request=NS(method="POST", headers={"Host": "dashboard.local"}, cookies={}),
+            method="POST",
+            headers={"Host": "dashboard.local"},
+            cookies={},
+            query={"id": "c1"},
+            json=AsyncMock(return_value={"id": "c1", "revision": 1, "reason": "ok"}),
+        ),
+        raising=False,
+    )
+    assert (await s._series_route(s.series_resolve_conflict)())[0] == 403
+
+    same_origin_headers = {
+        "Host": "dashboard.local",
+        "Origin": "https://dashboard.local",
+        "Sec-Fetch-Site": "same-origin",
+    }
+    monkeypatch.setattr(
+        web_mod,
+        "request",
+        NS(
+            _request=NS(method="POST", headers=same_origin_headers, cookies={}),
+            method="POST",
+            headers=same_origin_headers,
+            cookies={},
             query={"id": "c1"},
             json=AsyncMock(return_value={"bad": 1}),
         ),
@@ -361,7 +402,10 @@ async def test_series_context_routes_and_activity_validation(monkeypatch):
         web_mod,
         "request",
         NS(
-            _request=object(),
+            _request=NS(method="POST", headers=same_origin_headers, cookies={}),
+            method="POST",
+            headers=same_origin_headers,
+            cookies={},
             query={"id": "c1"},
             json=AsyncMock(return_value={"id": "c1", "revision": 1, "reason": "ok"}),
         ),

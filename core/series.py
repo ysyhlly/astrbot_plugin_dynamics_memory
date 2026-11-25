@@ -853,17 +853,20 @@ class SeriesMixin:
     @staticmethod
     def _series_route(handler):
         async def serve():
-            from astrbot.api.web import json_response
+            from ..series_panels import _web_json_response
 
             try:
-                return json_response(await handler())
-            except PermissionError:
-                return json_response(
-                    {"status": "error", "message": "需要 Dashboard 管理员登录"},
+                return _web_json_response(await handler())
+            except PermissionError as exc:
+                return _web_json_response(
+                    {
+                        "status": "error",
+                        "message": str(exc) or "需要 Dashboard 管理员登录",
+                    },
                     status_code=403,
                 )
             except ValueError:
-                return json_response(
+                return _web_json_response(
                     {
                         "status": "error",
                         "message": "参数无效或来源冲突版本已改变，请刷新后重试。",
@@ -873,18 +876,10 @@ class SeriesMixin:
 
         return serve
 
-    async def _series_admin(self):
-        from astrbot.api.web import request
-        from astrbot.dashboard.api.auth import require_dashboard_user
+    async def _series_admin(self, *, check_csrf: bool = False):
+        from ..series_panels import require_series_admin
 
-        raw = getattr(request, "_request", None)
-        if raw is None:
-            raise PermissionError("需要 Dashboard 管理员登录")
-        actor = await require_dashboard_user(raw)
-        expected = self.context.get_config().get("dashboard", {}).get("username")
-        if not actor or expected and actor != expected:
-            raise PermissionError("需要 Dashboard 管理员登录")
-        return str(actor)
+        return await require_series_admin(self.context, check_csrf=check_csrf)
 
     async def series_status(self):
         await self._series_admin()
@@ -916,7 +911,7 @@ class SeriesMixin:
         return {"status": "ok", "data": await store.list_series_conflicts()}
 
     async def series_resolve_conflict(self):
-        actor = await self._series_admin()
+        actor = await self._series_admin(check_csrf=True)
         from astrbot.api.web import request
 
         body = await request.json()

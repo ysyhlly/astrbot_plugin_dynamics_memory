@@ -390,8 +390,17 @@ def _metadata_matches_filters(metadata, filters):
                 for source_id in source_ids
             ):
                 return False
+        elif key == "__interaction_types__":
+            if metadata.get("interaction_type") not in value:
+                return False
         elif key == "__exclude_private_visibility__":
             if value and metadata.get("memory_visibility") == "private":
+                return False
+        elif key == "__excluded_session_ids__":
+            if value and (
+                metadata.get("session_id") in value
+                or metadata.get("source_session_id") in value
+            ):
                 return False
         elif metadata.get(key) != value:
             return False

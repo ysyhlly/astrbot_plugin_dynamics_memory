@@ -51,13 +51,14 @@ class DualRouteRetriever:
         k: int = 10,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
         execution_context=None,
         diagnostics: dict[str, Any] | None = None,
         relevance_only: bool = False,
         narrative_plan=None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[HybridResult]:
         """Run both retrieval routes and merge their memory candidates."""
         timeout = (
@@ -102,6 +103,9 @@ class DualRouteRetriever:
             graph_options["relevance_only"] = True
         if narrative_plan is not None:
             doc_options["narrative_plan"] = narrative_plan
+        if excluded_session_ids:
+            doc_options["excluded_session_ids"] = tuple(excluded_session_ids)
+            graph_options["excluded_session_ids"] = tuple(excluded_session_ids)
         try:
 
             def document_route():
@@ -324,6 +328,7 @@ class DualRouteRetriever:
             interaction_type is not None
             or source_platform is not None
             or source_session_id is not None
+            or excluded_session_ids
         ) and graph_results:
             checked = []
             # Graph index metadata is derived and may be stale. Only the
@@ -399,6 +404,7 @@ class DualRouteRetriever:
                     interaction_type=interaction_type,
                     source_platform=source_platform,
                     source_session_id=source_session_id,
+                    excluded_session_ids=excluded_session_ids,
                 ):
                     result.metadata = dict(metadata)
                     checked.append(result)

@@ -333,6 +333,7 @@ __all__ = [
     "is_event_memory_allowed",
     "is_suspicious_session_id",
     "memory_metadata_matches_policy",
+    "normalize_interaction_types",
     "parse_identity_aliases",
     "parse_value_list",
     "resolve_event_identity",
@@ -342,6 +343,15 @@ __all__ = [
     "resolve_memory_write_scope",
     "resolve_sender_alias",
 ]
+
+
+def normalize_interaction_types(value: Any) -> tuple[str, ...] | None:
+    """Normalize a single interaction_type or tuple/sequence of types."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value if item is not None)
 
 
 @dataclass(frozen=True)
@@ -354,6 +364,7 @@ class MemoryReadScope:
     source_platform: str | None = None
     source_session_id: str | None = None
     read_only: bool = False
+    excluded_session_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -394,16 +405,18 @@ def _event_platform_identity(event: Any) -> str:
 def memory_metadata_matches_policy(
     metadata: Any,
     *,
-    interaction_type: str | None = None,
+    interaction_type: str | tuple[str, ...] | None = None,
     source_platform: str | None = None,
     source_session_id: str | None = None,
+    excluded_session_ids: tuple[str, ...] | set[str] | list[str] | None = None,
 ) -> bool:
-    """Fail closed on private, unknown, or cross-platform derived records."""
+    """Fail closed on private, unknown, excluded, or cross-platform derived records."""
     if not isinstance(metadata, dict):
         return False
+    allowed_types = normalize_interaction_types(interaction_type)
     if (
-        interaction_type is not None
-        and metadata.get("interaction_type") != interaction_type
+        allowed_types is not None
+        and metadata.get("interaction_type") not in allowed_types
     ):
         return False
     if (
@@ -411,9 +424,20 @@ def memory_metadata_matches_policy(
         and metadata.get("source_session_id") != source_session_id
     ):
         return False
-    if interaction_type in {"group_chat", "unknown"} and (
-        metadata.get("memory_visibility") == "private"
-        or classify_umo(metadata.get("source_session_id")) == "private"
+    if excluded_session_ids:
+        excluded = set(excluded_session_ids)
+        if (
+            metadata.get("session_id") in excluded
+            or metadata.get("source_session_id") in excluded
+        ):
+            return False
+    if (
+        allowed_types is not None
+        and set(allowed_types).issubset({"group_chat", "unknown"})
+        and (
+            metadata.get("memory_visibility") == "private"
+            or classify_umo(metadata.get("source_session_id")) == "private"
+        )
     ):
         return False
     if source_platform:
@@ -459,20 +483,59 @@ def resolve_memory_access_policy(
     visibility = "group" if kind == "group" else "private"
 
     if kind == "group":
-        # Keep legacy cross-group group recall, but require an explicit group
-        # provenance type. Older untyped records remain available in their own
-        # group session only.
+        isolated_sessions = set(
+            parse_value_list(
+                _config_get(config, "filtering_settings.isolated_sessions", "")
+            )
+        )
+        mode = str(
+            _config_get(config, "filtering_settings.memory_scope_mode", "legacy")
+        ).casefold()
+        use_session = bool(
+            _config_get(config, "filtering_settings.use_session_filtering", True)
+        )
+        # Respect session isolation (isolated_sessions, mode="session", and
+        # legacy default use_session_filtering=True) in a single read scope.
+        if (
+            session_id in isolated_sessions
+            or mode == "session"
+            or (mode not in {"global", "user"} and use_session)
+        ):
+            own_scope = (
+                MemoryReadScope((session_id,), ("group_chat", "unknown"))
+                if session_id
+                else MemoryReadScope((), ("group_chat", "unknown"))
+            )
+            return MemoryAccessPolicy(
+                kind, write_scope, interaction_type, visibility, (own_scope,)
+            )
+        if mode == "user":
+            user_scope = resolve_user_memory_scope(config, event)
+            return MemoryAccessPolicy(
+                kind,
+                write_scope,
+                interaction_type,
+                visibility,
+                (MemoryReadScope((user_scope,), ("group_chat", "unknown")),),
+            )
+
+        # Cross-group group recall is explicitly enabled (mode="global" or
+        # legacy with use_session_filtering=False). Require explicit group_chat
+        # provenance on the current platform (which already covers the current
+        # group's group_chat records, avoiding a redundant subset search),
+        # exclude configured isolated_sessions, and keep older untyped records
+        # available in their own group session only.
         current_platform = _event_platform_identity(event)
+        excluded = tuple(sorted(isolated_sessions))
         scopes = [
             MemoryReadScope(
-                None, ("group_chat",), source_platform=current_platform or None
+                None,
+                ("group_chat",),
+                source_platform=current_platform or None,
+                excluded_session_ids=excluded,
             )
         ]
         if session_id:
-            # Preserve the current group's legacy scope even for old records
-            # whose source UMO format is unknown, while never reading a record
-            # explicitly sourced from a private conversation.
-            scopes.append(MemoryReadScope((session_id,), ("group_chat",)))
             scopes.append(MemoryReadScope((session_id,), ("unknown",)))
         return MemoryAccessPolicy(
             kind, write_scope, interaction_type, visibility, tuple(scopes)

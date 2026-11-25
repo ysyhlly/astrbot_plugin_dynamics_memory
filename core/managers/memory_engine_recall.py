@@ -19,6 +19,7 @@ from ..memory_scope import (
     adapter_visible,
     current_adapter_access,
     memory_metadata_matches_policy,
+    normalize_interaction_types,
 )
 from ..memory_transfer import memory_import_key
 from ..retrieval.hybrid_retriever import HybridResult
@@ -71,13 +72,14 @@ class MemoryEngineRecallMixin:
         k: int = 5,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
         touch_access: bool = True,
         cache_results: bool = True,
         allow_legacy_session_migration: bool = True,
         execution_context=None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[HybridResult]:
         """
         检索相关记忆
@@ -103,6 +105,7 @@ class MemoryEngineRecallMixin:
             source_platform,
             source_session_id,
             touch_access,
+            excluded_session_ids=excluded_session_ids,
         )
         cached_results = (
             self._get_cached_search_results(cache_key) if cache_results else None
@@ -151,6 +154,11 @@ class MemoryEngineRecallMixin:
             if retrieval_context is not None
             else {}
         )
+        exclusion_kwargs = (
+            {"excluded_session_ids": tuple(excluded_session_ids)}
+            if excluded_session_ids
+            else {}
+        )
         if self.dual_route_retriever is not None:
             results = await self.dual_route_retriever.search(
                 query,
@@ -160,6 +168,7 @@ class MemoryEngineRecallMixin:
                 interaction_type=interaction_type,
                 source_platform=source_platform,
                 source_session_id=source_session_id,
+                **exclusion_kwargs,
                 **execution_kwargs,
             )
         else:
@@ -173,6 +182,7 @@ class MemoryEngineRecallMixin:
                 interaction_type=interaction_type,
                 source_platform=source_platform,
                 source_session_id=source_session_id,
+                **exclusion_kwargs,
                 **execution_kwargs,
             )
 
@@ -187,6 +197,7 @@ class MemoryEngineRecallMixin:
                 "interaction_type": interaction_type,
                 "source_platform": source_platform,
                 "source_session_id": source_session_id,
+                **exclusion_kwargs,
             }
             if retrieval_context is not None:
                 atom_outcome = await retrieval_context.run(
@@ -250,21 +261,19 @@ class MemoryEngineRecallMixin:
                             and metadata.get("persona_id") != persona_id
                         )
                         or (
-                            interaction_type is not None
-                            and metadata.get("interaction_type") != interaction_type
-                        )
-                        or (
-                            source_platform is not None
+                            (
+                                interaction_type is not None
+                                or source_platform is not None
+                                or source_session_id is not None
+                                or excluded_session_ids
+                            )
                             and not memory_metadata_matches_policy(
                                 metadata,
                                 interaction_type=interaction_type,
                                 source_platform=source_platform,
                                 source_session_id=source_session_id,
+                                excluded_session_ids=excluded_session_ids,
                             )
-                        )
-                        or (
-                            source_session_id is not None
-                            and metadata.get("source_session_id") != source_session_id
                         )
                     ):
                         continue
@@ -287,13 +296,14 @@ class MemoryEngineRecallMixin:
             "interaction_type": interaction_type,
             "source_platform": source_platform,
             "source_session_id": source_session_id,
+            "excluded_session_ids": excluded_session_ids,
         }
         results = self._filter_by_retrieval_policy(
             await self._apply_atom_policy(results)
         )
 
         def filter_scope(candidates):
-            if all(value is None for value in scope_filters.values()):
+            if all(not value for value in scope_filters.values()):
                 return candidates
             return [
                 result
@@ -891,10 +901,11 @@ class MemoryEngineRecallMixin:
         k: int,
         session_id: str | None,
         persona_id: str | None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
         touch_access: bool = True,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> tuple[Any, ...]:
         return (
             self._search_cache_generation,
@@ -903,9 +914,10 @@ class MemoryEngineRecallMixin:
             int(k),
             session_id or "",
             persona_id or "",
-            interaction_type or "",
+            normalize_interaction_types(interaction_type) or (),
             source_platform or "",
             source_session_id or "",
+            tuple(excluded_session_ids or ()),
             bool(touch_access),
             bool(self.dual_route_retriever is not None),
             round(float(self.config.get("document_route_weight", 0.65)), 4),
@@ -979,9 +991,10 @@ class MemoryEngineRecallMixin:
         count: int,
         session_id: str | None,
         persona_id: str | None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[HybridResult]:
         """按创建时间倒序取当前范围内的近期记忆，作为相关性不足时的补位候选。
 
@@ -1009,16 +1022,37 @@ class MemoryEngineRecallMixin:
         if persona_id is not None:
             conditions.append("json_extract(metadata, '$.persona_id') = ?")
             params.append(persona_id)
-        if interaction_type is not None:
-            conditions.append("json_extract(metadata, '$.interaction_type') = ?")
-            params.append(interaction_type)
-            if interaction_type in {"group_chat", "unknown"}:
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None:
+            if not allowed_types:
+                return []
+            if len(allowed_types) == 1:
+                conditions.append("json_extract(metadata, '$.interaction_type') = ?")
+                params.append(allowed_types[0])
+            else:
+                placeholders = ",".join("?" for _ in allowed_types)
+                conditions.append(
+                    f"json_extract(metadata, '$.interaction_type') IN ({placeholders})"
+                )
+                params.extend(allowed_types)
+            if set(allowed_types).issubset({"group_chat", "unknown"}):
                 conditions.append(
                     "COALESCE(json_extract(metadata, '$.memory_visibility'), '') != 'private'"
                 )
         if source_session_id is not None:
             conditions.append("json_extract(metadata, '$.source_session_id') = ?")
             params.append(source_session_id)
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            conditions.append(
+                f"COALESCE(json_extract(metadata, '$.session_id'), '') NOT IN ({placeholders})"
+            )
+            conditions.append(
+                f"COALESCE(json_extract(metadata, '$.source_session_id'), '') NOT IN ({placeholders})"
+            )
+            params.extend(excl)
+            params.extend(excl)
         if source_platform:
             prefix = source_platform.casefold() + ":groupmessage:"
             conditions.append(
@@ -1067,9 +1101,10 @@ class MemoryEngineRecallMixin:
         k: int,
         session_id: str | None,
         persona_id: str | None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[HybridResult]:
         """仅在相关性结果不足 k 条时用近期记忆补位。
 
@@ -1096,6 +1131,7 @@ class MemoryEngineRecallMixin:
             interaction_type=interaction_type,
             source_platform=source_platform,
             source_session_id=source_session_id,
+            excluded_session_ids=excluded_session_ids,
         )
         selected = list(results)
         selected_ids = {result.doc_id for result in selected}

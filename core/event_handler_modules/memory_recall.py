@@ -412,7 +412,7 @@ class MemoryRecall:
                     interaction_type = (
                         scope.interaction_types[0]
                         if scope.interaction_types and len(scope.interaction_types) == 1
-                        else None
+                        else scope.interaction_types
                     )
                     scope_jobs.append(
                         (scope, scope_session_id, scope_persona_id, interaction_type)
@@ -1061,6 +1061,11 @@ class MemoryRecall:
                     if context
                     else None
                 )
+                extra_kwargs = (
+                    {"excluded_session_ids": scope.excluded_session_ids}
+                    if scope.excluded_session_ids
+                    else {}
+                )
                 task = self._submit_scope_search(
                     query=query,
                     k=k,
@@ -1073,6 +1078,7 @@ class MemoryRecall:
                     cache_results=False,
                     allow_legacy_session_migration=False,
                     execution_context=scoped_context,
+                    **extra_kwargs,
                 )
                 if task is None:
                     outcomes[index]["state"] = "busy"

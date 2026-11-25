@@ -15,7 +15,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.sqlite_connection import open_connection
-from ..memory_scope import adapter_sql
+from ..memory_scope import adapter_sql, normalize_interaction_types
 from ..processors.text_processor import TextProcessor
 
 _CJK_RUN = re.compile(r"[一-鿿]+")
@@ -203,9 +203,10 @@ class BM25Retriever:
         limit: int = 50,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[BM25Result]:
         """
         执行BM25搜索
@@ -254,12 +255,37 @@ class BM25Retriever:
         if persona_id is not None:
             filters.append(f"json_extract({metadata_sql}, '$.persona_id') = ?")
             params.append(persona_id)
-        if interaction_type is not None:
-            filters.append(f"json_extract({metadata_sql}, '$.interaction_type') = ?")
-            params.append(interaction_type)
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None:
+            if not allowed_types:
+                return []
+            if len(allowed_types) == 1:
+                filters.append(f"json_extract({metadata_sql}, '$.interaction_type') = ?")
+                params.append(allowed_types[0])
+            else:
+                placeholders = ",".join("?" for _ in allowed_types)
+                filters.append(
+                    f"json_extract({metadata_sql}, '$.interaction_type') IN ({placeholders})"
+                )
+                params.extend(allowed_types)
+            if set(allowed_types).issubset({"group_chat", "unknown"}):
+                filters.append(
+                    f"COALESCE(json_extract({metadata_sql}, '$.memory_visibility'), '') != 'private'"
+                )
         if source_session_id is not None:
             filters.append(f"json_extract({metadata_sql}, '$.source_session_id') = ?")
             params.append(source_session_id)
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            filters.append(
+                f"COALESCE(json_extract({metadata_sql}, '$.session_id'), '') NOT IN ({placeholders})"
+            )
+            filters.append(
+                f"COALESCE(json_extract({metadata_sql}, '$.source_session_id'), '') NOT IN ({placeholders})"
+            )
+            params.extend(excl)
+            params.extend(excl)
         if source_platform:
             platform_prefix = source_platform.casefold() + ":groupmessage:"
             filters.append(

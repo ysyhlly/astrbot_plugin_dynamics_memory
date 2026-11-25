@@ -70,8 +70,9 @@ class GraphKeywordRetriever:
         session_id: str | None = None,
         persona_id: str | None = None,
         source_platform: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[GraphKeywordResult]:
         """Search the graph route with keyword matching."""
         if not query or not query.strip():
@@ -91,6 +92,11 @@ class GraphKeywordRetriever:
             '"' + token.replace('"', '""') + '"' for token in fts_tokens
         ]
         fts_query = " OR ".join(escaped_tokens)
+        extra_kwargs = (
+            {"excluded_session_ids": tuple(excluded_session_ids)}
+            if excluded_session_ids
+            else {}
+        )
 
         direct_hits, matched_nodes = await asyncio.gather(
             self.graph_store.search_entries_by_bm25(
@@ -101,6 +107,7 @@ class GraphKeywordRetriever:
                 source_platform=source_platform,
                 interaction_type=interaction_type,
                 source_session_id=source_session_id,
+                **extra_kwargs,
             ),
             self.graph_store.search_nodes_by_tokens(
                 tokens=node_tokens,
@@ -121,6 +128,7 @@ class GraphKeywordRetriever:
                     source_platform=source_platform,
                     interaction_type=interaction_type,
                     source_session_id=source_session_id,
+                    **extra_kwargs,
                 ),
                 self.graph_store.get_neighbor_node_ids(
                     node_ids=matched_node_ids,
@@ -144,6 +152,7 @@ class GraphKeywordRetriever:
                             source_platform=source_platform,
                             interaction_type=interaction_type,
                             source_session_id=source_session_id,
+                            **extra_kwargs,
                         ),
                         self.graph_store.get_neighbor_node_ids(
                             node_ids=first_hop_node_ids,
@@ -165,6 +174,7 @@ class GraphKeywordRetriever:
                             source_platform=source_platform,
                             interaction_type=interaction_type,
                             source_session_id=source_session_id,
+                            **extra_kwargs,
                         )
                 else:
                     edge_neighbor_hits = await self.graph_store.get_entries_for_node_ids(
@@ -175,6 +185,7 @@ class GraphKeywordRetriever:
                         source_platform=source_platform,
                         interaction_type=interaction_type,
                         source_session_id=source_session_id,
+                        **extra_kwargs,
                     )
 
         aggregated: dict[int, GraphKeywordResult] = {}

@@ -13,7 +13,7 @@ import aiosqlite
 
 from astrbot.api import logger
 
-from ..core.memory_scope import adapter_sql
+from ..core.memory_scope import adapter_sql, normalize_interaction_types
 from ..core.models.memory_atom import (
     AtomStatus,
     AtomType,
@@ -378,9 +378,10 @@ class AtomStore:
         session_id: str | None = None,
         persona_id: str | None = None,
         include_expired: bool = False,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[MemoryAtom]:
         """Full-text search over atom content, returning time-scored results."""
         if not query or not query.strip():
@@ -424,10 +425,22 @@ class AtomStore:
         if persona_id is not None:
             filters.append("ma.persona_id = ?")
             params.append(persona_id)
-        if interaction_type is not None:
-            filters.append(f"json_extract({parent_metadata}, '$.interaction_type') = ?")
-            params.append(interaction_type)
-            if interaction_type in {"group_chat", "unknown"}:
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None:
+            if not allowed_types:
+                return []
+            if len(allowed_types) == 1:
+                filters.append(
+                    f"json_extract({parent_metadata}, '$.interaction_type') = ?"
+                )
+                params.append(allowed_types[0])
+            else:
+                placeholders = ",".join("?" for _ in allowed_types)
+                filters.append(
+                    f"json_extract({parent_metadata}, '$.interaction_type') IN ({placeholders})"
+                )
+                params.extend(allowed_types)
+            if set(allowed_types).issubset({"group_chat", "unknown"}):
                 filters.append(
                     f"COALESCE(json_extract({parent_metadata}, '$.memory_visibility'), '') != 'private'"
                 )
@@ -436,6 +449,17 @@ class AtomStore:
                 f"json_extract({parent_metadata}, '$.source_session_id') = ?"
             )
             params.append(source_session_id)
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            filters.append(
+                f"COALESCE(json_extract({parent_metadata}, '$.session_id'), '') NOT IN ({placeholders})"
+            )
+            filters.append(
+                f"COALESCE(json_extract({parent_metadata}, '$.source_session_id'), '') NOT IN ({placeholders})"
+            )
+            params.extend(excl)
+            params.extend(excl)
         if source_platform:
             prefix = source_platform.casefold() + ":groupmessage:"
             filters.append(
@@ -493,12 +517,19 @@ class AtomStore:
                 if persona_id is not None:
                     like_params_full.append(persona_id)
                 metadata_filters = []
-                if interaction_type is not None:
-                    metadata_filters.append(
-                        f"json_extract({parent_metadata}, '$.interaction_type') = ?"
-                    )
-                    like_params_full.append(interaction_type)
-                    if interaction_type in {"group_chat", "unknown"}:
+                if allowed_types is not None:
+                    if len(allowed_types) == 1:
+                        metadata_filters.append(
+                            f"json_extract({parent_metadata}, '$.interaction_type') = ?"
+                        )
+                        like_params_full.append(allowed_types[0])
+                    else:
+                        placeholders = ",".join("?" for _ in allowed_types)
+                        metadata_filters.append(
+                            f"json_extract({parent_metadata}, '$.interaction_type') IN ({placeholders})"
+                        )
+                        like_params_full.extend(allowed_types)
+                    if set(allowed_types).issubset({"group_chat", "unknown"}):
                         metadata_filters.append(
                             f"COALESCE(json_extract({parent_metadata}, '$.memory_visibility'), '') != 'private'"
                         )
@@ -507,6 +538,17 @@ class AtomStore:
                         f"json_extract({parent_metadata}, '$.source_session_id') = ?"
                     )
                     like_params_full.append(source_session_id)
+                if excluded_session_ids:
+                    excl = tuple(excluded_session_ids)
+                    placeholders = ",".join("?" for _ in excl)
+                    metadata_filters.append(
+                        f"COALESCE(json_extract({parent_metadata}, '$.session_id'), '') NOT IN ({placeholders})"
+                    )
+                    metadata_filters.append(
+                        f"COALESCE(json_extract({parent_metadata}, '$.source_session_id'), '') NOT IN ({placeholders})"
+                    )
+                    like_params_full.extend(excl)
+                    like_params_full.extend(excl)
                 if source_platform:
                     prefix = source_platform.casefold() + ":groupmessage:"
                     metadata_filters.append(

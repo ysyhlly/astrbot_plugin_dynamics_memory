@@ -514,3 +514,29 @@ test("2D canvas exposes an aria label and the node list mirrors the payload", as
   assert.match(listHtml, /Alice/);
   assert.match(listHtml, /Coffee/);
 });
+
+test("renderLegend escapes unknown node types and avoids prototype color lookup", async () => {
+  const { elements } = loadGraphUi(true);
+  window.AstrBotPluginPage.apiGet = async () => ({
+    status: "ok",
+    data: {
+      enabled: true,
+      mode: "overview",
+      summary: {
+        node_type_breakdown: {
+          '<svg onload=alert(1)>': 3,
+          constructor: 1,
+        },
+      },
+      snapshot: { nodes: [], edges: [] },
+    },
+  });
+
+  window.ensureGraphScene();
+  await flushMicrotasks();
+
+  const legendHtml = elements["graph-legend"].innerHTML;
+  assert.doesNotMatch(legendHtml, /<svg/i, "未知节点类型不得作为原始 HTML 注入");
+  assert.match(legendHtml, /&lt;svg onload=alert\(1\)&gt;/);
+  assert.doesNotMatch(legendHtml, /function Object/, "原型键不得注入 style 或 label");
+});

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..faiss_async_persist import get_async_persister
+from ..memory_scope import normalize_interaction_types
 from .vector_search import (
     call_embedding_with_telemetry,
     report_embedding_usage,
@@ -246,9 +247,10 @@ class VectorRetriever:
         k: int = 10,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[VectorResult]:
         """
         执行向量相似度搜索
@@ -285,14 +287,24 @@ class VectorRetriever:
             metadata_filters["session_id"] = session_id
         if persona_id is not None:
             metadata_filters["persona_id"] = persona_id
-        if interaction_type is not None:
-            metadata_filters["interaction_type"] = interaction_type
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None:
+            if not allowed_types:
+                return []
+            if len(allowed_types) == 1:
+                metadata_filters["interaction_type"] = allowed_types[0]
+            else:
+                metadata_filters["__interaction_types__"] = allowed_types
         if source_session_id is not None:
             metadata_filters["source_session_id"] = source_session_id
         if source_platform is not None:
             metadata_filters["__source_platform__"] = source_platform
-        if interaction_type in {"group_chat", "unknown"}:
+        if allowed_types is not None and set(allowed_types).issubset(
+            {"group_chat", "unknown"}
+        ):
             metadata_filters["__exclude_private_visibility__"] = True
+        if excluded_session_ids:
+            metadata_filters["__excluded_session_ids__"] = tuple(excluded_session_ids)
 
         faiss_results = await retrieve_vectors(
             self.faiss_db, processed_query, k, metadata_filters

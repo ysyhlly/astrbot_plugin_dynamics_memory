@@ -909,20 +909,21 @@
        也与画布上的边色无关，还用的是未本地化的枚举名。 */
     var chips = Object.entries(nodeTypes).sort(function(a, b) { return b[1] - a[1]; })
       .map(function(e) {
+        var color = Object.prototype.hasOwnProperty.call(colors, e[0]) ? colors[e[0]] : colors.other;
         return '<span class="legend-chip"><span class="dot" style="background:' +
-          (colors[e[0]] || colors.other) + '"></span>' +
-          typeLabel(e[0]) + ' &middot; ' + e[1] + '</span>';
+          escapeNodeText(color) + '"></span>' +
+          escapeNodeText(typeLabel(e[0])) + ' &middot; ' + escapeNodeText(Number(e[1]) || 0) + '</span>';
       });
 
     /* 服务端对全量图有硬上限；被截断时明说，否则与左上角总数互相矛盾。 */
     var visibleNodes = Number(summary.visible_node_count || 0);
     var totalNodes = Number(summary.graph_node_count || 0);
     if (totalNodes > visibleNodes && visibleNodes > 0) {
-      chips.push('<span class="legend-chip">' + window.t("graph.visibleNodes", visibleNodes, totalNodes) + '</span>');
+      chips.push('<span class="legend-chip">' + escapeNodeText(window.t("graph.visibleNodes", visibleNodes, totalNodes)) + '</span>');
     }
 
     dom.legend.innerHTML = chips.join("") ||
-      '<span class="legend-chip">' + window.t("graph.legendEmpty") + '</span>';
+      '<span class="legend-chip">' + escapeNodeText(window.t("graph.legendEmpty")) + '</span>';
   }
 
   /* ================================================================
@@ -995,7 +996,9 @@
   /* ================================================================
      Labels
      ================================================================ */
-  function typeLabel(t) { return NODE_TYPE_LABELS[t] || t || window.t("graph.nodeUnknown"); }
+  function typeLabel(t) {
+    return (Object.prototype.hasOwnProperty.call(NODE_TYPE_LABELS, t) && NODE_TYPE_LABELS[t]) || t || window.t("graph.nodeUnknown");
+  }
 
   document.addEventListener("DOMContentLoaded", init);
 })();

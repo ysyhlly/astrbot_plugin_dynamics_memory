@@ -13,7 +13,7 @@ import aiosqlite
 
 from astrbot.api import logger
 
-from ..core.memory_scope import adapter_sql
+from ..core.memory_scope import adapter_sql, normalize_interaction_types
 from ..core.utils.json_utils import safe_json_dict
 from ..core.utils.number_utils import safe_float
 
@@ -206,6 +206,65 @@ class GraphStoreReadMixin:
                 ]
                 last_memory_id = memory_ids[-1]
 
+    @staticmethod
+    def _build_document_policy_filter(
+        interaction_type: str | tuple[str, ...] | None,
+        source_session_id: str | None,
+        excluded_session_ids: tuple[str, ...] | None,
+    ) -> tuple[str | None, list[Any], bool]:
+        """Build EXISTS filter against canonical documents table.
+
+        Returns ``(sql_clause_or_none, params, impossible)``.
+        """
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None and not allowed_types:
+            return None, [], True
+        if (
+            allowed_types is None
+            and source_session_id is None
+            and not excluded_session_ids
+        ):
+            return None, [], False
+        subclauses = ["d.id = ge.source_memory_id", "json_valid(d.metadata)"]
+        subparams: list[Any] = []
+        if allowed_types is not None:
+            if set(allowed_types).issubset({"group_chat", "unknown"}):
+                subclauses.append(
+                    "COALESCE(json_extract(d.metadata, '$.memory_visibility'), '') != 'private'"
+                )
+            if len(allowed_types) == 1:
+                subclauses.append(
+                    "COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown') = ?"
+                )
+                subparams.append(allowed_types[0])
+            else:
+                placeholders = ",".join("?" for _ in allowed_types)
+                subclauses.append(
+                    f"COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown') IN ({placeholders})"
+                )
+                subparams.extend(allowed_types)
+        elif source_session_id is not None:
+            subclauses.append(
+                "COALESCE(json_extract(d.metadata, '$.memory_visibility'), '') != 'private'"
+            )
+        if source_session_id is not None:
+            subclauses.append(
+                "COALESCE(json_extract(d.metadata, '$.source_session_id'), json_extract(d.metadata, '$.session_id'), '') = ?"
+            )
+            subparams.append(source_session_id)
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            subclauses.append(
+                f"COALESCE(json_extract(d.metadata, '$.session_id'), '') NOT IN ({placeholders})"
+            )
+            subclauses.append(
+                f"COALESCE(json_extract(d.metadata, '$.source_session_id'), '') NOT IN ({placeholders})"
+            )
+            subparams.extend(excl)
+            subparams.extend(excl)
+        return f"EXISTS (SELECT 1 FROM documents d WHERE {' AND '.join(subclauses)})", subparams, False
+
     async def search_entries_by_bm25(
         self,
         fts_query: str,
@@ -213,8 +272,9 @@ class GraphStoreReadMixin:
         session_id: str | None = None,
         persona_id: str | None = None,
         source_platform: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Search graph entries through the FTS table."""
         filters: list[str] = []
@@ -229,16 +289,19 @@ class GraphStoreReadMixin:
             prefix = source_platform.casefold() + ":groupmessage:"
             filters.append("substr(lower(ge.session_id), 1, length(?)) = ?")
             params.extend([prefix, prefix])
-        if interaction_type is not None or source_session_id is not None:
-            filters.append(
-                "EXISTS (SELECT 1 FROM documents d WHERE d.id = ge.source_memory_id"
-                " AND json_valid(d.metadata)"
-                " AND COALESCE(json_extract(d.metadata, '$.memory_visibility'), '') != 'private'"
-                " AND COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown') = COALESCE(?, COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown'))"
-                " AND COALESCE(json_extract(d.metadata, '$.source_session_id'), json_extract(d.metadata, '$.session_id'), '') = COALESCE(?, COALESCE(json_extract(d.metadata, '$.source_session_id'), json_extract(d.metadata, '$.session_id'), ''))"
-                ")"
-            )
-            params.extend([interaction_type, source_session_id])
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            filters.append(f"COALESCE(ge.session_id, '') NOT IN ({placeholders})")
+            params.extend(excl)
+        doc_filter, doc_params, impossible = self._build_document_policy_filter(
+            interaction_type, source_session_id, excluded_session_ids
+        )
+        if impossible:
+            return []
+        if doc_filter:
+            filters.append(doc_filter)
+            params.extend(doc_params)
 
         where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
@@ -411,8 +474,9 @@ class GraphStoreReadMixin:
         session_id: str | None = None,
         persona_id: str | None = None,
         source_platform: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Expand one hop from matched nodes to their linked entries."""
         if not node_ids:
@@ -432,16 +496,19 @@ class GraphStoreReadMixin:
             prefix = source_platform.casefold() + ":groupmessage:"
             filters.append("substr(lower(ge.session_id), 1, length(?)) = ?")
             params.extend([prefix, prefix])
-        if interaction_type is not None or source_session_id is not None:
-            filters.append(
-                "EXISTS (SELECT 1 FROM documents d WHERE d.id = ge.source_memory_id"
-                " AND json_valid(d.metadata)"
-                " AND COALESCE(json_extract(d.metadata, '$.memory_visibility'), '') != 'private'"
-                " AND COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown') = COALESCE(?, COALESCE(json_extract(d.metadata, '$.interaction_type'), 'unknown'))"
-                " AND COALESCE(json_extract(d.metadata, '$.source_session_id'), json_extract(d.metadata, '$.session_id'), '') = COALESCE(?, COALESCE(json_extract(d.metadata, '$.source_session_id'), json_extract(d.metadata, '$.session_id'), ''))"
-                ")"
-            )
-            params.extend([interaction_type, source_session_id])
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            excl_placeholders = ",".join("?" for _ in excl)
+            filters.append(f"COALESCE(ge.session_id, '') NOT IN ({excl_placeholders})")
+            params.extend(excl)
+        doc_filter, doc_params, impossible = self._build_document_policy_filter(
+            interaction_type, source_session_id, excluded_session_ids
+        )
+        if impossible:
+            return []
+        if doc_filter:
+            filters.append(doc_filter)
+            params.extend(doc_params)
         where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
         async with self._read_connect() as db:

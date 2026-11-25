@@ -47,13 +47,19 @@ class AtomRetriever:
         k: int = 10,
         session_id: str | None = None,
         persona_id: str | None = None,
-        interaction_type: str | None = None,
+        interaction_type: str | tuple[str, ...] | None = None,
         source_platform: str | None = None,
         source_session_id: str | None = None,
         relevance_only: bool = False,
         diagnostics: dict[str, Any] | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
     ) -> list[AtomRetrievalResult]:
         """Search atoms by FTS, score by relevance and temporal decay."""
+        extra_kwargs = (
+            {"excluded_session_ids": tuple(excluded_session_ids)}
+            if excluded_session_ids
+            else {}
+        )
         atoms = await self.atom_store.search_fts(
             query=query,
             limit=max(k * 2, k),
@@ -62,6 +68,7 @@ class AtomRetriever:
             interaction_type=interaction_type,
             source_platform=source_platform,
             source_session_id=source_session_id,
+            **extra_kwargs,
         )
         if diagnostics is not None:
             diagnostics["candidate_limited"] = (

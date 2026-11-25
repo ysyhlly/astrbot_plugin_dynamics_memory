@@ -93,9 +93,9 @@ export class SystemPage {
 
     // 后端返回的是 {"0-1": 10, "1-2": 20, ...} 格式
     const bins = ["0-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7", "7-8", "8-9", "9-10"];
-    const values = bins.map(bin => distribution[bin] || 0);
+    const values = bins.map(bin => Number(distribution[bin]) || 0);
     if (!values.some(value => value > 0)) {
-      chartEl.innerHTML = '<div class="bar-chart-empty">' + window.t("common.noData") + '</div>';
+      chartEl.innerHTML = '<div class="bar-chart-empty">' + esc(window.t("common.noData")) + '</div>';
       return;
     }
     const maxValue = Math.max(...values, 1);
@@ -105,11 +105,11 @@ export class SystemPage {
       const value = values[idx];
       const percentage = ((value / maxValue) * 100).toFixed(0);
       html += '<div class="bar-row">';
-      html += '<span class="bar-row-label">' + bin + '</span>';
+      html += '<span class="bar-row-label">' + esc(bin) + '</span>';
       html += '<div class="bar-row-track">';
-      html += '<div class="bar-row-fill" style="width:' + percentage + '%"></div>';
+      html += '<div class="bar-row-fill" style="width:' + esc(percentage) + '%"></div>';
       html += '</div>';
-      html += '<span class="bar-row-value">' + value + '</span>';
+      html += '<span class="bar-row-value">' + esc(value) + '</span>';
       html += '</div>';
     });
 
@@ -127,10 +127,12 @@ export class SystemPage {
     // 后端返回 atom_breakdown
     const atomBreakdown = types || {};
     /* SQL 不保证顺序，按数量降序读起来才有主次 */
-    const entries = Object.entries(atomBreakdown).sort((a, b) => b[1] - a[1]);
+    const entries = Object.entries(atomBreakdown)
+      .map(([type, count]) => [type, Number(count) || 0])
+      .sort((a, b) => b[1] - a[1]);
 
     if (entries.length === 0) {
-      chartEl.innerHTML = '<div class="bar-chart-empty">' + window.t("system.noAtoms") + '</div>';
+      chartEl.innerHTML = '<div class="bar-chart-empty">' + esc(window.t("system.noAtoms")) + '</div>';
       return;
     }
 
@@ -140,11 +142,11 @@ export class SystemPage {
     entries.forEach(([type, count]) => {
       const percentage = ((count / maxValue) * 100).toFixed(0);
       html += '<div class="bar-row">';
-      html += '<span class="bar-row-label">' + atomLabel(type) + '</span>';
+      html += '<span class="bar-row-label">' + esc(atomLabel(type)) + '</span>';
       html += '<div class="bar-row-track">';
-      html += '<div class="bar-row-fill" style="width:' + percentage + '%"></div>';
+      html += '<div class="bar-row-fill" style="width:' + esc(percentage) + '%"></div>';
       html += '</div>';
-      html += '<span class="bar-row-value">' + count + '</span>';
+      html += '<span class="bar-row-value">' + esc(count) + '</span>';
       html += '</div>';
     });
 
@@ -160,19 +162,19 @@ export class SystemPage {
     if (!listEl) return;
 
     if (!sessions || sessions.length === 0) {
-      listEl.innerHTML = '<div class="table-empty">' + window.t("system.noSessions") + '</div>';
+      listEl.innerHTML = '<div class="table-empty">' + esc(window.t("system.noSessions")) + '</div>';
       return;
     }
 
     let html = '';
     sessions.forEach(session => {
       const sessionId = session.session_id || "--";
-      const memoryCount = session.message_count || 0;
+      const memoryCount = Number(session.message_count) || 0;
 
       html += '<div class="session-item">';
       html += '<div class="session-item-header">';
       html += '<span class="session-item-id">' + esc(String(sessionId)) + '</span>';
-      html += '<span class="session-item-count">' + memoryCount + ' ' + window.t("system.memories") + '</span>';
+      html += '<span class="session-item-count">' + esc(memoryCount) + ' ' + esc(window.t("system.memories")) + '</span>';
       html += '</div>';
       html += '</div>';
     });
@@ -189,7 +191,7 @@ export class SystemPage {
     if (!listEl) return;
 
     if (!backups || backups.length === 0) {
-      listEl.innerHTML = '<div class="table-empty">' + window.t("system.noBackups") + '</div>';
+      listEl.innerHTML = '<div class="table-empty">' + esc(window.t("system.noBackups")) + '</div>';
       return;
     }
 
@@ -203,13 +205,13 @@ export class SystemPage {
         const timestamp = backup.backup_unix_time
           ? new Date(backup.backup_unix_time * 1000).toLocaleString()
           : (backup.backup_timestamp || "--");
-        const fileCount = backup.files_copied || 0;
+        const fileCount = Number(backup.files_copied) || 0;
 
         html += '<div class="backup-item">';
         html += '<div class="backup-item-name">' + esc(name) + '</div>';
         html += '<div class="backup-item-meta">';
         html += '<span>' + esc(timestamp) + '</span>';
-        html += '<span>' + fileCount + ' ' + window.t("system.files") + '</span>';
+        html += '<span>' + esc(fileCount) + ' ' + esc(window.t("system.files")) + '</span>';
         html += '</div>';
         html += '</div>';
       });
