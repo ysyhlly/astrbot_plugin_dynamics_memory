@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import math
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,29 @@ def _activity_timestamp(raw):
 
 
 PLUGIN = "astrbot_plugin_dynamics_memory"
+_FALLBACK_PLUGIN_VERSION = "0.2.0-rc.8"
+_VERSION_LINE_RE = re.compile(r"^version:\s*['\"]?([^\s'\"#]+)", re.MULTILINE)
+
+
+def _load_plugin_version(
+    metadata_path: Path | None = None, *, fallback: str = _FALLBACK_PLUGIN_VERSION
+) -> str:
+    """Dynamically read plugin version from metadata.yaml with safe fallback."""
+    target = (
+        metadata_path
+        if metadata_path is not None
+        else Path(__file__).resolve().parents[1] / "metadata.yaml"
+    )
+    try:
+        raw = target.read_text(encoding="utf-8-sig")
+    except OSError:
+        return fallback
+    match = _VERSION_LINE_RE.search(raw)
+    if match:
+        version = match.group(1).strip()
+        if version:
+            return version
+    return fallback
 
 
 def _iso_now() -> str:
@@ -889,7 +913,7 @@ class SeriesMixin:
             "data": {
                 **self.get_dynamics_capabilities(),
                 "base": "LivingMemory 2.10.0+local.3",
-                "version": "0.1.0",
+                "version": _load_plugin_version(),
                 "world_ready": find_role(self.context, "character") is not None,
                 "learning_installed": any(
                     n == "astrbot_plugin_dynamics_learning" for n, _ in entries

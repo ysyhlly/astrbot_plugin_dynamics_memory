@@ -16,6 +16,10 @@ SKIP_DIRS = {
     ".omo",
     ".agents",
     ".codex",
+    ".claude",
+    ".cursor",
+    ".idea",
+    ".vscode",
     "node_modules",
     "__pycache__",
     ".pytest_cache",
@@ -40,6 +44,25 @@ SOURCE_ONLY = {
     "frontend",
 }
 SKIP_FILES = {"validation.json", "cmd_config.json", "requirements-dev.txt", "nul"}
+INSTALL_SKIP_FILES = {
+    "package.json",
+    "package-lock.json",
+    "pyproject.toml",
+    "pytest.ini",
+    "build_release.py",
+    "IMPLEMENTATION_PLAN.md",
+    "coverage.xml",
+    ".coveragerc",
+    ".gitignore",
+    ".gitattributes",
+    ".editorconfig",
+    ".pre-commit-config.yaml",
+    ".ruff.toml",
+    "ruff.toml",
+    "Makefile",
+    "Dockerfile",
+    ".dockerignore",
+}
 STATE_SUFFIXES = {
     ".db",
     ".sqlite",
@@ -120,16 +143,7 @@ def build(root: Path, output: Path):
             if kind == "install" and (
                 rel.parts[0] in SOURCE_ONLY
                 or rel.name in SKIP_FILES
-                or rel.name
-                in {
-                    "package.json",
-                    "package-lock.json",
-                    "pyproject.toml",
-                    "pytest.ini",
-                    ".coveragerc",
-                    ".gitignore",
-                    ".gitattributes",
-                }
+                or rel.name in INSTALL_SKIP_FILES
             ):
                 continue
             raw = (
@@ -160,10 +174,13 @@ def build(root: Path, output: Path):
                 archive.writestr(info, raw)
         with zipfile.ZipFile(target) as archive:
             assert archive.testzip() is None
+            names = archive.namelist()
             assert all(
                 hashlib.sha256(archive.read(name + "/" + rel)).hexdigest() == sha
                 for rel, sha in manifest.items()
             )
+            if kind == "install":
+                verify_install_archive_members(names, name)
         if kind == "install" and target.stat().st_size > 16_000_000:
             raise ValueError("Install archive exceeds 16 MB")
         record = {
@@ -183,6 +200,42 @@ def build(root: Path, output: Path):
         )
         records.append(record)
     return records
+
+
+def verify_install_archive_members(names: list[str], plugin_name: str) -> None:
+    """Assert standard single top-level directory and zero leaked dev files."""
+    if not names:
+        raise ValueError("Install archive is empty")
+    prefix = f"{plugin_name}/"
+    rels: set[str] = set()
+    for entry in names:
+        if not entry.startswith(prefix):
+            raise ValueError(f"Non-standard top-level entry in install zip: {entry}")
+        rel = entry[len(prefix) :]
+        parts = Path(rel).parts
+        if not parts:
+            continue
+        if parts[0] in SOURCE_ONLY or any(part in SKIP_DIRS for part in parts):
+            raise ValueError(f"Blacklisted dev directory leaked into install zip: {entry}")
+        filename = parts[-1]
+        if (
+            filename in SKIP_FILES
+            or filename in INSTALL_SKIP_FILES
+            or Path(filename).suffix in STATE_SUFFIXES
+            or filename.endswith(("-wal", "-shm"))
+        ):
+            raise ValueError(f"Blacklisted dev/state file leaked into install zip: {entry}")
+        rels.add(rel)
+
+    required = {
+        "main.py",
+        "metadata.yaml",
+        "_conf_schema.json",
+        "requirements.txt",
+    }
+    missing = sorted(required - rels)
+    if missing:
+        raise ValueError(f"Install archive missing required files: {missing}")
 
 
 if __name__ == "__main__":
