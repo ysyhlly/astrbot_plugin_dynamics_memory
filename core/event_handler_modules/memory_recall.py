@@ -8,7 +8,7 @@ import contextvars
 import re
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
