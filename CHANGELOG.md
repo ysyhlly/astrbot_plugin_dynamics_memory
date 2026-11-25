@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.2.0-rc.9] - 2026-11-25
+
+- 安全加固（Batch 1）：修复跨群隔离边界、消除仪表盘 XSS 风险并接入全系列统一管理鉴权。
+- 数据与存储修复（Batch 2）：保护共享知识图谱边数据、统一 SQLite 写锁并遏制数据库膨胀。
+- 性能与检索优化（Batch 3）：为受管域接入熔断器、修复 MMR 与相关性打分及仪表盘缺陷，完善配置热重载。
+- 工程与发布治理（Batch 4）：改为从 `metadata.yaml` 动态读取版本号，加固发布打包与 CI 工作流并同步系列共享资产。
+
 ## [0.2.0-rc.8] - 2026-11-24
 
 - 全面落地存储生命周期治理：全部 SQLite 启用 `PRAGMA auto_vacuum=INCREMENTAL` + 定期增量收缩与 WAL 截断；每日备份改为 `.db.gz` 压缩并调用 `BackupManager.prune()`；`evidence_sidecar` 按 `(scope_key, conversation_id, text_hash)` 去重并对滞留队列/材料按 TTL 与单群上限裁剪；`conversations.db` 强制消息上限与 `narrative_events` TTL 裁剪；`livingmemory.db` 定期剥离老旧 `memory_write_ops` payload 与清除过期归档。

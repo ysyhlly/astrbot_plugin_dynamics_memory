@@ -32,7 +32,7 @@ def _activity_timestamp(raw):
 
 
 PLUGIN = "astrbot_plugin_dynamics_memory"
-_FALLBACK_PLUGIN_VERSION = "0.2.0-rc.8"
+_FALLBACK_PLUGIN_VERSION = "0.2.0-rc.9"
 _VERSION_LINE_RE = re.compile(r"^version:\s*['\"]?([^\s'\"#]+)", re.MULTILINE)
 
 
