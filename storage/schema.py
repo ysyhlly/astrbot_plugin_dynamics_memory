@@ -145,6 +145,10 @@ DOCUMENTS_INDEX_STATEMENTS: tuple[str, ...] = (
         id DESC
     )
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_doc_adapter
+    ON documents(json_extract(metadata, '$.adapter_id'))
+    """,
 )
 
 # Requires the doc_id compatibility column, which the engine adds before

@@ -820,8 +820,9 @@ export class PeekPanel {
       this._prevPeekContent = document.getElementById("peek-body").innerHTML;
 
       this._confirmPreviousFocus = document.activeElement || null;
+      const title = window.t("batchEdit.title", count);
       let html = '<div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">';
-      html += '<div class="confirm-dialog-title">' + esc(window.t("batchEdit.title", count)) + '</div>';
+      html += '<div class="confirm-dialog-title">' + esc(title) + '</div>';
       html += '<div class="batch-edit-form">';
       html += '<label class="batch-edit-label" for="batch-edit-field">' + esc(window.t("batchEdit.field")) + '</label>';
       html += '<select id="batch-edit-field" class="input">';

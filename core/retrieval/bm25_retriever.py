@@ -340,7 +340,12 @@ class BM25Retriever:
 
                 if max_score == min_score:
                     for result in results:
-                        result.score = 1.0
+                        raw = float(result.score)
+                        # Single/tied FTS5 bm25() score (negative = stronger):
+                        # calibrate smoothly instead of blindly inflating to 1.0.
+                        result.score = (
+                            min(0.85, abs(raw) / (abs(raw) + 2.0)) if raw < 0 else 0.5
+                        )
                 else:
                     score_range = max_score - min_score
                     for result in results:

@@ -91,7 +91,6 @@ class HybridRetriever:
 
         # 配置参数
         self.decay_rate = self.config.get("decay_rate", 0.01)
-        self.importance_weight = self.config.get("importance_weight", 1.0)
         self.fallback_enabled = self.config.get("fallback_enabled", True)
 
         # Rerank重排序参数
@@ -328,15 +327,21 @@ class HybridRetriever:
             for r in vector_results
         ]
 
-        # 启用重排序时多保留候选，让 Rerank 模型在更大候选池里挑出真正相关的 top_k
+        # 启用重排序或 MMR 去重时保留超采候选池，避免截断到 k 后 _apply_mmr 沦为死代码
         rerank_active = (
             self.rerank_enabled
             and self.rerank_provider_resolver is not None
             and not local_only
         )
-        fuse_top_k = self.rerank_candidates if rerank_active else k
+        mmr_pool_k = (
+            min(max(k * 2, k + 4), max(k, 40)) if (not relevance_only and k > 1) else k
+        )
+        fuse_top_k = max(
+            self.rerank_candidates if rerank_active else k,
+            mmr_pool_k,
+        )
         if relevance_only:
-            fuse_top_k = max(k, fuse_top_k)
+            fuse_top_k = max(k, self.rerank_candidates if rerank_active else k)
         if diagnostics is not None and len(
             {r.doc_id for r in bm25_results} | {r.doc_id for r in vector_results}
         ) > min(k, fuse_top_k):
@@ -358,11 +363,15 @@ class HybridRetriever:
         if not fused_results:
             return []
 
-        # 3.5 Rerank 重排序：按查询相关性重打分并截断到 top_k
+        # 3.5 Rerank 重排序：按查询相关性重打分，保留 MMR 超采池供后续加权与多样性去重
+        rerank_top_k = k if relevance_only else mmr_pool_k
         if rerank_active:
             if execution_context is None:
                 fused_results = await self._apply_rerank(
-                    query, fused_results, k, compact=narrative_plan is not None
+                    query,
+                    fused_results,
+                    rerank_top_k,
+                    compact=narrative_plan is not None,
                 )
             else:
                 rerank_context = execution_context
@@ -378,7 +387,7 @@ class HybridRetriever:
                     self._apply_rerank,
                     query,
                     copy.deepcopy(fused_results),
-                    k,
+                    rerank_top_k,
                     timings=execution_context.route_elapsed_ms,
                     compact=narrative_plan is not None,
                     remote=True,
@@ -569,7 +578,8 @@ class HybridRetriever:
             if not entry[1]:
                 self._rerank_locks.pop(lock_key, None)
 
-        # 按候选索引归一化 Rerank 分数到 [0,1]（与 BM25 归一化口径一致）
+        # 按候选索引归一化 Rerank 分数到 [0,1]；单命中或全部分数相同时保留校准原分，
+        # 避免把低相关单命中强行拉满到 1.0 压过主路结果。
         scores = [float(r.relevance_score) for r in rerank_results]
         max_score, min_score = max(scores), min(scores)
         score_range = max_score - min_score
@@ -577,18 +587,23 @@ class HybridRetriever:
         for item in rerank_results:
             if not 0 <= item.index < len(fused_results):
                 continue
-            if score_range <= 0:
-                rerank_map[canonical_order[item.index]] = 1.0
+            raw_score = float(item.relevance_score)
+            if score_range <= 1e-9:
+                if 0.0 <= raw_score <= 1.0:
+                    calibrated = raw_score
+                else:
+                    # Logit / unbounded score -> smooth sigmoid in (0, 1)
+                    clamped = max(-20.0, min(20.0, raw_score))
+                    calibrated = 1.0 / (1.0 + math.exp(-clamped))
+                rerank_map[canonical_order[item.index]] = calibrated
             else:
                 rerank_map[canonical_order[item.index]] = (
-                    float(item.relevance_score) - min_score
+                    raw_score - min_score
                 ) / score_range
 
-        # 候选未出现在重排序结果中时给最低分，避免未评分候选混入前列；
-        # 全部分数相同（score_range<=0）时并列，稳定排序保持 RRF 顺序
-        default_score = 0.0 if score_range > 0 else 1.0
+        # 未出现在重排序结果中的候选一律给 0.0，避免未评分候选被拉满混入前列
         for i, result in enumerate(fused_results):
-            result.rerank_score = rerank_map.get(i, default_score)
+            result.rerank_score = rerank_map.get(i, 0.0)
 
         fused_results.sort(key=lambda r: r.rerank_score, reverse=True)
         return fused_results[:k]

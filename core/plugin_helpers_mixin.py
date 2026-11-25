@@ -12,6 +12,7 @@ import time
 import uuid
 import weakref
 from contextvars import ContextVar
+from types import SimpleNamespace
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -156,17 +157,27 @@ class PluginHelpersMixin:
                         }
                     )
             outcome = getattr(candidate_req, "_lm_private_hook_outcome_v1", "empty")
-            if outcome not in {
-                "ready",
-                "partial",
-                "empty",
-                "deadline_exceeded",
-                "cancelled",
-                "busy",
-                "error",
-                "original_input_unavailable",
-                "disabled",
-            }:
+            valid_outcome = isinstance(outcome, str) and (
+                outcome
+                in {
+                    "ready",
+                    "partial",
+                    "empty",
+                    "deadline_exceeded",
+                    "cancelled",
+                    "busy",
+                    "error",
+                    "original_input_unavailable",
+                    "disabled",
+                    "policy_denied",
+                }
+                or (
+                    outcome.startswith("skipped_")
+                    and len(outcome) <= 64
+                    and all(ch.isalnum() or ch == "_" for ch in outcome)
+                )
+            )
+            if not valid_outcome:
                 outcome = "error"
             return {
                 "schema_version": 1,
@@ -1018,16 +1029,19 @@ class PluginHelpersMixin:
         provider = processor._get_current_llm_provider()
         if inspect.isawaitable(provider):
             provider = await provider
+        has_text_chat = callable(getattr(provider, "text_chat", None))
+        has_stream_chat = callable(getattr(provider, "text_chat_stream", None))
         if (
             provider is None
             or getattr(provider, "is_systemone_provider", False) is True
-            or not callable(getattr(provider, "text_chat", None))
+            or (not has_text_chat and not has_stream_chat)
         ):
             # A missing explicit background provider never falls back to the
             # foreground/default provider. Empty configuration remains legacy-compatible.
             raise RuntimeError("summarizer_changed")
+        batch = list(materials[:4])
         packet = []
-        for material in materials[:4]:
+        for material in batch:
             packet.append(
                 {
                     "material_id": material["material_id"],
@@ -1079,12 +1093,16 @@ class PluginHelpersMixin:
         )
 
         kwargs = {"prompt": user_prompt, "system_prompt": system_prompt}
-        if _accepts_kwarg(provider.text_chat, "request_max_retries"):
+        if has_text_chat and _accepts_kwarg(provider.text_chat, "request_max_retries"):
             kwargs["request_max_retries"] = 1
         anchor_contexts = build_cache_anchor_contexts(
             system_prompt, task="dynamics_memory"
         )
-        if anchor_contexts and _accepts_kwarg(provider.text_chat, "contexts"):
+        if (
+            anchor_contexts
+            and has_text_chat
+            and _accepts_kwarg(provider.text_chat, "contexts")
+        ):
             kwargs["contexts"] = anchor_contexts
         provider_config = getattr(provider, "provider_config", None)
         try:
@@ -1098,19 +1116,95 @@ class PluginHelpersMixin:
             provider_id = "unknown"
         from ..series_panels import is_provider_budget_busy_error, series_llm_call
 
+        processor_cfg = getattr(processor, "config", None) or {}
+        stream_mode = processor_cfg.get("llm_stream_mode", "auto")
+        if stream_mode not in {"always", "never", "auto"}:
+            stream_mode = "auto"
+        stream_only = getattr(processor, "_stream_only_providers", None)
+        if not isinstance(stream_only, set):
+            stream_only = set()
+            try:
+                processor._stream_only_providers = stream_only
+            except Exception:
+                pass
+        provider_key = provider_id if provider_id != "unknown" else str(id(provider))
+        use_stream = (
+            not has_text_chat
+            or (stream_mode == "always" and has_stream_chat)
+            or (
+                stream_mode == "auto"
+                and has_stream_chat
+                and provider_key in stream_only
+            )
+        )
+
+        async def _call_stream():
+            stream_kwargs: dict[str, Any] = {
+                "prompt": user_prompt,
+                "system_prompt": system_prompt,
+            }
+            if anchor_contexts and _accepts_kwarg(
+                provider.text_chat_stream, "contexts"
+            ):
+                stream_kwargs["contexts"] = anchor_contexts
+            final_chunk = None
+            chunks: list[str] = []
+            async for chunk in provider.text_chat_stream(**stream_kwargs):
+                chunk_text = getattr(chunk, "completion_text", None)
+                if not getattr(chunk, "is_chunk", True) and chunk_text:
+                    final_chunk = chunk
+                elif isinstance(chunk_text, str) and chunk_text:
+                    chunks.append(chunk_text)
+            if final_chunk is not None:
+                return final_chunk
+            if chunks:
+                return SimpleNamespace(completion_text="".join(chunks))
+            raise RuntimeError("流式调用未返回完整响应，已按失败处理")
+
         call_id = uuid.uuid4().hex[:12]
         started = time.monotonic()
         try:
-            response = await asyncio.wait_for(
-                series_llm_call(
-                    getattr(self, "context", None),
-                    provider_id,
-                    "astrbot_plugin_dynamics_memory",
-                    "evidence_derivation",
-                    lambda: provider.text_chat(**kwargs),
-                ),
-                timeout=90,
-            )
+            response = None
+            if not use_stream:
+                try:
+                    response = await asyncio.wait_for(
+                        series_llm_call(
+                            getattr(self, "context", None),
+                            provider_id,
+                            "astrbot_plugin_dynamics_memory",
+                            "evidence_derivation",
+                            lambda: provider.text_chat(**kwargs),
+                        ),
+                        timeout=90,
+                    )
+                except Exception as exc:
+                    from .utils.api_failure import terminal_provider_failure
+
+                    msg_lower = str(exc).lower()
+                    if (
+                        not has_stream_chat
+                        or is_provider_budget_busy_error(exc)
+                        or terminal_provider_failure(exc)
+                        or stream_mode != "auto"
+                        or (
+                            "non-stream" not in msg_lower
+                            and "non_stream" not in msg_lower
+                        )
+                    ):
+                        raise
+                    stream_only.add(provider_key)
+                    use_stream = True
+            if use_stream:
+                response = await asyncio.wait_for(
+                    series_llm_call(
+                        getattr(self, "context", None),
+                        provider_id,
+                        "astrbot_plugin_dynamics_memory",
+                        "evidence_derivation",
+                        _call_stream,
+                    ),
+                    timeout=90,
+                )
         except asyncio.CancelledError:
             logger.info(
                 "[LivingMemory] background_call call_id=%s purpose=evidence_derivation "
@@ -1146,7 +1240,7 @@ class PluginHelpersMixin:
             raise
         text = str(getattr(response, "completion_text", "") or "").strip()
         try:
-            allowed = {material["material_id"] for material in materials}
+            allowed = {material["material_id"] for material in batch}
             result = parse_derivation_response(text, allowed)
         except InvalidDerivationSchema:
             logger.warning(

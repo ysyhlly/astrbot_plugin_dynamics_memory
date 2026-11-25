@@ -286,9 +286,112 @@ class SettingsHandler:
             logger.warning("保存插件配置失败: %s", exc, exc_info=True)
             return self.utils.error(f"保存失败: {exc}")
 
+        self._refresh_runtime_components(config_manager)
+
         return self.utils.ok(
             {
                 "message": "saved",
                 "values": {path: _get_path(updated, path) for path in sorted(values)},
             }
         )
+
+    def _refresh_runtime_components(self, config_manager) -> None:
+        """Hot-refresh MemoryEngine config copy and clear search cache after save."""
+        initializer = getattr(self.plugin, "initializer", None)
+        if initializer is None:
+            return
+        engine = getattr(initializer, "memory_engine", None)
+        if engine is not None:
+            get = config_manager.get
+            engine_updates: dict[str, Any] = {
+                "rrf_k": get("fusion_strategy.rrf_k", 60),
+                "decay_rate": get("importance_decay.decay_rate", 0.01),
+                "access_decay_window_days": get(
+                    "importance_decay.access_decay_window_days", 30.0
+                ),
+                "access_decay_max_count": get(
+                    "importance_decay.access_decay_max_count", 10
+                ),
+                "access_count_decay_multiplier": get(
+                    "importance_decay.access_count_decay_multiplier", 0.5
+                ),
+                "protected_importance_threshold": get(
+                    "importance_decay.protected_importance_threshold", 0.6
+                ),
+                "min_importance_for_retrieval": get(
+                    "recall_engine.min_importance_for_retrieval", 0.0
+                ),
+                "min_similarity_for_retrieval": get(
+                    "recall_engine.min_similarity_for_retrieval", 0.45
+                ),
+                "recent_memory_count": get("recall_engine.recent_memory_count", 0),
+                "recent_memory_max_age_hours": get(
+                    "recall_engine.recent_memory_max_age_hours", 72
+                ),
+                "memory_type_filter": get("recall_engine.memory_type_filter", "all"),
+                "search_cache_enabled": get("recall_engine.search_cache_enabled", True),
+                "search_cache_ttl_seconds": get(
+                    "recall_engine.search_cache_ttl_seconds", 45.0
+                ),
+                "search_cache_max_size": get("recall_engine.search_cache_max_size", 32),
+                "fallback_enabled": get("recall_engine.fallback_to_vector", True),
+                "rerank_enabled": get("recall_engine.rerank_enabled", False),
+                "rerank_candidates": get("recall_engine.rerank_candidates", 20),
+                "fusion_mode": get("recall_engine.fusion_mode", "score"),
+                "fusion_bm25_weight": get("recall_engine.fusion_bm25_weight", 0.5),
+                "recall_candidate_multiplier": get(
+                    "recall_engine.recall_candidate_multiplier", 3
+                ),
+                "fusion_agreement_bonus": get(
+                    "recall_engine.fusion_agreement_bonus", 0.25
+                ),
+                "document_route_weight": get(
+                    "graph_memory.document_route_weight", 0.65
+                ),
+                "graph_route_weight": get("graph_memory.graph_route_weight", 0.35),
+                "cross_route_bonus": get("graph_memory.cross_route_bonus", 0.08),
+                "graph_expansion_limit": get("graph_memory.expansion_limit", 24),
+                "graph_expansion_hops": get("graph_memory.expansion_hops", 1),
+                "graph_second_hop_weight": get("graph_memory.second_hop_weight", 0.4),
+                "dynamic_route_weighting": get(
+                    "graph_memory.dynamic_route_weighting", True
+                ),
+                "graph_route_timeout_seconds": get(
+                    "graph_memory.graph_route_timeout_seconds", 1.5
+                ),
+                "cleanup_days_threshold": get(
+                    "forgetting_agent.cleanup_days_threshold", 120
+                ),
+                "cleanup_importance_threshold": get(
+                    "forgetting_agent.cleanup_importance_threshold", 0.25
+                ),
+                "auto_archived_enabled": get(
+                    "forgetting_agent.auto_archived_enabled", True
+                ),
+                "archived_retention_days": get(
+                    "forgetting_agent.archived_retention_days", 90
+                ),
+                "memory_dedup": config_manager.get_section("memory_dedup")
+                if hasattr(config_manager, "get_section")
+                else {},
+            }
+            refresh_fn = getattr(engine, "refresh_config", None)
+            if callable(refresh_fn):
+                refresh_fn(engine_updates)
+            else:
+                if isinstance(getattr(engine, "config", None), dict):
+                    engine.config.update(engine_updates)
+                invalidate_fn = getattr(engine, "_invalidate_search_cache", None)
+                if callable(invalidate_fn):
+                    invalidate_fn()
+        processor = getattr(initializer, "memory_processor", None)
+        if processor is not None and isinstance(getattr(processor, "config", None), dict):
+            processor.config["llm_stream_mode"] = config_manager.get(
+                "provider_settings.llm_stream_mode", "auto"
+            )
+            processor.config["atom_enabled"] = config_manager.get(
+                "graph_memory.atom_enabled", True
+            )
+            processor.config["include_source_time_tags"] = config_manager.get(
+                "reflection_engine.include_source_time_tags", True
+            )

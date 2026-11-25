@@ -8,7 +8,7 @@ import time
 from ..core.memory_source import summary_window_fingerprint
 from ..core.models.conversation_models import Message
 
-TERMINAL_SUMMARY_STAGES = {"policy", "provider_terminal"}
+TERMINAL_SUMMARY_STAGES = {"policy", "provider_terminal", "poisoned_window"}
 SUMMARY_RETRY_LIMIT = 3
 SUMMARY_COOLDOWN_SECONDS = 900
 ROLLBACK_PAUSE = "managed_summary_source_rollback_v1"
@@ -248,22 +248,43 @@ class ConversationSummaryProgress:
                 if messages and summary_window_fingerprint(messages) == pending.get(
                     "fingerprint"
                 ):
-                    if time.time() < float(pending.get("retry_after", 0) or 0):
-                        return 0, [], None
-                    return (
-                        await self._managed_summary_position(session_id, messages[0]),
-                        messages,
-                        pending,
-                    )
-                # Rows changed or were explicitly deleted. The remaining
-                # current rows can form new windows through the usual planner.
-                metadata["last_stale_pending_summary_v1"] = {
-                    **pending,
-                    "retry_unavailable_reason": "source_snapshot_changed",
-                }
-                metadata["pending_summary"] = None
-                await self._save_managed_summary_metadata(session_id, metadata)
-                await self._commit_write_transaction()
+                    if int(pending.get("exhausted_cycles", 0) or 0) >= 2:
+                        # Circuit-break any pre-existing poisoned managed window
+                        # that already exhausted >=2 retry cycles so recovery
+                        # never re-runs LLM calls every 15 minutes indefinitely.
+                        quarantined = {
+                            **pending,
+                            "failure_stage": "poisoned_window",
+                        }
+                        quarantined.pop("retry_after", None)
+                        quarantined.pop("recovery_after", None)
+                        await self._save_managed_refusal(
+                            session_id, quarantined, messages
+                        )
+                        metadata["pending_summary"] = None
+                        await self._update_managed_summary_cursor(session_id, metadata)
+                        await self._save_managed_summary_metadata(session_id, metadata)
+                        await self._commit_write_transaction()
+                    else:
+                        if time.time() < float(pending.get("retry_after", 0) or 0):
+                            return 0, [], None
+                        return (
+                            await self._managed_summary_position(
+                                session_id, messages[0]
+                            ),
+                            messages,
+                            pending,
+                        )
+                else:
+                    # Rows changed or were explicitly deleted. The remaining
+                    # current rows can form new windows through the usual planner.
+                    metadata["last_stale_pending_summary_v1"] = {
+                        **pending,
+                        "retry_unavailable_reason": "source_snapshot_changed",
+                    }
+                    metadata["pending_summary"] = None
+                    await self._save_managed_summary_metadata(session_id, metadata)
+                    await self._commit_write_transaction()
             async with self.connection.execute(
                 """
                 SELECT COUNT(*) FROM messages m LEFT JOIN managed_summary_progress p

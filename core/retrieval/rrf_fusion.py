@@ -181,8 +181,15 @@ class RRFFusion:
             values = {r.doc_id: float(r.score) for r in results}
             low, high = min(values.values()), max(values.values())
             if high - low < 1e-9:
-                # 分数无区分度时交给并列名次决定顺序
-                return dict.fromkeys(values, 1.0)
+                # 单命中或全部分数相同时保留已校准原分（夹紧到 [0, 1]），避免弱单命中被拉满至 1.0
+                return {
+                    doc_id: (
+                        max(0.0, min(1.0, val))
+                        if 0.0 <= val <= 1.0
+                        else (val / (val + 1.0) if val > 0 else 0.5)
+                    )
+                    for doc_id, val in values.items()
+                }
             return {
                 doc_id: (value - low) / (high - low) for doc_id, value in values.items()
             }

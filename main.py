@@ -178,17 +178,19 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         if persona_aliases:
             logger.info(f"[LivingMemory] 记忆人格别名: {persona_aliases}")
 
-        # 初始化后端 i18n
-        raw_language = str(config.get("bot_language", "") or "").strip()
-        if not raw_language:
+        # 初始化后端 i18n：未显式配置 bot_language 时，调用期懒解析主控默认语言，
+        # 彻底解除与 astrbot_plugin_chat_dynamics 的插件加载顺序耦合。
+        def _resolve_bot_language() -> str:
+            explicit = str(self.config_manager.get("bot_language", "") or "").strip()
+            if explicit:
+                return explicit
             shared_lang = str(
-                get_series_defaults(context).get("ui_language", "") or ""
+                get_series_defaults(self.context).get("ui_language", "") or ""
             ).strip()
             normalized = shared_lang.replace("_", "-").split("-", 1)[0].lower()
-            raw_language = (
-                normalized if normalized in {"zh", "en", "ja", "ru"} else "zh"
-            )
-        i18n_init(raw_language)
+            return normalized if normalized in {"zh", "en", "ja", "ru"} else "zh"
+
+        i18n_init(_resolve_bot_language(), resolver=_resolve_bot_language)
 
         # 初始化插件初始化器（注入初始化完成回调，确保后台重试成功后第一时间装配运行期组件）
         try:

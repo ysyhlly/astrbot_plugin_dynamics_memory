@@ -29,7 +29,6 @@ class RecallEngineConfig(BaseModel):
 
     top_k: int = Field(default=5, ge=0, le=50)
     max_k: int = Field(default=10, ge=1, le=50)
-    importance_weight: float = Field(default=1.0, ge=0.0, le=10.0)
     min_importance_for_retrieval: float = Field(default=0.0, ge=0.0, le=1.0)
     min_similarity_for_retrieval: float = Field(default=0.45, ge=0.0, le=1.0)
     recent_memory_count: int = Field(default=0, ge=0, le=20)

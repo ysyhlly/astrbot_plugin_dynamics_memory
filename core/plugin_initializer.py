@@ -716,7 +716,6 @@ class PluginInitializer(InitializerFaissMixin):
             "protected_importance_threshold": get(
                 "importance_decay.protected_importance_threshold", 1.0
             ),
-            "importance_weight": get("recall_engine.importance_weight", 1.0),
             "min_importance_for_retrieval": get(
                 "recall_engine.min_importance_for_retrieval", 0.0
             ),

@@ -734,11 +734,25 @@ class MemoryReflectionStorageMixin:
         existing_pending = await self.conversation_manager.get_session_metadata(
             session_id, "pending_summary", None
         )
+        managed_scope = session_id.startswith("narrative:v1:")
+        window_fp = (
+            summary_window_fingerprint(window_messages)
+            if managed_scope and window_messages
+            else None
+        )
+        same_window = isinstance(existing_pending, dict) and (
+            (
+                existing_pending.get("start_index") == start_index
+                and existing_pending.get("end_index") == end_index
+            )
+            or (
+                window_fp is not None
+                and existing_pending.get("fingerprint") == window_fp
+            )
+        )
         prev_exhausted_cycles = (
             int(existing_pending.get("exhausted_cycles", 0) or 0)
-            if isinstance(existing_pending, dict)
-            and existing_pending.get("start_index") == start_index
-            and existing_pending.get("end_index") == end_index
+            if same_window
             else 0
         )
         now_ts = time.time()
@@ -755,7 +769,6 @@ class MemoryReflectionStorageMixin:
         }
         if prev_exhausted_cycles > 0:
             pending_summary["exhausted_cycles"] = prev_exhausted_cycles
-        managed_scope = session_id.startswith("narrative:v1:")
         if not retry_refused and failure_stage not in TERMINAL_SUMMARY_STAGES:
             pending_summary["retry_after"] = now_ts + retry_delay
             if managed_scope:
@@ -766,25 +779,48 @@ class MemoryReflectionStorageMixin:
             and not retry_refused
         ):
             next_exhausted_cycles = prev_exhausted_cycles + 1
-            # After repeated exhaustion cycles on a native session (first cycle
-            # cools down and retries; a second exhausted cycle proves the window
-            # is persistently poisoned), advance the cursor past the poisoned
-            # range so last_summarized_index never deadlocks conversations.db.
-            if not managed_scope and next_exhausted_cycles >= 2 and window_messages:
-                last_msg = window_messages[-1]
-                advanced = await self.conversation_manager.commit_summary_cursor(
-                    session_id,
-                    last_msg,
-                    expected_revision,
-                    window_messages=window_messages,
-                )
-                if advanced:
-                    logger.warning(
-                        f"[{session_id}] 总结窗口连续 {next_exhausted_cycles} 轮重试耗尽，"
-                        f"已跳过毒化范围 [{start_index}:{end_index}] 并推进游标以解除死锁 "
-                        f"(error_code={error_code})"
+            # After repeated exhaustion cycles (first cycle cools down and
+            # retries; a second exhausted cycle proves the window is
+            # persistently poisoned), circuit-break the poisoned window for
+            # BOTH native sessions and managed scopes so it never loops LLM
+            # calls every 15 minutes indefinitely.
+            if next_exhausted_cycles >= 2 and window_messages:
+                if not managed_scope:
+                    last_msg = window_messages[-1]
+                    advanced = await self.conversation_manager.commit_summary_cursor(
+                        session_id,
+                        last_msg,
+                        expected_revision,
+                        window_messages=window_messages,
                     )
-                    return True
+                    if advanced:
+                        logger.warning(
+                            f"[{session_id}] 总结窗口连续 {next_exhausted_cycles} 轮重试耗尽，"
+                            f"已跳过毒化范围 [{start_index}:{end_index}] 并推进游标以解除死锁 "
+                            f"(error_code={error_code})"
+                        )
+                        return True
+                else:
+                    pending_summary.pop("retry_after", None)
+                    pending_summary.pop("recovery_after", None)
+                    pending_summary["exhausted_retry_count"] = new_retry_count
+                    pending_summary["exhausted_cycles"] = next_exhausted_cycles
+                    pending_summary["retry_count"] = 0
+                    pending_summary["failure_stage"] = "poisoned_window"
+                    committed = await self.conversation_manager.write_managed_summary_progress(
+                        session_id,
+                        window_messages,
+                        pending_summary,
+                        expected_revision,
+                        retry_refused=retry_refused,
+                    )
+                    if committed:
+                        logger.warning(
+                            f"[{session_id}] 托管总结窗口连续 {next_exhausted_cycles} 轮重试耗尽，"
+                            f"已熔断隔离毒化范围 [{start_index}:{end_index}] 并停止自动恢复 "
+                            f"(error_code={error_code})"
+                        )
+                    return committed
             # Retain the failed segment and retry after cooldown on first exhaustion.
             cooldown = max(SUMMARY_COOLDOWN_SECONDS, _SUMMARY_RETRY_BACKOFF_SECONDS[-1])
             pending_summary["retry_after"] = now_ts + cooldown

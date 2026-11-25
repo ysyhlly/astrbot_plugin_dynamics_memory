@@ -204,6 +204,104 @@ class MemoryEngine(
             "message": "",
         }
 
+    def refresh_config(self, new_config: dict[str, Any]) -> None:
+        """Hot-refresh runtime config copy, retriever parameters, and search cache."""
+        if not isinstance(new_config, dict):
+            return
+        self.config.update(new_config)
+        self._search_cache_enabled = bool(
+            self.config.get("search_cache_enabled", self._search_cache_enabled)
+        )
+        self._search_cache_ttl = float(
+            self.config.get("search_cache_ttl_seconds", self._search_cache_ttl)
+        )
+        self._search_cache_max_size = int(
+            self.config.get("search_cache_max_size", self._search_cache_max_size)
+        )
+        if self.rrf_fusion is not None and "rrf_k" in new_config:
+            self.rrf_fusion.k = int(self.config.get("rrf_k", 60))
+        if self.hybrid_retriever is not None:
+            hr = self.hybrid_retriever
+            hr.config = self.config
+            hr.decay_rate = self.config.get("decay_rate", hr.decay_rate)
+            hr.fallback_enabled = self.config.get(
+                "fallback_enabled", hr.fallback_enabled
+            )
+            hr.rerank_enabled = bool(
+                self.config.get("rerank_enabled", hr.rerank_enabled)
+            )
+            hr.rerank_candidates = max(
+                2,
+                min(
+                    100,
+                    int(
+                        self.config.get("rerank_candidates", hr.rerank_candidates)
+                        or hr.rerank_candidates
+                    ),
+                ),
+            )
+            hr.fusion_mode = (
+                self.config.get("fusion_mode", hr.fusion_mode) or "score"
+            ).strip().lower()
+            hr.fusion_bm25_weight = min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        self.config.get("fusion_bm25_weight", hr.fusion_bm25_weight)
+                    ),
+                ),
+            )
+            hr.candidate_multiplier = max(
+                1,
+                min(
+                    10,
+                    int(
+                        self.config.get(
+                            "recall_candidate_multiplier",
+                            hr.candidate_multiplier,
+                        )
+                        or 1
+                    ),
+                ),
+            )
+            hr.fusion_agreement_bonus = min(
+                1.0,
+                max(
+                    0.0,
+                    float(
+                        self.config.get(
+                            "fusion_agreement_bonus", hr.fusion_agreement_bonus
+                        )
+                    ),
+                ),
+            )
+        if self.dual_route_retriever is not None:
+            dr = self.dual_route_retriever
+            dr.config = self.config
+            dr.document_route_weight = float(
+                self.config.get("document_route_weight", dr.document_route_weight)
+            )
+            dr.graph_route_weight = float(
+                self.config.get("graph_route_weight", dr.graph_route_weight)
+            )
+            dr.cross_route_bonus = float(
+                self.config.get("cross_route_bonus", dr.cross_route_bonus)
+            )
+            dr.dynamic_route_weighting = bool(
+                self.config.get(
+                    "dynamic_route_weighting", dr.dynamic_route_weighting
+                )
+            )
+            dr.graph_route_timeout_seconds = float(
+                self.config.get(
+                    "graph_route_timeout_seconds", dr.graph_route_timeout_seconds
+                )
+            )
+        if self.graph_retriever is not None and hasattr(self.graph_retriever, "config"):
+            self.graph_retriever.config = self.config
+        self._invalidate_search_cache()
+
     async def initialize(self):
         """初始化引擎：打开数据库、建表、迁移归属、装配文档路与图谱路组件。"""
         await self._open_database()

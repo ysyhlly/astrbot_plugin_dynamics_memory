@@ -17,11 +17,15 @@ from astrbot.api import logger
 class MemoryConsolidationManager:
     """按配置定期整合记忆库。"""
 
+    _MAX_GROUP_PROMPT_CHARS = 12000
+    _MAX_ITEM_SUMMARY_CHARS = 1000
+
     def __init__(self, memory_engine, memory_processor, config_manager):
         self.memory_engine = memory_engine
         self.memory_processor = memory_processor
         self.config_manager = config_manager
         # reflection 触发模式下的最小运行间隔（秒），避免每条消息都触发
+        self._run_lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
         self._last_run_at = 0.0
         self._min_run_interval = 6 * 3600.0
@@ -54,48 +58,52 @@ class MemoryConsolidationManager:
             logger.warning("[记忆整合] 组件未就绪，跳过")
             return {"skipped": True, "reason": "components not ready"}
 
-        now = time.time()
-        if not force and now - self._last_run_at < self._min_run_interval:
-            return {"skipped": True, "reason": "cooldown"}
-        self._last_run_at = now
+        if self._run_lock.locked():
+            return {"skipped": True, "reason": "already_running"}
 
-        try:
-            candidates = await self._query_candidates(cfg)
-            if not candidates:
-                return {"candidates": 0, "groups": 0, "merged": 0}
+        async with self._run_lock:
+            now = time.time()
+            if not force and now - self._last_run_at < self._min_run_interval:
+                return {"skipped": True, "reason": "cooldown"}
+            self._last_run_at = now
 
-            groups = await self._build_groups(candidates, cfg)
-            if not groups:
-                return {"candidates": len(candidates), "groups": 0, "merged": 0}
+            try:
+                candidates = await self._query_candidates(cfg)
+                if not candidates:
+                    return {"candidates": 0, "groups": 0, "merged": 0}
 
-            max_groups = int(cfg.get("max_groups_per_run", 5))
-            keep_original = cfg.get("keep_original", "archive")
-            stats = {
-                "candidates": len(candidates),
-                "groups": 0,
-                "merged": 0,
-                "archived": 0,
-                "deleted": 0,
-                "failed": 0,
-            }
-            for group in groups[:max_groups]:
-                try:
-                    result = await self._consolidate_group(group, cfg)
-                    stats["groups"] += 1
-                    stats["merged"] += result["merged"]
-                    if keep_original == "archive":
-                        stats["archived"] += result["removed"]
-                    else:
-                        stats["deleted"] += result["removed"]
-                except Exception as e:
-                    stats["failed"] += 1
-                    logger.error(f"[记忆整合] 整合组失败: {e}", exc_info=True)
+                groups = await self._build_groups(candidates, cfg)
+                if not groups:
+                    return {"candidates": len(candidates), "groups": 0, "merged": 0}
 
-            logger.info(f"[记忆整合] 完成: {stats}")
-            return stats
-        except Exception as e:
-            logger.error(f"[记忆整合] 运行失败: {e}", exc_info=True)
-            return {"error": str(e)}
+                max_groups = int(cfg.get("max_groups_per_run", 5))
+                keep_original = cfg.get("keep_original", "archive")
+                stats = {
+                    "candidates": len(candidates),
+                    "groups": 0,
+                    "merged": 0,
+                    "archived": 0,
+                    "deleted": 0,
+                    "failed": 0,
+                }
+                for group in groups[:max_groups]:
+                    try:
+                        result = await self._consolidate_group(group, cfg)
+                        stats["groups"] += 1
+                        stats["merged"] += result["merged"]
+                        if keep_original == "archive":
+                            stats["archived"] += result["removed"]
+                        else:
+                            stats["deleted"] += result["removed"]
+                    except Exception as e:
+                        stats["failed"] += 1
+                        logger.error(f"[记忆整合] 整合组失败: {e}", exc_info=True)
+
+                logger.info(f"[记忆整合] 完成: {stats}")
+                return stats
+            except Exception as e:
+                logger.error(f"[记忆整合] 运行失败: {e}", exc_info=True)
+                return {"error": str(e)}
 
     async def _query_candidates(self, cfg: dict[str, Any]) -> list[dict[str, Any]]:
         """查询符合整合条件的候选记忆（低重要度 + 足够旧 + 活跃状态）。"""
@@ -129,9 +137,47 @@ class MemoryConsolidationManager:
         else:
             groups = self._split_by_scope(candidates)
 
-        groups = [g for g in groups if len(g) >= min_per]
+        bounded_groups: list[list[dict[str, Any]]] = []
+        for grp in groups:
+            bounded_groups.extend(
+                self._chunk_group_by_chars(grp, max_chars=self._MAX_GROUP_PROMPT_CHARS)
+            )
+        groups = [g for g in bounded_groups if len(g) >= min_per]
         groups.sort(key=len, reverse=True)
         return groups
+
+    @classmethod
+    def _estimate_memory_prompt_chars(cls, mem: dict[str, Any]) -> int:
+        metadata = mem.get("metadata") or {}
+        summary = str(
+            metadata.get("persona_summary") or str(mem.get("content", "")).strip()
+        ).strip()
+        facts_len = sum(len(str(f)) for f in (metadata.get("key_facts") or []))
+        topics_len = sum(len(str(t)) for t in (metadata.get("topics") or []))
+        return min(len(summary), cls._MAX_ITEM_SUMMARY_CHARS) + facts_len + topics_len + 80
+
+    @classmethod
+    def _chunk_group_by_chars(
+        cls, group: list[dict[str, Any]], *, max_chars: int
+    ) -> list[list[dict[str, Any]]]:
+        """Split an oversized group so each merge prompt stays within character budget."""
+        if not group:
+            return []
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        used = 0
+        for mem in group:
+            cost = cls._estimate_memory_prompt_chars(mem)
+            if current and used + cost > max_chars:
+                chunks.append(current)
+                current = [mem]
+                used = cost
+            else:
+                current.append(mem)
+                used += cost
+        if current:
+            chunks.append(current)
+        return chunks
 
     @staticmethod
     def _split_by_scope(
@@ -244,14 +290,31 @@ class MemoryConsolidationManager:
             if value is not None:
                 metadata[key] = value
 
-        async with self.write_lock:
-            new_id = await self.memory_engine.add_memory(
-                content=rich_content,
+        classify_fn = getattr(
+            self.memory_processor, "classify_atoms_from_metadata", None
+        )
+        atoms = (
+            classify_fn(
+                metadata,
+                parent_importance=merged["importance"],
                 session_id=session_id,
                 persona_id=persona_id,
-                importance=merged["importance"],
-                metadata=metadata,
             )
+            if callable(classify_fn)
+            else None
+        )
+
+        async with self.write_lock:
+            add_kwargs: dict[str, Any] = {
+                "content": rich_content,
+                "session_id": session_id,
+                "persona_id": persona_id,
+                "importance": merged["importance"],
+                "metadata": metadata,
+            }
+            if atoms:
+                add_kwargs["atoms"] = atoms
+            new_id = await self.memory_engine.add_memory(**add_kwargs)
 
             old_ids = [mem["id"] for mem in group]
             try:
@@ -275,29 +338,6 @@ class MemoryConsolidationManager:
                 f"{cfg.get('keep_original', 'archive')} {removed} 条旧记忆"
             )
             return {"new_id": new_id, "merged": len(group), "removed": removed}
-
-    def _group_by_session(
-        self, candidates: list[dict[str, Any]]
-    ) -> list[list[dict[str, Any]]]:
-        grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-        for mem in candidates:
-            metadata = mem.get("metadata") or {}
-            session_id = metadata.get("session_id")
-            if not session_id:
-                continue
-            interaction_type = str(metadata.get("interaction_type") or "unknown")
-            visibility = str(
-                metadata.get("memory_visibility")
-                or ("group" if interaction_type == "group_chat" else "private")
-            )
-            key = (
-                str(session_id),
-                str(metadata.get("persona_id") or ""),
-                interaction_type,
-                visibility,
-            )
-            grouped.setdefault(key, []).append(mem)
-        return list(grouped.values())
 
     @staticmethod
     def _consolidation_scope_key(metadata: dict[str, Any]) -> tuple[str, str, str, str]:

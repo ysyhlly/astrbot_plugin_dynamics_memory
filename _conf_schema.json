@@ -137,6 +137,17 @@
           "step": 1
         }
       },
+      "hard_max_messages_per_session": {
+        "description": "单会话硬性消息上限",
+        "hint": "当会话长期无法完成总结时允许保留的绝对最大消息条数；留空则不设硬上限，设为 100–50000 可防止极长会话无限膨胀。",
+        "type": "int",
+        "default": null,
+        "slider": {
+          "min": 100,
+          "max": 50000,
+          "step": 100
+        }
+      },
       "cleanup_batch_size": {
         "description": "历史消息批量清理数量",
         "hint": "会话历史超过上限后，每次至少尝试删除的旧已总结消息数量。值过小会导致超限后每轮只删少量消息。（允许范围：1–1000）",
@@ -176,17 +187,6 @@
           "min": 1,
           "max": 50,
           "step": 1
-        }
-      },
-      "importance_weight": {
-        "description": "重要性权重",
-        "hint": "混合评分中记忆重要性的占比系数。值越大，重要性高的记忆越优先被召回。（允许范围：0–10）",
-        "type": "float",
-        "default": 1.0,
-        "slider": {
-          "min": 0.0,
-          "max": 10.0,
-          "step": 0.1
         }
       },
       "min_importance_for_retrieval": {
@@ -810,6 +810,17 @@
         "type": "bool",
         "default": true
       },
+      "graph_route_timeout_seconds": {
+        "description": "图谱召回超时（秒）",
+        "hint": "双路召回时图谱支路单次允许的最大等待时间，超时将自动降级为仅文档路结果。（允许范围：0.1–30）",
+        "type": "float",
+        "default": 1.5,
+        "slider": {
+          "min": 0.1,
+          "max": 30.0,
+          "step": 0.1
+        }
+      },
       "max_topics_per_memory": {
         "description": "单记忆最大主题数",
         "hint": "从一条记忆中最多提取多少个 topics 节点。（允许范围：1–20）",
@@ -1064,6 +1075,17 @@
           "max": 1.0,
           "step": 0.01
         }
+      },
+      "archived_retention_days": {
+        "description": "已归档记忆保留天数",
+        "hint": "已归档记忆在彻底删除前的保留天数，设为 0 表示永久保留不自动清理。（允许范围：0–3650）",
+        "type": "int",
+        "default": 90,
+        "slider": {
+          "min": 0,
+          "max": 3650,
+          "step": 1
+        }
       }
     }
   },
@@ -1143,7 +1165,7 @@
       },
       "granularity": {
         "description": "聚合粒度",
-        "hint": "session=按同一会话聚合；semantic=跨会话按语义相似度聚类聚合。",
+        "hint": "session=按同一会话作用域直接聚合；semantic=同一会话作用域内按语义相似度聚类聚合（不跨会话串库）。",
         "type": "string",
         "options": [
           "session",

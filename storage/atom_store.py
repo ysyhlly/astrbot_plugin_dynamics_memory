@@ -579,11 +579,17 @@ class AtomStore:
         now = time.time()
         for row in rows:
             atom = self._row_to_atom(row)
-            normalized = (
-                1.0
-                if score_range == 0
-                else (max_score - float(row["bm25_score"])) / score_range
-            )
+            raw_bm25 = float(row["bm25_score"])
+            if score_range == 0:
+                # Avoid saturating a single/tied Atom hit to 1.0 (which would
+                # overpower the 0.65 primary document route). FTS5 bm25() is
+                # negative (more negative = stronger); LIKE fallback uses 0.5.
+                if raw_bm25 < 0:
+                    normalized = min(0.85, abs(raw_bm25) / (abs(raw_bm25) + 2.0))
+                else:
+                    normalized = min(0.5, max(0.0, raw_bm25)) if raw_bm25 > 0 else 0.5
+            else:
+                normalized = (max_score - raw_bm25) / score_range
             atom.metadata["bm25_score"] = normalized
             atom.metadata["temporal_score"] = atom.compute_temporal_score(now)
             atoms.append(atom)

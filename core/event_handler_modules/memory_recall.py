@@ -1017,8 +1017,10 @@ class MemoryRecall:
         )
 
     @staticmethod
-    def _set_recall_outcome(req, outcome: str) -> None:
-        if outcome not in {
+    def _is_valid_recall_outcome(outcome: Any) -> bool:
+        if not isinstance(outcome, str) or not outcome:
+            return False
+        if outcome in {
             "ready",
             "partial",
             "empty",
@@ -1028,7 +1030,18 @@ class MemoryRecall:
             "error",
             "original_input_unavailable",
             "disabled",
+            "policy_denied",
         }:
+            return True
+        return (
+            outcome.startswith("skipped_")
+            and len(outcome) <= 64
+            and all(ch.isalnum() or ch == "_" for ch in outcome)
+        )
+
+    @classmethod
+    def _set_recall_outcome(cls, req, outcome: str) -> None:
+        if not cls._is_valid_recall_outcome(outcome):
             outcome = "error"
         try:
             setattr(req, "_lm_private_hook_outcome_v1", outcome)

@@ -1075,6 +1075,9 @@ class MemoryProcessor:
         metadata["atom_types"] = sorted({atom.atom_type.value for atom in atoms})
         return atoms
 
+    _MAX_MERGE_PROMPT_CHARS = 12000
+    _MAX_MERGE_ITEM_SUMMARY_CHARS = 1000
+
     async def merge_memories(self, memories: list[dict]) -> dict[str, Any]:
         """把一组零散记忆合并为一条精炼记忆（供记忆库整合使用）。
 
@@ -1088,19 +1091,27 @@ class MemoryProcessor:
             RuntimeError: LLM 不可用或解析失败时抛出。
         """
         items: list[dict[str, Any]] = []
+        used_chars = 0
         for i, mem in enumerate(memories, 1):
             metadata = mem.get("metadata") or {}
             summary = str(
                 metadata.get("persona_summary") or str(mem.get("content", "")).strip()
             ).strip()
-            items.append(
-                {
-                    "id": i,
-                    "summary": summary,
-                    "key_facts": metadata.get("key_facts") or [],
-                    "topics": metadata.get("topics") or [],
-                }
-            )
+            if len(summary) > self._MAX_MERGE_ITEM_SUMMARY_CHARS:
+                summary = summary[: self._MAX_MERGE_ITEM_SUMMARY_CHARS] + "…"
+            item = {
+                "id": i,
+                "summary": summary,
+                "key_facts": [
+                    str(f)[:300] for f in (metadata.get("key_facts") or [])[:8]
+                ],
+                "topics": [str(t)[:100] for t in (metadata.get("topics") or [])[:8]],
+            }
+            item_chars = len(json.dumps(item, ensure_ascii=False))
+            if items and used_chars + item_chars > self._MAX_MERGE_PROMPT_CHARS:
+                break
+            items.append(item)
+            used_chars += item_chars
 
         system_prompt = (
             "你是记忆整理助手。把多条关于同一主题或会话的零散记忆合并为一条精炼、"
