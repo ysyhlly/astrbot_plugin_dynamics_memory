@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
 from ...storage.sqlite_connection import open_connection
+from ...storage.sqlite_write import path_write_lock, settle
 from ..memory_scope import (
     adapter_sql,
 )
@@ -308,30 +310,47 @@ class MemoryEngineStatsMixin:
     async def _maintain_companion_sqlite(
         companion_path: Path, *, vacuum: bool = False
     ) -> dict[str, Any]:
-        """对伴生 SQLite 库执行只收缩不删数据的安全维护（WAL 截断 + 增量回收）。"""
+        """对伴生 SQLite 库执行持路径写锁的安全维护（WAL 截断 + auto_vacuum 检测 + 增量回收）。"""
         wal_path = Path(f"{companion_path}-wal")
         before_db = companion_path.stat().st_size if companion_path.is_file() else 0
         before_wal = wal_path.stat().st_size if wal_path.is_file() else 0
-        connection = await open_connection(str(companion_path), isolation_level=None)
-        try:
-            for pragma in (
-                "PRAGMA wal_checkpoint(TRUNCATE)",
-                "PRAGMA incremental_vacuum",
-            ):
-                cursor = await connection.execute(pragma)
-                await cursor.fetchall()
-                await cursor.close()
-            if vacuum:
-                av_cur = await connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
-                await av_cur.fetchall()
+        auto_vacuum_mode = 0
+        async with path_write_lock(companion_path):
+            connection = await open_connection(
+                str(companion_path), isolation_level=None
+            )
+            try:
+                av_cur = await connection.execute("PRAGMA auto_vacuum")
+                av_row = await av_cur.fetchone()
                 await av_cur.close()
-                await connection.execute("VACUUM")
-        finally:
-            await connection.close()
+                auto_vacuum_mode = int(av_row[0]) if av_row else 0
+                for pragma in (
+                    "PRAGMA wal_checkpoint(TRUNCATE)",
+                    "PRAGMA incremental_vacuum",
+                ):
+                    cursor = await connection.execute(pragma)
+                    await cursor.fetchall()
+                    await cursor.close()
+                if vacuum:
+                    if auto_vacuum_mode != 2:
+                        av_set = await connection.execute(
+                            "PRAGMA auto_vacuum = INCREMENTAL"
+                        )
+                        await av_set.fetchall()
+                        await av_set.close()
+                    await connection.execute("VACUUM")
+                    av_after = await connection.execute("PRAGMA auto_vacuum")
+                    av_after_row = await av_after.fetchone()
+                    await av_after.close()
+                    auto_vacuum_mode = int(av_after_row[0]) if av_after_row else 0
+            finally:
+                await settle(connection.close())
         after_db = companion_path.stat().st_size if companion_path.is_file() else 0
         after_wal = wal_path.stat().st_size if wal_path.is_file() else 0
         return {
             "success": True,
+            "auto_vacuum_mode": auto_vacuum_mode,
+            "needs_vacuum_for_incremental": auto_vacuum_mode != 2,
             "db_size_before": before_db,
             "db_size_after": after_db,
             "wal_size_before": before_wal,
@@ -340,6 +359,106 @@ class MemoryEngineStatsMixin:
                 0, before_db + before_wal - after_db - after_wal
             ),
         }
+
+    async def prune_memory_sources(
+        self,
+        *,
+        archived_retention_days: float = 90.0,
+        active_retention_days: float = 180.0,
+        max_total_bytes: int = 100 * 1024 * 1024,
+    ) -> dict[str, int]:
+        """Prune orphaned, expired, or oversized rows in ``memory_sources``."""
+        stats = {
+            "orphans_removed": 0,
+            "expired_removed": 0,
+            "capped_removed": 0,
+        }
+        if self.db_connection is None:
+            return stats
+        now = time.time()
+        archived_cutoff = now - max(1.0, float(archived_retention_days)) * 86400.0
+        active_cutoff = now - max(1.0, float(active_retention_days)) * 86400.0
+        try:
+            async with self._write_transaction() as connection:
+                # 1. Remove orphaned source rows whose parent document is gone.
+                cur = await connection.execute(
+                    "DELETE FROM memory_sources "
+                    "WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.id = memory_sources.memory_id)"
+                )
+                stats["orphans_removed"] = max(0, int(cur.rowcount or 0))
+
+                # 2. Remove source rows belonging to old archived/deleted memories or
+                #    expired active memories (keeping document text intact).
+                expired_cur = await connection.execute(
+                    """
+                    SELECT s.memory_id
+                    FROM memory_sources s
+                    JOIN documents d ON d.id = s.memory_id
+                    WHERE (
+                        json_valid(d.metadata)
+                        AND COALESCE(json_extract(d.metadata, '$.status'), 'active') != 'active'
+                        AND s.updated_at < ?
+                    ) OR (
+                        s.updated_at < ?
+                    )
+                    """,
+                    (archived_cutoff, active_cutoff),
+                )
+                expired_ids = [int(row[0]) for row in await expired_cur.fetchall()]
+                if expired_ids:
+                    for offset in range(0, len(expired_ids), 500):
+                        batch = expired_ids[offset : offset + 500]
+                        placeholders = ",".join("?" for _ in batch)
+                        del_cur = await connection.execute(
+                            f"DELETE FROM memory_sources WHERE memory_id IN ({placeholders})",
+                            batch,
+                        )
+                        stats["expired_removed"] += max(0, int(del_cur.rowcount or 0))
+                        await connection.execute(
+                            f"UPDATE documents SET metadata = json_set(metadata, '$.has_source', json('false')) "
+                            f"WHERE id IN ({placeholders}) AND json_valid(metadata)",
+                            batch,
+                        )
+
+                # 3. Enforce total byte budget by evicting oldest source payloads first.
+                if max_total_bytes > 0:
+                    total_cur = await connection.execute(
+                        "SELECT COALESCE(SUM(LENGTH(CAST(source_json AS BLOB))), 0) FROM memory_sources"
+                    )
+                    total_row = await total_cur.fetchone()
+                    total_bytes = int(total_row[0]) if total_row and total_row[0] else 0
+                    if total_bytes > max_total_bytes:
+                        oldest_cur = await connection.execute(
+                            "SELECT memory_id, LENGTH(CAST(source_json AS BLOB)) "
+                            "FROM memory_sources ORDER BY updated_at ASC, memory_id ASC"
+                        )
+                        evict_ids: list[int] = []
+                        for row in await oldest_cur.fetchall():
+                            if total_bytes <= max_total_bytes:
+                                break
+                            evict_ids.append(int(row[0]))
+                            total_bytes -= int(row[1] or 0)
+                        if evict_ids:
+                            for offset in range(0, len(evict_ids), 500):
+                                batch = evict_ids[offset : offset + 500]
+                                placeholders = ",".join("?" for _ in batch)
+                                del_cur = await connection.execute(
+                                    f"DELETE FROM memory_sources WHERE memory_id IN ({placeholders})",
+                                    batch,
+                                )
+                                stats["capped_removed"] += max(
+                                    0, int(del_cur.rowcount or 0)
+                                )
+                                await connection.execute(
+                                    f"UPDATE documents SET metadata = json_set(metadata, '$.has_source', json('false')) "
+                                    f"WHERE id IN ({placeholders}) AND json_valid(metadata)",
+                                    batch,
+                                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("[StorageMaintenance] memory_sources 清理跳过", exc_info=True)
+        return stats
 
     async def maintain_storage(self, *, vacuum: bool = False) -> dict[str, Any]:
         """Run SQLite storage maintenance and return size diagnostics."""
@@ -354,6 +473,22 @@ class MemoryEngineStatsMixin:
                     "success": False,
                     "error": "database connection is not initialized",
                 }
+
+            # Drop legacy v5 FTS backup table left behind after v6 migration.
+            try:
+                async with self._write_transaction() as connection:
+                    await connection.execute(
+                        "DROP TABLE IF EXISTS livingmemory_legacy_documents_fts_backup"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "[StorageMaintenance] 跳过 legacy FTS 备份表清理",
+                    exc_info=True,
+                )
+
+            source_prune_stats = await self.prune_memory_sources()
 
             for fts_table in (
                 "livingmemory_memories_fts",
@@ -373,23 +508,78 @@ class MemoryEngineStatsMixin:
                         exc_info=True,
                     )
 
-            for pragma in (
-                "PRAGMA wal_checkpoint(TRUNCATE)",
-                "PRAGMA incremental_vacuum",
-            ):
-                pragma_cursor = await self.db_connection.execute(pragma)
-                await pragma_cursor.fetchall()
-                await pragma_cursor.close()
-
-            if vacuum:
-                if self.db_connection.in_transaction:
-                    await self.db_connection.commit()
-                av_cur = await self.db_connection.execute(
-                    "PRAGMA auto_vacuum = INCREMENTAL"
-                )
-                await av_cur.fetchall()
-                await av_cur.close()
-                await self.db_connection.execute("VACUUM")
+            separate_file = (
+                isinstance(self.db_path, (str, Path))
+                and str(self.db_path) not in ("", ":memory:")
+            )
+            primary_auto_vacuum = 0
+            if separate_file:
+                # Hold the per-path write lock and use a dedicated autocommit
+                # connection so VACUUM/checkpoint never runs on the shared
+                # concurrent-read self.db_connection or races with writers.
+                async with path_write_lock(self.db_path):
+                    maint_conn = await open_connection(
+                        str(self.db_path), isolation_level=None
+                    )
+                    try:
+                        av_cur = await maint_conn.execute("PRAGMA auto_vacuum")
+                        av_row = await av_cur.fetchone()
+                        await av_cur.close()
+                        primary_auto_vacuum = int(av_row[0]) if av_row else 0
+                        for pragma in (
+                            "PRAGMA wal_checkpoint(TRUNCATE)",
+                            "PRAGMA incremental_vacuum",
+                        ):
+                            pragma_cursor = await maint_conn.execute(pragma)
+                            await pragma_cursor.fetchall()
+                            await pragma_cursor.close()
+                        if vacuum:
+                            if primary_auto_vacuum != 2:
+                                av_set = await maint_conn.execute(
+                                    "PRAGMA auto_vacuum = INCREMENTAL"
+                                )
+                                await av_set.fetchall()
+                                await av_set.close()
+                            await maint_conn.execute("VACUUM")
+                            av_after = await maint_conn.execute("PRAGMA auto_vacuum")
+                            av_after_row = await av_after.fetchone()
+                            await av_after.close()
+                            primary_auto_vacuum = (
+                                int(av_after_row[0]) if av_after_row else 0
+                            )
+                    finally:
+                        await settle(maint_conn.close())
+            else:
+                lock = getattr(self, "_sqlite_mutation_lock", None)
+                if lock is None:
+                    lock = self._sqlite_mutation_lock = asyncio.Lock()
+                async with lock:
+                    av_cur = await self.db_connection.execute("PRAGMA auto_vacuum")
+                    av_row = await av_cur.fetchone()
+                    await av_cur.close()
+                    primary_auto_vacuum = int(av_row[0]) if av_row else 0
+                    for pragma in (
+                        "PRAGMA wal_checkpoint(TRUNCATE)",
+                        "PRAGMA incremental_vacuum",
+                    ):
+                        pragma_cursor = await self.db_connection.execute(pragma)
+                        await pragma_cursor.fetchall()
+                        await pragma_cursor.close()
+                    if vacuum:
+                        if self.db_connection.in_transaction:
+                            await self.db_connection.commit()
+                        av_set = await self.db_connection.execute(
+                            "PRAGMA auto_vacuum = INCREMENTAL"
+                        )
+                        await av_set.fetchall()
+                        await av_set.close()
+                        await self.db_connection.execute("VACUUM")
+                        av_after = await self.db_connection.execute("PRAGMA auto_vacuum")
+                        av_after_row = await av_after.fetchone()
+                        await av_after.close()
+                        primary_auto_vacuum = (
+                            int(av_after_row[0]) if av_after_row else 0
+                        )
 
             cleanup_ops = getattr(self, "cleanup_write_ops", None)
             if callable(cleanup_ops):
@@ -424,6 +614,9 @@ class MemoryEngineStatsMixin:
             return {
                 "success": True,
                 "vacuum": vacuum,
+                "auto_vacuum_mode": primary_auto_vacuum,
+                "needs_vacuum_for_incremental": primary_auto_vacuum != 2,
+                "memory_sources_pruned": source_prune_stats,
                 "db_size_before": before_size,
                 "db_size_after": after_size,
                 "wal_size_before": before_wal_size,

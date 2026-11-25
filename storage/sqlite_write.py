@@ -14,15 +14,31 @@ _PATH_WRITE_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
 )
 
 
+def get_path_write_lock(path: str | Path) -> asyncio.Lock:
+    """Return the per-(event-loop, resolved-path) asyncio.Lock for SQLite writes."""
+    loop_id = id(asyncio.get_running_loop())
+    key = (loop_id, str(Path(path).resolve()))
+    lock = _PATH_WRITE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PATH_WRITE_LOCKS[key] = lock
+    return lock
+
+
+@asynccontextmanager
+async def path_write_lock(path: str | Path | None):
+    """Serialize exclusive SQLite operations (VACUUM/checkpoint/replace) per DB file."""
+    if isinstance(path, (str, Path)) and str(path) not in ("", ":memory:"):
+        lock = get_path_write_lock(path)
+        async with lock:
+            yield
+        return
+    yield
+
+
 def _get_write_lock(owner, path, separate: bool) -> asyncio.Lock:
     if separate:
-        loop_id = id(asyncio.get_running_loop())
-        key = (loop_id, str(Path(path).resolve()))
-        lock = _PATH_WRITE_LOCKS.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _PATH_WRITE_LOCKS[key] = lock
-        return lock
+        return get_path_write_lock(path)
     lock = getattr(owner, "_sqlite_mutation_lock", None)
     if lock is None:
         lock = owner._sqlite_mutation_lock = asyncio.Lock()
@@ -46,7 +62,7 @@ async def settle(awaitable):
 
 
 @asynccontextmanager
-async def write_transaction(owner):
+async def write_transaction(owner, *, foreign_keys: bool = False):
     path = getattr(owner, "db_path", None)
     separate = isinstance(path, (str, Path)) and str(path) not in ("", ":memory:")
     lock = _get_write_lock(owner, path, separate)
@@ -59,6 +75,8 @@ async def write_transaction(owner):
         db.row_factory = aiosqlite.Row
         try:
             await db.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            if foreign_keys:
+                await db.execute("PRAGMA foreign_keys = ON")
             for attempt in range(4):
                 try:
                     if separate or not getattr(db, "in_transaction", False):

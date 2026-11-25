@@ -15,6 +15,7 @@ from astrbot.api import logger
 
 from ...storage.conversation_store import ConversationStore
 from ...storage.evidence_sidecar import EvidenceSidecar
+from ...storage.sqlite_write import path_write_lock
 from ..managers.backup_manager import BackupManager
 
 if TYPE_CHECKING:
@@ -318,15 +319,16 @@ class DecayScheduler:
             logger.warning(f"[衰减调度] evidence_sidecar 维护失败: {exc}")
             report["evidence_sidecar.sqlite3"] = {"success": False, "error": str(exc)}
 
-        # 2. conversations.db 清理过期/超量 narrative_events
+        # 2. conversations.db 清理过期/超量 narrative_events（持路径写锁防并发写冲突）
         conv_path = self.data_dir / "conversations.db"
         if conv_path.is_file():
             try:
-                narrative_pruned = await asyncio.to_thread(
-                    ConversationStore.prune_narrative_events_file_sync,
-                    conv_path,
-                    retention_days=self.evidence_retention_days,
-                )
+                async with path_write_lock(conv_path):
+                    narrative_pruned = await asyncio.to_thread(
+                        ConversationStore.prune_narrative_events_file_sync,
+                        conv_path,
+                        retention_days=self.evidence_retention_days,
+                    )
                 report["conversations.db"] = {
                     "success": True,
                     "narrative_events_pruned": narrative_pruned,
@@ -334,7 +336,7 @@ class DecayScheduler:
             except Exception as exc:
                 logger.warning(f"[衰减调度] conversations.db narrative_events 维护失败: {exc}")
 
-        # 3. 对 conversations.db / livingmemory_graph_documents.db / evidence_sidecar.sqlite3 兜底 WAL 截断
+        # 3. 对 conversations.db / livingmemory_graph_documents.db / evidence_sidecar.sqlite3 持锁 WAL 截断
         for db_name in (
             "conversations.db",
             "livingmemory_graph_documents.db",
@@ -346,7 +348,10 @@ class DecayScheduler:
             if not db_file.is_file():
                 continue
             try:
-                ok = await asyncio.to_thread(self._checkpoint_sqlite_file_sync, db_file)
+                async with path_write_lock(db_file):
+                    ok = await asyncio.to_thread(
+                        self._checkpoint_sqlite_file_sync, db_file
+                    )
                 prev = report.get(db_name, {})
                 report[db_name] = {**prev, "success": ok}
             except Exception as exc:

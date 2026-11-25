@@ -2,6 +2,7 @@
 备份管理处理模块
 """
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from ..managers.backup_manager import BackupManager
@@ -34,5 +35,5 @@ class BackupHandler:
         if not self.data_dir:
             return self.utils.ok({"backups": [], "total": 0})
 
-        backups = BackupManager.list_backups(self.data_dir)
+        backups = await asyncio.to_thread(BackupManager.list_backups, self.data_dir)
         return self.utils.ok({"backups": backups, "total": len(backups)})

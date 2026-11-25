@@ -23,6 +23,7 @@ from ..core.models.memory_atom import (
 )
 from ..core.utils.json_utils import safe_json_dict
 from .sqlite_connection import open_connection
+from .sqlite_write import write_transaction
 
 if TYPE_CHECKING:
     from ..core.processors.text_processor import TextProcessor
@@ -123,13 +124,8 @@ class AtomStore:
         return json.dumps(payload if payload is not None else {}, ensure_ascii=False)
 
     async def initialize(self) -> None:
-        """Create tables for memory atoms.
-
-        B10：建表块设置 ``PRAGMA foreign_keys = ON``（会话级状态），因此用
-        ``discard=True`` 借出——块结束后该连接被关闭，行为与旧的每操作新连接相同。
-        """
-        async with self._connect(discard=True) as db:
-            await db.execute("PRAGMA foreign_keys = ON")
+        """Create tables for memory atoms using serialized BEGIN IMMEDIATE write tx."""
+        async with write_transaction(self, foreign_keys=True) as db:
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_atoms (
@@ -199,7 +195,6 @@ class AtomStore:
             # FTS 表是后加能力：旧库存量原子没有对应 FTS 行，且历史格式是
             # 源文本原样写入。这里按当前分词格式与「非 forgotten」原子对账。
             await self._sync_fts_index(db)
-            await db.commit()
 
     async def _sync_fts_index(self, db: aiosqlite.Connection) -> None:
         """Rebuild or repair the atom FTS index without resurrecting forgotten atoms.
@@ -263,10 +258,8 @@ class AtomStore:
         """Insert a new atom and return its id. Updates atom.atom_id in place."""
         self._prepare_atom_for_insert(atom)
 
-        async with self._connect() as db:
-            atom_id = await self._insert_atom(db, atom)
-            await db.commit()
-        return atom_id
+        async with write_transaction(self) as db:
+            return await self._insert_atom(db, atom)
 
     async def insert_many(self, atoms: list[MemoryAtom]) -> list[int]:
         """Insert atoms in chunked transactions and return their ids."""
@@ -274,23 +267,21 @@ class AtomStore:
             return []
 
         atom_ids: list[int] = []
-        async with self._connect() as db:
-            for index in range(0, len(atoms), self._SQLITE_BATCH_SIZE):
-                batch = atoms[index : index + self._SQLITE_BATCH_SIZE]
-                batch_atom_ids: list[int] = []
-                prepared_batch: list[MemoryAtom] = []
-                try:
+        for index in range(0, len(atoms), self._SQLITE_BATCH_SIZE):
+            batch = atoms[index : index + self._SQLITE_BATCH_SIZE]
+            batch_atom_ids: list[int] = []
+            prepared_batch: list[MemoryAtom] = []
+            try:
+                async with write_transaction(self) as db:
                     for atom in batch:
                         self._prepare_atom_for_insert(atom)
                         prepared_batch.append(atom)
                         batch_atom_ids.append(await self._insert_atom(db, atom))
-                    await db.commit()
-                except Exception:
-                    await db.rollback()
-                    for atom in prepared_batch:
-                        atom.atom_id = 0
-                    raise
-                atom_ids.extend(batch_atom_ids)
+            except Exception:
+                for atom in prepared_batch:
+                    atom.atom_id = 0
+                raise
+            atom_ids.extend(batch_atom_ids)
         return atom_ids
 
     def _prepare_atom_for_insert(self, atom: MemoryAtom) -> None:
@@ -609,22 +600,18 @@ class AtomStore:
     async def touch(self, atom_id: int) -> None:
         """Update last_accessed_at for an atom."""
         now = time.time()
-        async with self._connect() as db:
+        async with write_transaction(self) as db:
             await db.execute(
                 "UPDATE memory_atoms SET last_accessed_at = ? WHERE id = ?",
                 (now, atom_id),
             )
-            await db.commit()
 
     async def reinforce(
         self, atom_id: int, new_confidence: float | None = None
     ) -> None:
         """Record a reinforcement event, extending TTL and optionally boosting confidence."""
         now = time.time()
-        async with self._connect() as db:
-            db.row_factory = aiosqlite.Row
-            # 抢占写锁，避免并发 reinforce 对同一 atom 产生读-改-写丢失更新。
-            await db.execute("BEGIN IMMEDIATE")
+        async with write_transaction(self) as db:
             cursor = await db.execute(
                 "SELECT reinforcement_count, importance, confidence, atom_type, event_time FROM memory_atoms WHERE id = ?",
                 (atom_id,),
@@ -666,17 +653,15 @@ class AtomStore:
                     atom_id,
                 ),
             )
-            await db.commit()
 
     async def expire_stale_atoms(self) -> int:
         """Mark atoms whose expires_at has passed as EXPIRED. Returns count."""
         now = time.time()
-        async with self._connect() as db:
+        async with write_transaction(self) as db:
             cursor = await db.execute(
                 "UPDATE memory_atoms SET status = ? WHERE status = 'active' AND expires_at < ?",
                 (AtomStatus.EXPIRED.value, now),
             )
-            await db.commit()
             return cursor.rowcount
 
     async def _delete_atom_ids_chunked(
@@ -707,61 +692,43 @@ class AtomStore:
     async def cleanup_forgotten(self, older_than_days: float = 7.0) -> int:
         """Remove FORGOTTEN atoms older than the threshold from FTS. Returns count."""
         cutoff = time.time() - older_than_days * 86400.0
-        async with self._connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT id FROM memory_atoms WHERE status = 'forgotten' AND expires_at < ?",
-                    (cutoff,),
-                )
-                rows = await cursor.fetchall()
-                atom_ids = [int(row[0]) for row in rows]
-                if atom_ids:
-                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
-                await db.commit()
-                return len(atom_ids)
-            except BaseException:
-                await db.rollback()
-                raise
+        async with write_transaction(self) as db:
+            cursor = await db.execute(
+                "SELECT id FROM memory_atoms WHERE status = 'forgotten' AND expires_at < ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            atom_ids = [int(row[0]) for row in rows]
+            if atom_ids:
+                await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
+            return len(atom_ids)
 
     async def forget_expired_atoms(self, older_than_days: float = 7.0) -> int:
         """Soft-delete old expired atoms and remove them from the FTS index."""
         cutoff = time.time() - older_than_days * 86400.0
-        async with self._connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT id FROM memory_atoms WHERE status = 'expired' AND expires_at < ?",
-                    (cutoff,),
-                )
-                rows = await cursor.fetchall()
-                atom_ids = [int(row[0]) for row in rows]
-                if atom_ids:
-                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=False)
-                await db.commit()
-                return len(atom_ids)
-            except BaseException:
-                await db.rollback()
-                raise
+        async with write_transaction(self) as db:
+            cursor = await db.execute(
+                "SELECT id FROM memory_atoms WHERE status = 'expired' AND expires_at < ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            atom_ids = [int(row[0]) for row in rows]
+            if atom_ids:
+                await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=False)
+            return len(atom_ids)
 
     async def delete_by_parent(self, parent_memory_id: int) -> int:
         """Delete all atoms belonging to a parent memory. Returns count."""
-        async with self._connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT id FROM memory_atoms WHERE parent_memory_id = ?",
-                    (parent_memory_id,),
-                )
-                rows = await cursor.fetchall()
-                atom_ids = [int(row[0]) for row in rows]
-                if atom_ids:
-                    await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
-                await db.commit()
-                return len(atom_ids)
-            except BaseException:
-                await db.rollback()
-                raise
+        async with write_transaction(self) as db:
+            cursor = await db.execute(
+                "SELECT id FROM memory_atoms WHERE parent_memory_id = ?",
+                (parent_memory_id,),
+            )
+            rows = await cursor.fetchall()
+            atom_ids = [int(row[0]) for row in rows]
+            if atom_ids:
+                await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
+            return len(atom_ids)
 
     async def batch_delete_by_parent(self, parent_memory_ids: list[int]) -> int:
         """Delete atoms for multiple parent memories in bulk."""
@@ -770,7 +737,7 @@ class AtomStore:
             return 0
 
         deleted_count = 0
-        async with self._connect() as db:
+        async with write_transaction(self) as db:
             for index in range(0, len(normalized_ids), self._SQLITE_BATCH_SIZE):
                 batch = normalized_ids[index : index + self._SQLITE_BATCH_SIZE]
                 parent_placeholders = ",".join("?" * len(batch))
@@ -798,8 +765,6 @@ class AtomStore:
                 )
                 deleted_count += cursor.rowcount
 
-            if deleted_count:
-                await db.commit()
         return deleted_count
 
     async def get_stats(self) -> dict[str, int]:

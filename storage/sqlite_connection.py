@@ -29,6 +29,7 @@ _PLUGIN_DB_FILES = (
     "livingmemory.db",
     "livingmemory_graph_documents.db",
     "conversations.db",
+    "evidence_sidecar.sqlite3",
 )
 _PROBE_DB_NAME = ".wal_probe.db"
 

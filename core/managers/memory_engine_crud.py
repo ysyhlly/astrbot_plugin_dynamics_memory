@@ -180,6 +180,14 @@ class MemoryEngineCrudMixin:
         if source_messages:
             full_metadata["has_source"] = True
             full_metadata["source_message_count"] = len(source_messages)
+        provenance = full_metadata.get("narrative_provenance")
+        if (
+            isinstance(provenance, list)
+            and len(provenance) > self._MAX_NARRATIVE_PROVENANCE_ENTRIES
+        ):
+            full_metadata["narrative_provenance"] = provenance[
+                -self._MAX_NARRATIVE_PROVENANCE_ENTRIES :
+            ]
         if atoms:
             full_metadata["atom_types"] = sorted(
                 {
@@ -479,6 +487,14 @@ class MemoryEngineCrudMixin:
         if source_messages:
             full_metadata["has_source"] = True
             full_metadata["source_message_count"] = len(source_messages)
+        provenance = full_metadata.get("narrative_provenance")
+        if (
+            isinstance(provenance, list)
+            and len(provenance) > self._MAX_NARRATIVE_PROVENANCE_ENTRIES
+        ):
+            full_metadata["narrative_provenance"] = provenance[
+                -self._MAX_NARRATIVE_PROVENANCE_ENTRIES :
+            ]
         if atoms:
             full_metadata["atom_types"] = sorted(
                 {
@@ -564,11 +580,67 @@ class MemoryEngineCrudMixin:
                 )
             raise
 
+    _MAX_MEMORY_SOURCE_BYTES = 256 * 1024
+    _MAX_MEMORY_SOURCE_MESSAGE_CHARS = 4000
+    _MAX_NARRATIVE_PROVENANCE_ENTRIES = 64
+
+    @classmethod
+    def _cap_memory_source_payload(
+        cls, source_messages: list[dict[str, Any]]
+    ) -> str:
+        """Serialize source messages compactly and bound single-row byte size."""
+        serialized = json.dumps(
+            source_messages, ensure_ascii=False, separators=(",", ":")
+        )
+        if len(serialized.encode("utf-8")) <= cls._MAX_MEMORY_SOURCE_BYTES:
+            return serialized
+
+        # Step 1: trim oversized per-message content strings while keeping structure.
+        trimmed: list[dict[str, Any]] = []
+        for item in source_messages:
+            if not isinstance(item, dict):
+                continue
+            copy_item = dict(item)
+            content = copy_item.get("content")
+            if (
+                isinstance(content, str)
+                and len(content) > cls._MAX_MEMORY_SOURCE_MESSAGE_CHARS
+            ):
+                copy_item["content"] = (
+                    content[: cls._MAX_MEMORY_SOURCE_MESSAGE_CHARS] + "…"
+                )
+            trimmed.append(copy_item)
+
+        serialized = json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized.encode("utf-8")) <= cls._MAX_MEMORY_SOURCE_BYTES:
+            return serialized
+
+        # Step 2: keep the newest tail messages that fit within the byte budget.
+        kept: list[dict[str, Any]] = []
+        budget = cls._MAX_MEMORY_SOURCE_BYTES - 2  # JSON array brackets
+        used = 0
+        for item in reversed(trimmed):
+            item_json = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            item_bytes = len(item_json.encode("utf-8")) + (1 if kept else 0)
+            if used + item_bytes > budget:
+                if not kept:
+                    # Single message exceeds budget: hard-truncate its content to fit.
+                    short_item = dict(item)
+                    if isinstance(short_item.get("content"), str):
+                        short_item["content"] = short_item["content"][:1024] + "…"
+                    kept.append(short_item)
+                break
+            kept.append(item)
+            used += item_bytes
+        kept.reverse()
+        return json.dumps(kept, ensure_ascii=False, separators=(",", ":"))
+
     async def save_memory_source(
         self, memory_id: int, source_messages: list[dict[str, Any]]
     ) -> None:
         """Persist source messages outside retrieval metadata and indexes."""
         now = time.time()
+        payload = self._cap_memory_source_payload(source_messages)
         async with self._write_db() as db:
             await db.execute(
                 """
@@ -580,7 +652,7 @@ class MemoryEngineCrudMixin:
                 """,
                 (
                     int(memory_id),
-                    json.dumps(source_messages, ensure_ascii=False),
+                    payload,
                     now,
                     now,
                 ),
@@ -1901,20 +1973,45 @@ class MemoryEngineCrudMixin:
     ) -> "tuple[list[tuple[str, int]], int]":
         """计算一批行的衰减结果（纯计算，供线程池与等价性对照复用）。
 
-        逐行数学与 B10 之前的实现**完全一致**，只额外做一次"新序列化文本是否
-        与库内文本逐字节相同"的判断：相同就不必写库（写不写最终状态一样）。
+        直接按衰减后的数值字段 (importance, access_count) 判断是否变化，避免
+        SQLite ``json_set`` 紧凑格式与 Python ``json.dumps`` 空格格式不一致导致
+        每天无变化全表重写；同时隔离并跳过损坏 JSON 行，防止单行损坏中止整趟衰减。
 
         Returns:
-            (需要写入的 ``(metadata_json, id)`` 列表, 计算结果无变化而被跳过的行数)
+            (需要写入的 ``(metadata_json, id)`` 列表, 无变化或损坏被跳过的行数)
         """
         updates: list[tuple[str, int]] = []
         skipped_noop = 0
         for row in rows:
-            metadata = safe_json_dict(row["metadata"])
-            importance = clamp_float(metadata.get("importance"), default=0.5)
+            raw_meta = row["metadata"]
+            if isinstance(raw_meta, dict):
+                metadata = dict(raw_meta)
+            elif isinstance(raw_meta, str):
+                try:
+                    parsed = json.loads(raw_meta)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.warning(
+                        f"[衰减] 跳过损坏 metadata JSON 行 (id={row['id']})"
+                    )
+                    skipped_noop += 1
+                    continue
+                if not isinstance(parsed, dict):
+                    logger.warning(
+                        f"[衰减] 跳过非对象 metadata 行 (id={row['id']})"
+                    )
+                    skipped_noop += 1
+                    continue
+                metadata = parsed
+            else:
+                skipped_noop += 1
+                continue
+
+            orig_importance = metadata.get("importance")
+            orig_access_count = metadata.get("access_count")
+            importance = clamp_float(orig_importance, default=0.5)
             if importance >= protected_threshold:
                 continue
-            access_count = safe_float(metadata.get("access_count"), 0.0)
+            access_count = safe_float(orig_access_count, 0.0)
             last_access_time = safe_float(metadata.get("last_access_time"), 0.0)
 
             recent_access_factor = (
@@ -1925,15 +2022,26 @@ class MemoryEngineCrudMixin:
                 1 - 0.5 * access_factor * recent_access_factor
             )
             decay_factor = (1 - effective_decay_rate) ** days
-            metadata["importance"] = max(
+            new_importance = max(
                 0.01,
                 round(importance * decay_factor, 4),
             )
-            metadata["access_count"] = int(access_count * access_decay_multiplier)
-            serialized = json.dumps(metadata, ensure_ascii=False)
-            if serialized == row["metadata"]:
-                # 写到库里也是同一个字节串：跳过 UPDATE，最终状态不变。
+            new_access_count = int(access_count * access_decay_multiplier)
+            if (
+                isinstance(orig_importance, (int, float))
+                and not isinstance(orig_importance, bool)
+                and float(orig_importance) == new_importance
+                and isinstance(orig_access_count, int)
+                and not isinstance(orig_access_count, bool)
+                and orig_access_count == new_access_count
+            ):
+                # 数值完全无变化：无论 JSON 空格格式如何都跳过 UPDATE，消除写放大。
                 skipped_noop += 1
                 continue
+            metadata["importance"] = new_importance
+            metadata["access_count"] = new_access_count
+            serialized = json.dumps(
+                metadata, ensure_ascii=False, separators=(",", ":")
+            )
             updates.append((serialized, int(row["id"])))
         return updates, skipped_noop

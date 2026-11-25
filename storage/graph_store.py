@@ -16,6 +16,7 @@ from .graph_store_read import GraphStoreReadMixin
 from .graph_store_write import GraphStoreWriteMixin
 from .schema import GRAPH_SCHEMA_STATEMENTS
 from .sqlite_connection import open_connection
+from .sqlite_write import write_transaction
 
 
 class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
@@ -54,7 +55,7 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
 
     async def initialize(self) -> None:
         """Create tables used by the graph-memory layer."""
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             for statement in GRAPH_SCHEMA_STATEMENTS:
                 await db.execute(statement)
             # External-content triggers also cover graph snapshot replacement.
@@ -116,9 +117,11 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
                 "CREATE INDEX IF NOT EXISTS idx_graph_entries_persona_id ON graph_entries(persona_id)"
             )
             await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_graph_entries_edge_id ON graph_entries(edge_id)"
+            )
+            await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_graph_entry_nodes_node ON graph_entry_nodes(node_id)"
             )
-            await db.commit()
 
     @asynccontextmanager
     async def _connect(self, *, discard: bool = False):

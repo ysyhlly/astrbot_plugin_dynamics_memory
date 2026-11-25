@@ -486,17 +486,42 @@ class EvidenceSidecar:
                         "Evidence sidecar migration backup already exists"
                     )
                 with sqlite3.connect(str(backup_path), timeout=2) as backup:
-                    source.backup(backup)
+                    source.backup(backup, pages=256, sleep=0.05)
                     if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                         backup.close()
                         backup_path.unlink(missing_ok=True)
                         raise RuntimeError(
                             "Evidence sidecar migration backup failed validation"
                         )
+                self._prune_schema_backups(keep=1)
         except sqlite3.DatabaseError:
             raise RuntimeError(
                 "Existing evidence sidecar is not a readable SQLite database"
             ) from None
+
+    def _prune_schema_backups(self, *, keep: int = 1) -> int:
+        """Retain only the newest ``keep`` schema migration ``.bak`` files."""
+        parent = self.path.parent
+        if not parent.is_dir():
+            return 0
+        pattern = f"{self.path.name}.schema-*.bak"
+        candidates: list[tuple[float, Path]] = []
+        for entry in parent.glob(pattern):
+            if not entry.is_file():
+                continue
+            try:
+                candidates.append((entry.stat().st_mtime, entry))
+            except OSError:
+                continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        removed = 0
+        for _, stale in candidates[max(0, int(keep)) :]:
+            try:
+                stale.unlink()
+                removed += 1
+            except OSError:
+                continue
+        return removed
 
     @staticmethod
     def _retry_extension_contract_from_columns(

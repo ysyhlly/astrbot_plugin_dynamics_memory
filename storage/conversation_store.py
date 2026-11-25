@@ -19,6 +19,7 @@ from ..core.models.conversation_models import Message, Session, serialize_to_jso
 from .conversation_summary_progress import ConversationSummaryProgress
 from .series_conflicts import SeriesConflictStore, valid_event
 from .sqlite_connection import open_connection
+from .sqlite_write import path_write_lock
 
 _CONVERSATION_STORE_IN_WRITE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_conversation_store_in_write", default=False
@@ -74,11 +75,12 @@ class ConversationStore(SeriesConflictStore, ConversationSummaryProgress):
 
     @contextlib.asynccontextmanager
     async def _write_section(self):
-        """Acquire ``_write_lock`` while allowing nested reads to see active writes."""
+        """Acquire path + instance write locks while allowing nested reads."""
         token = _CONVERSATION_STORE_IN_WRITE.set(True)
         try:
-            async with self._write_lock:
-                yield
+            async with path_write_lock(self.db_path):
+                async with self._write_lock:
+                    yield
         finally:
             _CONVERSATION_STORE_IN_WRITE.reset(token)
 

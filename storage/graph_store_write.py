@@ -9,6 +9,7 @@ from __future__ import annotations
 import aiosqlite
 
 from ..core.models.graph_models import GraphEdge, GraphEntry, GraphNode
+from .sqlite_write import path_write_lock, settle, write_transaction
 
 
 class GraphStoreWriteMixin:
@@ -17,10 +18,8 @@ class GraphStoreWriteMixin:
     async def upsert_node(self, node: GraphNode) -> int:
         """Insert or update one graph node and return its identifier."""
         now = self._now_iso()
-        async with self._connect() as db:
-            node_id = await self._upsert_node(db, node, now)
-            await db.commit()
-            return node_id
+        async with write_transaction(self, foreign_keys=True) as db:
+            return await self._upsert_node(db, node, now)
 
     async def upsert_nodes(self, nodes: list[GraphNode]) -> dict[str, int]:
         """Insert or update nodes in one transaction."""
@@ -29,10 +28,9 @@ class GraphStoreWriteMixin:
 
         now = self._now_iso()
         node_key_to_id: dict[str, int] = {}
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             for node in nodes:
                 node_key_to_id[node.node_key] = await self._upsert_node(db, node, now)
-            await db.commit()
         return node_key_to_id
 
     async def _upsert_node(
@@ -83,16 +81,14 @@ class GraphStoreWriteMixin:
         source_node_id = node_key_to_id[edge.source_key]
         target_node_id = node_key_to_id[edge.target_key]
         now = self._now_iso()
-        async with self._connect() as db:
-            edge_id = await self._add_edge(
+        async with write_transaction(self, foreign_keys=True) as db:
+            return await self._add_edge(
                 db,
                 edge,
                 source_node_id,
                 target_node_id,
                 now,
             )
-            await db.commit()
-            return edge_id
 
     async def add_edges(
         self,
@@ -105,7 +101,7 @@ class GraphStoreWriteMixin:
 
         now = self._now_iso()
         edge_key_to_id: dict[str, int] = {}
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             for edge in edges:
                 source_node_id = node_key_to_id.get(edge.source_key)
                 target_node_id = node_key_to_id.get(edge.target_key)
@@ -118,7 +114,6 @@ class GraphStoreWriteMixin:
                     target_node_id,
                     now,
                 )
-            await db.commit()
         return edge_key_to_id
 
     async def _add_edge(
@@ -224,10 +219,8 @@ class GraphStoreWriteMixin:
     ) -> int:
         """Insert or update a searchable graph entry."""
         now = self._now_iso()
-        async with self._connect() as db:
-            entry_id = await self._add_entry(db, entry, node_key_to_id, edge_id, now)
-            await db.commit()
-            return entry_id
+        async with write_transaction(self, foreign_keys=True) as db:
+            return await self._add_entry(db, entry, node_key_to_id, edge_id, now)
 
     async def add_entries(
         self,
@@ -241,7 +234,7 @@ class GraphStoreWriteMixin:
 
         now = self._now_iso()
         entry_ids: list[int] = []
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             for entry in entries:
                 edge_id = None
                 if entry.relation_type and len(entry.node_keys) >= 2:
@@ -253,7 +246,6 @@ class GraphStoreWriteMixin:
                 entry_ids.append(
                     await self._add_entry(db, entry, node_key_to_id, edge_id, now)
                 )
-            await db.commit()
         return entry_ids
 
     async def _add_entry(
@@ -346,12 +338,11 @@ class GraphStoreWriteMixin:
         self, entry_id: int, vector_doc_id: int
     ) -> None:
         """Persist the vector-store identifier for one graph entry."""
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             await db.execute(
                 "UPDATE graph_entries SET vector_doc_id = ?, updated_at = ? WHERE id = ?",
                 (vector_doc_id, self._now_iso(), entry_id),
             )
-            await db.commit()
 
     async def update_entry_vector_doc_ids(
         self,
@@ -362,7 +353,7 @@ class GraphStoreWriteMixin:
             return
 
         now = self._now_iso()
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             await db.executemany(
                 "UPDATE graph_entries SET vector_doc_id = ?, updated_at = ? WHERE id = ?",
                 [
@@ -370,11 +361,10 @@ class GraphStoreWriteMixin:
                     for entry_id, vector_doc_id in entry_vector_doc_ids.items()
                 ],
             )
-            await db.commit()
 
     async def clear_all(self) -> list[int]:
         """Clear every graph artifact and return referenced vector document IDs."""
-        async with self._connect() as db:
+        async with write_transaction(self, foreign_keys=True) as db:
             cursor = await db.execute(
                 "SELECT DISTINCT vector_doc_id FROM graph_entries "
                 "WHERE vector_doc_id IS NOT NULL"
@@ -385,7 +375,6 @@ class GraphStoreWriteMixin:
             await db.execute("DELETE FROM graph_entries")
             await db.execute("DELETE FROM graph_edges")
             await db.execute("DELETE FROM graph_nodes")
-            await db.commit()
         return vector_doc_ids
 
     async def replace_all_from(self, shadow_db_path: str) -> None:
@@ -395,187 +384,239 @@ class GraphStoreWriteMixin:
         库，因此用 ``discard=True`` 借出——块结束后该连接直接关闭、不放回池，
         避免状态泄漏给后续借用者；行为与旧的"每次新建连接"一致。
         """
-        async with self._connect(discard=True) as db:
-            await db.execute("PRAGMA foreign_keys = OFF")
-            await db.execute("ATTACH DATABASE ? AS shadow_graph", (shadow_db_path,))
-            try:
-                await db.execute("BEGIN IMMEDIATE")
-                await db.execute("DELETE FROM livingmemory_graph_entries_fts")
-                await db.execute("DELETE FROM graph_entry_nodes")
-                await db.execute("DELETE FROM graph_entries")
-                await db.execute("DELETE FROM graph_edges")
-                await db.execute("DELETE FROM graph_nodes")
+        async with path_write_lock(self.db_path):
+            async with self._connect(discard=True) as db:
+                await db.execute("PRAGMA foreign_keys = OFF")
+                await db.execute("ATTACH DATABASE ? AS shadow_graph", (shadow_db_path,))
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    await db.execute("DELETE FROM livingmemory_graph_entries_fts")
+                    await db.execute("DELETE FROM graph_entry_nodes")
+                    await db.execute("DELETE FROM graph_entries")
+                    await db.execute("DELETE FROM graph_edges")
+                    await db.execute("DELETE FROM graph_nodes")
 
-                await db.execute(
-                    """
-                    INSERT INTO graph_nodes(
-                        id, node_key, node_type, node_value, canonical_value,
-                        metadata, created_at, updated_at
+                    await db.execute(
+                        """
+                        INSERT INTO graph_nodes(
+                            id, node_key, node_type, node_value, canonical_value,
+                            metadata, created_at, updated_at
+                        )
+                        SELECT id, node_key, node_type, node_value, canonical_value,
+                               metadata, created_at, updated_at
+                        FROM shadow_graph.graph_nodes
+                        """
                     )
-                    SELECT id, node_key, node_type, node_value, canonical_value,
-                           metadata, created_at, updated_at
-                    FROM shadow_graph.graph_nodes
-                    """
-                )
-                await db.execute(
-                    """
-                    INSERT INTO graph_edges(
-                        id, edge_key, source_node_id, target_node_id,
-                        relation_type, source_memory_id, weight, confidence,
-                        status, metadata, created_at, updated_at
+                    await db.execute(
+                        """
+                        INSERT INTO graph_edges(
+                            id, edge_key, source_node_id, target_node_id,
+                            relation_type, source_memory_id, weight, confidence,
+                            status, metadata, created_at, updated_at
+                        )
+                        SELECT id, edge_key, source_node_id, target_node_id,
+                               relation_type, source_memory_id, weight, confidence,
+                               status, metadata, created_at, updated_at
+                        FROM shadow_graph.graph_edges
+                        """
                     )
-                    SELECT id, edge_key, source_node_id, target_node_id,
-                           relation_type, source_memory_id, weight, confidence,
-                           status, metadata, created_at, updated_at
-                    FROM shadow_graph.graph_edges
-                    """
-                )
-                await db.execute(
-                    """
-                    INSERT INTO graph_entries(
-                        id, entry_key, source_memory_id, session_id, persona_id,
-                        entry_type, relation_type, content, metadata, edge_id,
-                        vector_doc_id, created_at, updated_at
+                    await db.execute(
+                        """
+                        INSERT INTO graph_entries(
+                            id, entry_key, source_memory_id, session_id, persona_id,
+                            entry_type, relation_type, content, metadata, edge_id,
+                            vector_doc_id, created_at, updated_at
+                        )
+                        SELECT id, entry_key, source_memory_id, session_id, persona_id,
+                               entry_type, relation_type, content, metadata, edge_id,
+                               vector_doc_id, created_at, updated_at
+                        FROM shadow_graph.graph_entries
+                        """
                     )
-                    SELECT id, entry_key, source_memory_id, session_id, persona_id,
-                           entry_type, relation_type, content, metadata, edge_id,
-                           vector_doc_id, created_at, updated_at
-                    FROM shadow_graph.graph_entries
-                    """
+                    await db.execute(
+                        """
+                        INSERT INTO graph_entry_nodes(entry_id, node_id)
+                        SELECT entry_id, node_id
+                        FROM shadow_graph.graph_entry_nodes
+                        """
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO livingmemory_graph_entries_fts(content, entry_id)
+                        SELECT content, entry_id
+                        FROM shadow_graph.livingmemory_graph_entries_fts
+                        """
+                    )
+                    await settle(db.commit())
+                except BaseException:
+                    await settle(db.rollback())
+                    raise
+                finally:
+                    await db.execute("DETACH DATABASE shadow_graph")
+
+    async def _delete_memories_in_tx(
+        self, db: aiosqlite.Connection, normalized_ids: list[int]
+    ) -> dict[int, list[int]]:
+        """Delete graph entries/edges for ``normalized_ids`` safely inside a write tx.
+
+        - Preserves shared edges still referenced by surviving memories by
+          re-attributing ``graph_edges.source_memory_id`` before deleting
+          unreferenced edges (prevents ON DELETE CASCADE from silently wiping
+          another memory's ``graph_entries`` and leaving FTS/FAISS ghosts).
+        - Cleans up only candidate orphan nodes touched by deleted entries/edges
+          instead of scanning the entire ``graph_nodes`` table on every delete.
+        """
+        result: dict[int, list[int]] = {}
+        candidate_node_ids: set[int] = set()
+        now = self._now_iso()
+
+        # Pass 1: delete all target memories' graph_entries (and FTS/links) first
+        # so surviving-edge checks in Pass 2 never attribute an edge to another
+        # memory being deleted in the same batch.
+        for batch in self._chunked(normalized_ids, self._SQLITE_BATCH_SIZE):
+            memory_placeholders = ",".join("?" * len(batch))
+            cursor = await db.execute(
+                f"""
+                SELECT id, source_memory_id, vector_doc_id
+                FROM graph_entries
+                WHERE source_memory_id IN ({memory_placeholders})
+                """,
+                batch,
+            )
+            rows = await cursor.fetchall()
+            entry_ids: list[int] = []
+            for row in rows:
+                entry_id = int(row[0])
+                memory_id = int(row[1])
+                vector_doc_id = row[2]
+                entry_ids.append(entry_id)
+                if vector_doc_id is not None:
+                    result.setdefault(memory_id, []).append(int(vector_doc_id))
+
+            if entry_ids:
+                for entry_batch in self._chunked(entry_ids, self._SQLITE_BATCH_SIZE):
+                    entry_placeholders = ",".join("?" * len(entry_batch))
+                    node_cur = await db.execute(
+                        f"SELECT DISTINCT node_id FROM graph_entry_nodes WHERE entry_id IN ({entry_placeholders})",
+                        entry_batch,
+                    )
+                    candidate_node_ids.update(
+                        int(row[0]) for row in await node_cur.fetchall()
+                    )
+                    await db.execute(
+                        f"DELETE FROM livingmemory_graph_entries_fts WHERE entry_id IN ({entry_placeholders})",
+                        entry_batch,
+                    )
+                    await db.execute(
+                        f"DELETE FROM graph_entry_nodes WHERE entry_id IN ({entry_placeholders})",
+                        entry_batch,
+                    )
+                    await db.execute(
+                        f"DELETE FROM graph_entries WHERE id IN ({entry_placeholders})",
+                        entry_batch,
+                    )
+
+        # Pass 2: inspect edges owned by deleted memories. Re-attribute edges
+        # still referenced by surviving memories' graph_entries; delete only
+        # unreferenced edges.
+        for batch in self._chunked(normalized_ids, self._SQLITE_BATCH_SIZE):
+            memory_placeholders = ",".join("?" * len(batch))
+            edge_cur = await db.execute(
+                f"""
+                SELECT id, source_node_id, target_node_id
+                FROM graph_edges
+                WHERE source_memory_id IN ({memory_placeholders})
+                """,
+                batch,
+            )
+            edge_rows = await edge_cur.fetchall()
+            if not edge_rows:
+                continue
+
+            edge_nodes_by_id = {
+                int(row[0]): (int(row[1]), int(row[2])) for row in edge_rows
+            }
+            edge_ids = list(edge_nodes_by_id)
+            reattribute_updates: list[tuple[int, str, int]] = []
+            surviving_edge_ids: set[int] = set()
+
+            for edge_batch in self._chunked(edge_ids, self._SQLITE_BATCH_SIZE):
+                edge_placeholders = ",".join("?" * len(edge_batch))
+                ref_cur = await db.execute(
+                    f"""
+                    SELECT edge_id, MIN(source_memory_id) AS next_owner
+                    FROM graph_entries
+                    WHERE edge_id IN ({edge_placeholders})
+                    GROUP BY edge_id
+                    """,
+                    edge_batch,
                 )
+                for ref_row in await ref_cur.fetchall():
+                    edge_id = int(ref_row[0])
+                    next_owner = int(ref_row[1])
+                    surviving_edge_ids.add(edge_id)
+                    reattribute_updates.append((next_owner, now, edge_id))
+
+            if reattribute_updates:
+                await db.executemany(
+                    "UPDATE graph_edges SET source_memory_id = ?, updated_at = ? WHERE id = ?",
+                    reattribute_updates,
+                )
+
+            edges_to_delete = [
+                edge_id for edge_id in edge_ids if edge_id not in surviving_edge_ids
+            ]
+            for edge_id in edges_to_delete:
+                src_node, tgt_node = edge_nodes_by_id[edge_id]
+                candidate_node_ids.add(src_node)
+                candidate_node_ids.add(tgt_node)
+
+            for del_batch in self._chunked(edges_to_delete, self._SQLITE_BATCH_SIZE):
+                del_placeholders = ",".join("?" * len(del_batch))
                 await db.execute(
-                    """
-                    INSERT INTO graph_entry_nodes(entry_id, node_id)
-                    SELECT entry_id, node_id
-                    FROM shadow_graph.graph_entry_nodes
-                    """
+                    f"DELETE FROM graph_edges WHERE id IN ({del_placeholders})",
+                    del_batch,
                 )
+
+        # Pass 3: targeted orphan node cleanup only over touched candidate nodes.
+        if candidate_node_ids:
+            for node_batch in self._chunked(
+                sorted(candidate_node_ids), self._SQLITE_BATCH_SIZE
+            ):
+                node_placeholders = ",".join("?" * len(node_batch))
                 await db.execute(
-                    """
-                    INSERT INTO livingmemory_graph_entries_fts(content, entry_id)
-                    SELECT content, entry_id
-                    FROM shadow_graph.livingmemory_graph_entries_fts
-                    """
+                    f"""
+                    DELETE FROM graph_nodes
+                    WHERE id IN ({node_placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM graph_edges e WHERE e.source_node_id = graph_nodes.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM graph_edges e WHERE e.target_node_id = graph_nodes.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM graph_entry_nodes gen WHERE gen.node_id = graph_nodes.id
+                      )
+                    """,
+                    node_batch,
                 )
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-            finally:
-                await db.execute("DETACH DATABASE shadow_graph")
+
+        return result
 
     async def delete_memory(self, source_memory_id: int) -> list[int]:
         """Delete graph artifacts belonging to one source memory."""
-        vector_doc_ids: list[int] = []
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT id, vector_doc_id FROM graph_entries WHERE source_memory_id = ?",
-                (source_memory_id,),
-            )
-            rows = await cursor.fetchall()
-            entry_ids = [int(row[0]) for row in rows]
-            vector_doc_ids = [int(row[1]) for row in rows if row[1] is not None]
-
-            if entry_ids:
-                placeholders = ",".join("?" * len(entry_ids))
-                await db.execute(
-                    f"DELETE FROM livingmemory_graph_entries_fts WHERE entry_id IN ({placeholders})",
-                    entry_ids,
-                )
-                await db.execute(
-                    f"DELETE FROM graph_entry_nodes WHERE entry_id IN ({placeholders})",
-                    entry_ids,
-                )
-                await db.execute(
-                    f"DELETE FROM graph_entries WHERE id IN ({placeholders})",
-                    entry_ids,
-                )
-
-            await db.execute(
-                "DELETE FROM graph_edges WHERE source_memory_id = ?",
-                (source_memory_id,),
-            )
-            await db.execute(
-                """
-                DELETE FROM graph_nodes
-                WHERE id NOT IN (
-                    SELECT source_node_id FROM graph_edges
-                    UNION
-                    SELECT target_node_id FROM graph_edges
-                    UNION
-                    SELECT node_id FROM graph_entry_nodes
-                )
-                """
-            )
-            await db.commit()
-        return vector_doc_ids
+        memory_id = int(source_memory_id)
+        async with write_transaction(self, foreign_keys=True) as db:
+            deleted = await self._delete_memories_in_tx(db, [memory_id])
+        return deleted.get(memory_id, [])
 
     async def batch_delete_memories(
         self, source_memory_ids: list[int]
     ) -> dict[int, list[int]]:
         """Batch delete graph artifacts for multiple source memories."""
-        result: dict[int, list[int]] = {}
         if not source_memory_ids:
-            return result
+            return {}
 
         normalized_ids = sorted({int(item) for item in source_memory_ids})
-        async with self._connect() as db:
-            for batch in self._chunked(normalized_ids, self._SQLITE_BATCH_SIZE):
-                memory_placeholders = ",".join("?" * len(batch))
-
-                cursor = await db.execute(
-                    f"""
-                    SELECT id, source_memory_id, vector_doc_id
-                    FROM graph_entries
-                    WHERE source_memory_id IN ({memory_placeholders})
-                    """,
-                    batch,
-                )
-                rows = await cursor.fetchall()
-                entry_ids: list[int] = []
-                for row in rows:
-                    entry_id = int(row[0])
-                    memory_id = int(row[1])
-                    vector_doc_id = row[2]
-                    entry_ids.append(entry_id)
-                    if vector_doc_id is not None:
-                        result.setdefault(memory_id, []).append(int(vector_doc_id))
-
-                if entry_ids:
-                    for entry_batch in self._chunked(
-                        entry_ids,
-                        self._SQLITE_BATCH_SIZE,
-                    ):
-                        entry_placeholders = ",".join("?" * len(entry_batch))
-                        await db.execute(
-                            f"DELETE FROM livingmemory_graph_entries_fts WHERE entry_id IN ({entry_placeholders})",
-                            entry_batch,
-                        )
-                        await db.execute(
-                            f"DELETE FROM graph_entry_nodes WHERE entry_id IN ({entry_placeholders})",
-                            entry_batch,
-                        )
-                        await db.execute(
-                            f"DELETE FROM graph_entries WHERE id IN ({entry_placeholders})",
-                            entry_batch,
-                        )
-
-                await db.execute(
-                    f"DELETE FROM graph_edges WHERE source_memory_id IN ({memory_placeholders})",
-                    batch,
-                )
-
-            await db.execute(
-                """
-                DELETE FROM graph_nodes
-                WHERE id NOT IN (
-                    SELECT source_node_id FROM graph_edges
-                    UNION
-                    SELECT target_node_id FROM graph_edges
-                    UNION
-                    SELECT node_id FROM graph_entry_nodes
-                )
-                """
-            )
-            await db.commit()
-        return result
+        async with write_transaction(self, foreign_keys=True) as db:
+            return await self._delete_memories_in_tx(db, normalized_ids)

@@ -466,7 +466,8 @@ class MemoryReflectionStorageMixin:
                     if session_id.startswith("narrative:v1:"):
                         # Preserve evidence types through compression. A model
                         # summary remains an interpretation, never a new fact.
-                        metadata["narrative_provenance"] = [
+                        # Cap provenance list size so huge windows cannot bloat documents.metadata.
+                        provenance_rows = [
                             {
                                 "source_id": message.metadata.get("source_event_id"),
                                 "scope": message.metadata.get("scope"),
@@ -475,6 +476,9 @@ class MemoryReflectionStorageMixin:
                             }
                             for message in history_messages
                         ]
+                        if len(provenance_rows) > 64:
+                            provenance_rows = provenance_rows[-64:]
+                        metadata["narrative_provenance"] = provenance_rows
                         metadata["fact_kind"] = "subjective"
                         metadata["unknown"] = True
 

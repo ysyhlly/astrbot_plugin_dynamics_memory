@@ -58,10 +58,12 @@ MAX_BACKUP_TOTAL_MB = 512
 _VERSION_FILE = ".plugin_version"
 _BACKUP_INFO_FILE = "backup_info.json"
 
-_VERSION_DIR_RE = re.compile(r"^v\d")
+_VERSION_DIR_RE = re.compile(r"^v(?:\d|unknown)")
 _ADAPTER_BACKUP_PREFIX = "adapter_ownership_"
 _SCOPE_BACKUP_PREFIX = "scope_migration_"
 _DAILY_BACKUP_GLOBS: tuple[str, ...] = ("*_backup_*.db", "*_backup_*.db.gz")
+_SIDECAR_SCHEMA_BAK_GLOB = "evidence_sidecar.sqlite3.schema-*.bak"
+KEEP_SIDECAR_SCHEMA_BACKUPS = 1
 
 
 def _is_daily_backup(entry: _BackupEntry) -> bool:
@@ -125,25 +127,33 @@ def _is_sqlite_file(path: Path) -> bool:
 
 
 def _backup_sqlite_file(src: Path, dst: Path) -> bool:
-    """Back up a SQLite file using the online backup API for WAL consistency.
+    """Back up a SQLite file using chunked online backup API for WAL consistency.
 
-    Returns True when SQLite online backup was used, False when it fell back
-    to a raw file copy (e.g. non-SQLite placeholder files in tests).
+    Returns True when SQLite online backup was used, False when ``src`` is a
+    non-SQLite placeholder file copied directly. Never falls back to raw
+    ``shutil.copy2`` on a live SQLite database when online backup fails.
     """
     if _is_sqlite_file(src):
         src_conn: sqlite3.Connection | None = None
         dst_conn: sqlite3.Connection | None = None
         try:
-            src_conn = sqlite3.connect(str(src), timeout=5.0)
-            src_conn.execute("PRAGMA busy_timeout=5000")
-            dst_conn = sqlite3.connect(str(dst), timeout=5.0)
-            src_conn.backup(dst_conn)
+            src_conn = sqlite3.connect(str(src), timeout=10.0)
+            src_conn.execute("PRAGMA busy_timeout=10000")
+            dst_conn = sqlite3.connect(str(dst), timeout=10.0)
+            src_conn.backup(dst_conn, pages=256, sleep=0.05)
             return True
         except sqlite3.Error as exc:
-            logger.warning(
-                f"[BackupManager] SQLite online backup 失败 ({src.name})，回退普通复制: {exc}"
+            logger.error(
+                f"[BackupManager] SQLite online backup 失败 ({src.name})，中止该库备份避免产出损坏副本: {exc}"
             )
+            if dst_conn is not None:
+                try:
+                    dst_conn.close()
+                except Exception:
+                    pass
+                dst_conn = None
             dst.unlink(missing_ok=True)
+            raise
         finally:
             if dst_conn is not None:
                 dst_conn.close()
@@ -314,6 +324,17 @@ class BackupManager:
                     if tmp_archive.exists():
                         tmp_archive.unlink(missing_ok=True)
 
+                # Sidecar metadata file lets list_backups() read metadata in O(1)
+                # without streaming/decompressing 200MB+ .tar.gz archives.
+                meta_path = backups_root / f"v{old_label}.meta.json"
+                try:
+                    meta_path.write_text(
+                        json.dumps(info, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
+
             self.write_current_version()
             logger.info(
                 f"[BackupManager] 压缩备份完成: {copied_count} 个文件 → {archive_path}"
@@ -321,30 +342,36 @@ class BackupManager:
             return str(archive_path)
 
         backup_dir = backups_root / f"v{old_label}"
+        existed_before = backup_dir.exists()
         backup_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
             f"[BackupManager] 检测到版本变更 ({old_label} → {PLUGIN_VERSION})，"
             f"正在备份数据到 {backup_dir} (include_faiss={use_faiss}) ..."
         )
-        copied_count, backed_up_files, online_backed_up = self._stage_backup_files(
-            backup_dir, include_faiss=use_faiss
-        )
-        info = {
-            "plugin_version": PLUGIN_VERSION,
-            "previous_version": old_label,
-            "backup_timestamp": datetime.now(timezone.utc).isoformat(),
-            "backup_unix_time": time.time(),
-            "files_copied": copied_count,
-            "data_dir": str(self.data_dir),
-            "format": "directory",
-            "include_faiss": use_faiss,
-            "sqlite_online_backup": online_backed_up,
-            "files": sorted(backed_up_files),
-        }
-        info_path = backup_dir / _BACKUP_INFO_FILE
-        info_path.write_text(
-            json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            copied_count, backed_up_files, online_backed_up = self._stage_backup_files(
+                backup_dir, include_faiss=use_faiss
+            )
+            info = {
+                "plugin_version": PLUGIN_VERSION,
+                "previous_version": old_label,
+                "backup_timestamp": datetime.now(timezone.utc).isoformat(),
+                "backup_unix_time": time.time(),
+                "files_copied": copied_count,
+                "data_dir": str(self.data_dir),
+                "format": "directory",
+                "include_faiss": use_faiss,
+                "sqlite_online_backup": online_backed_up,
+                "files": sorted(backed_up_files),
+            }
+            info_path = backup_dir / _BACKUP_INFO_FILE
+            info_path.write_text(
+                json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            if not existed_before and backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            raise
         self.write_current_version()
         logger.info(f"[BackupManager] 备份完成: {copied_count} 个文件 → {backup_dir}")
         return str(backup_dir)
@@ -454,6 +481,19 @@ class BackupManager:
                 stats["dirs_removed"] += 1
             else:
                 stats["files_removed"] += 1
+            if not entry.is_dir and entry.path.name.endswith(".tar.gz"):
+                sidecar_meta = entry.path.with_name(
+                    entry.path.name[: -len(".tar.gz")] + ".meta.json"
+                )
+                try:
+                    if sidecar_meta.is_file():
+                        meta_size = sidecar_meta.stat().st_size
+                        sidecar_meta.unlink()
+                        removed.add(sidecar_meta)
+                        stats["bytes_removed"] += meta_size
+                        stats["files_removed"] += 1
+                except OSError:
+                    pass
 
         # Remove leftover .bak / .tmp_* / *.tmp staging files unconditionally.
         for entry in entries:
@@ -538,6 +578,30 @@ class BackupManager:
                 if entry.path in removed:
                     total_bytes -= entry.size
 
+        # Prune stale evidence_sidecar schema migration .bak files stored in data_dir.
+        data_root = Path(data_dir)
+        if data_root.is_dir():
+            sidecar_baks: list[tuple[float, int, Path]] = []
+            for bak in data_root.glob(_SIDECAR_SCHEMA_BAK_GLOB):
+                if not bak.is_file():
+                    continue
+                try:
+                    st = bak.stat()
+                    sidecar_baks.append((st.st_mtime, st.st_size, bak))
+                except OSError:
+                    continue
+            sidecar_baks.sort(key=lambda item: item[0], reverse=True)
+            for idx, (mtime, size, bak) in enumerate(sidecar_baks):
+                if idx >= KEEP_SIDECAR_SCHEMA_BACKUPS or mtime < cutoff:
+                    try:
+                        bak.unlink()
+                        stats["files_removed"] += 1
+                        stats["bytes_removed"] += size
+                    except OSError as exc:
+                        logger.warning(
+                            f"[BackupManager] Failed to remove sidecar backup {bak}: {exc}"
+                        )
+
         stats["total_bytes"] = sum(e.size for e in entries if e.path not in removed)
         logger.info(
             f"[BackupManager] Backup prune finished: removed "
@@ -600,28 +664,44 @@ class BackupManager:
             elif entry.is_file() and entry.name.endswith(".tar.gz"):
                 info = {}
                 files: list[str] = []
-                try:
-                    with tarfile.open(entry, "r:gz") as tar:
-                        for member in tar.getmembers():
-                            if not member.isfile():
-                                continue
-                            basename = Path(member.name).name
-                            files.append(basename)
-                            if basename == _BACKUP_INFO_FILE:
-                                extracted = tar.extractfile(member)
-                                if extracted is not None:
-                                    try:
-                                        info = json.loads(
-                                            extracted.read().decode("utf-8")
-                                        )
-                                    except (
-                                        json.JSONDecodeError,
-                                        UnicodeDecodeError,
-                                        OSError,
-                                    ):
-                                        pass
-                except (tarfile.TarError, OSError):
-                    pass
+                meta_path = entry.with_name(
+                    entry.name[: -len(".tar.gz")] + ".meta.json"
+                )
+                loaded_from_sidecar = False
+                if meta_path.is_file():
+                    try:
+                        parsed = json.loads(meta_path.read_text(encoding="utf-8"))
+                        if isinstance(parsed, dict):
+                            info = parsed
+                            raw_files = info.get("files")
+                            if isinstance(raw_files, list):
+                                files = [str(f) for f in raw_files]
+                            loaded_from_sidecar = True
+                    except (json.JSONDecodeError, OSError):
+                        loaded_from_sidecar = False
+                if not loaded_from_sidecar:
+                    try:
+                        with tarfile.open(entry, "r:gz") as tar:
+                            for member in tar.getmembers():
+                                if not member.isfile():
+                                    continue
+                                basename = Path(member.name).name
+                                files.append(basename)
+                                if basename == _BACKUP_INFO_FILE:
+                                    extracted = tar.extractfile(member)
+                                    if extracted is not None:
+                                        try:
+                                            info = json.loads(
+                                                extracted.read().decode("utf-8")
+                                            )
+                                        except (
+                                            json.JSONDecodeError,
+                                            UnicodeDecodeError,
+                                            OSError,
+                                        ):
+                                            pass
+                    except (tarfile.TarError, OSError):
+                        pass
                 info.setdefault("archive", str(entry))
                 info.setdefault("directory", str(entry))
                 info.setdefault("name", entry.name[: -len(".tar.gz")])

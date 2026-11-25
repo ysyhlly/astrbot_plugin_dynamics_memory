@@ -104,14 +104,17 @@ class PageApiUtils:
         return next_history
 
     @staticmethod
-    def _history_value(value: Any) -> Any:
-        """转换历史记录值为可序列化格式"""
-        if isinstance(value, (str, int, float, bool)) or value is None:
+    def _history_value(value: Any, *, max_chars: int = 240) -> Any:
+        """转换历史记录值为可序列化格式并限制长度，防止 documents.metadata 膨胀。"""
+        if isinstance(value, str):
+            return value if len(value) <= max_chars else value[:max_chars] + "…"
+        if isinstance(value, (int, float, bool)) or value is None:
             return value
         try:
-            return json.dumps(value, ensure_ascii=False)
+            dumped = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
-            return str(value)
+            dumped = str(value)
+        return dumped if len(dumped) <= max_chars else dumped[:max_chars] + "…"
 
     @classmethod
     def _history_description(

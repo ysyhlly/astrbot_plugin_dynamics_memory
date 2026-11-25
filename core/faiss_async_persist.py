@@ -78,22 +78,42 @@ def _write_index_atomic(index: Any, path: str) -> None:
                 pass
 
 
-class _ReadersWriterLock:
-    """asyncio 读写锁：查询/写盘可并发，增删独占。
+async def _await_shielded(future: asyncio.Future[Any]) -> Any:
+    """Await a thread-pool future until completion even under repeated cancellation.
 
-    本模块只需「读者之间并发、写者与所有读者互斥」的语义，不追求写者优先，
-    因此用 Condition 实现最小版本：读者计数 + 单个写者标记。
+    Exiting ``async with self._index_lock.read()`` while a C++ FAISS thread is
+    still executing would allow a concurrent writer to mutate the index and
+    cause undefined behavior / segfault. Loop until the worker future finishes
+    before re-raising ``CancelledError``.
     """
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+        # Consume any exception from the finished worker future to avoid
+        # "Future exception was never retrieved" warnings before re-raising.
+        if not future.cancelled():
+            future.exception()
+        raise
+
+
+class _ReadersWriterLock:
+    """asyncio 读写锁（写者优先）：查询/写盘可并发，增删独占且不被持续读饿死。"""
 
     def __init__(self) -> None:
         self._condition = asyncio.Condition()
         self._readers = 0
         self._writer = False
+        self._waiting_writers = 0
 
     @asynccontextmanager
     async def read(self):
         async with self._condition:
-            while self._writer:
+            while self._writer or self._waiting_writers > 0:
                 await self._condition.wait()
             self._readers += 1
         try:
@@ -107,9 +127,15 @@ class _ReadersWriterLock:
     @asynccontextmanager
     async def write(self):
         async with self._condition:
-            while self._writer or self._readers:
-                await self._condition.wait()
-            self._writer = True
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers:
+                    await self._condition.wait()
+                self._writer = True
+            finally:
+                self._waiting_writers -= 1
+                if not self._writer and self._waiting_writers == 0:
+                    self._condition.notify_all()
         try:
             yield
         finally:
@@ -210,10 +236,7 @@ class AsyncIndexPersister:
                 )
                 self._pending_write = fut
                 try:
-                    await asyncio.shield(fut)
-                except asyncio.CancelledError:
-                    await fut
-                    raise
+                    await _await_shielded(fut)
                 finally:
                     if self._pending_write is fut:
                         self._pending_write = None
@@ -256,12 +279,7 @@ class AsyncIndexPersister:
             future = asyncio.get_running_loop().run_in_executor(
                 None, search, vector.reshape(1, -1), k
             )
-            try:
-                return await asyncio.shield(future)
-            except asyncio.CancelledError:
-                # Cancellation must not let a writer mutate an index still in use.
-                await future
-                raise
+            return await _await_shielded(future)
 
     @asynccontextmanager
     async def read_index(self):

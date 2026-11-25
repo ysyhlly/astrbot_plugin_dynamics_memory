@@ -15,6 +15,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.sqlite_connection import open_connection
+from ...storage.sqlite_write import write_transaction
 from ..memory_scope import adapter_sql, normalize_interaction_types
 from ..processors.text_processor import TextProcessor
 
@@ -129,7 +130,7 @@ class BM25Retriever:
         创建 livingmemory_memories_fts 虚拟表用于全文检索。
         使用unicode61分词器处理已预处理的文本。
         """
-        async with self._connect() as db:
+        async with write_transaction(self) as db:
             await self._warn_if_legacy_documents_fts_exists(db)
             # 创建FTS5虚拟表
             await db.execute(f"""
@@ -140,7 +141,6 @@ class BM25Retriever:
                     tokenize='unicode61'
                 )
             """)
-            await db.commit()
 
     async def _warn_if_legacy_documents_fts_exists(self, db: aiosqlite.Connection):
         cursor = await db.execute("""
@@ -189,13 +189,12 @@ class BM25Retriever:
         )
         processed_content = " ".join(with_cjk_bigrams(tokens, content))
 
-        async with self._connect() as db:
+        async with write_transaction(self) as db:
             # 插入到FTS表
             await db.execute(
                 f"INSERT INTO {self.fts_table}(doc_id, content) VALUES (?, ?)",
                 (doc_id, processed_content),
             )
-            await db.commit()
 
     async def search(
         self,
@@ -363,12 +362,11 @@ class BM25Retriever:
         from astrbot.api import logger
 
         try:
-            async with self._connect() as db:
+            async with write_transaction(self) as db:
                 await db.execute(
                     f"DELETE FROM {self.fts_table} WHERE doc_id = ?", (doc_id,)
                 )
-                await db.commit()
-                return True
+            return True
 
         except Exception as e:
             logger.error(f"BM25删除失败 (doc_id={doc_id}): {e}")
@@ -397,7 +395,7 @@ class BM25Retriever:
             )
             processed_content = " ".join(with_cjk_bigrams(tokens, content))
 
-            async with self._connect() as db:
+            async with write_transaction(self) as db:
                 # 先删除旧索引
                 await db.execute(
                     f"DELETE FROM {self.fts_table} WHERE doc_id = ?", (doc_id,)
@@ -409,9 +407,8 @@ class BM25Retriever:
                     (doc_id, processed_content),
                 )
 
-                await db.commit()
-                logger.debug(f"[BM25] 成功更新文档索引 doc_id={doc_id}")
-                return True
+            logger.debug(f"[BM25] 成功更新文档索引 doc_id={doc_id}")
+            return True
 
         except Exception as e:
             logger.error(f"[BM25] 更新文档失败 (doc_id={doc_id}): {e}")

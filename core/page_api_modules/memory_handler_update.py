@@ -450,7 +450,52 @@ class MemoryHandlerUpdateMixin:
                     if status_value not in {"active", "archived", "deleted"}:
                         failed_ids.append(raw_id)
                         continue
-                    updates["metadata"] = {"status": status_value}
+                    if status_value == "archived" and callable(
+                        getattr(memory_engine, "archive_memories", None)
+                    ):
+                        archived = await memory_engine.archive_memories([memory_id])
+                        if archived == 1:
+                            success = True
+                        else:
+                            # Already-archived memory is idempotent success; missing record fails.
+                            rec = await memory_engine.get_memory_record(memory_id)
+                            meta = (
+                                self.utils.normalize_metadata(rec.get("metadata"))
+                                if isinstance(rec, dict)
+                                else {}
+                            )
+                            success = bool(rec) and meta.get("status") == "archived"
+                    elif status_value == "active" and callable(
+                        getattr(memory_engine, "restore_memory", None)
+                    ):
+                        rec = await memory_engine.get_memory_record(memory_id)
+                        meta = (
+                            self.utils.normalize_metadata(rec.get("metadata"))
+                            if isinstance(rec, dict)
+                            else {}
+                        )
+                        current_status = str(meta.get("status") or "active")
+                        if current_status == "archived":
+                            success = bool(await memory_engine.restore_memory(memory_id))
+                        elif rec is not None and current_status == "active":
+                            success = True
+                        else:
+                            success = await memory_engine.update_memory(
+                                memory_id, {"metadata": {"status": "active"}}
+                            )
+                    elif status_value == "deleted" and callable(
+                        getattr(memory_engine, "delete_memory", None)
+                    ):
+                        success = bool(await memory_engine.delete_memory(memory_id))
+                    else:
+                        success = await memory_engine.update_memory(
+                            memory_id, {"metadata": {"status": status_value}}
+                        )
+                    if success:
+                        updated_count += 1
+                    else:
+                        failed_ids.append(raw_id)
+                    continue
                 elif field == "importance":
                     try:
                         updates["importance"] = self._normalize_importance_update(

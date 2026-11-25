@@ -713,10 +713,13 @@ class MemoryEngineBatchMixin:
             access_window_start = time.time() - max(1.0, access_window_days) * 86400.0
             access_decay_multiplier = max(0.0, min(1.0, access_decay_multiplier))
 
-            # 与旧实现相同的候选行谓词（逐字保留；索引无法命中，全表只扫一遍）。
+            # 与旧实现相同的候选行谓词，额外加 json_valid(metadata) 隔离损坏行，
+            # 避免单条坏 JSON 触发 SQLite OperationalError 中止整趟衰减。
             candidate_predicate = (
+                "json_valid(metadata) AND ("
                 "json_extract(metadata, '$.importance') IS NOT NULL "
                 "OR metadata LIKE '%\"importance\"%'"
+                ")"
             )
             # 快照上界：只处理本次调用开始时已存在的行，等价于旧实现"一次性 SELECT"
             # 的候选集（之后插入的行 id 更大，本趟不处理）。
@@ -740,33 +743,45 @@ class MemoryEngineBatchMixin:
                 batches += 1
 
                 # 卸载逐行 JSON 解析与数值计算，避免阻塞事件循环（每批一次）。
-                updates, skipped = await asyncio.to_thread(
-                    self._decay_updates_for_rows,
-                    rows,
-                    decay_rate=decay_rate,
-                    days=days,
-                    access_window_start=access_window_start,
-                    max_access_count=max_access_count,
-                    access_decay_multiplier=access_decay_multiplier,
-                    protected_threshold=protected_threshold,
-                )
+                def _compute_batch(batch_rows):
+                    batch_updates, batch_skipped = self._decay_updates_for_rows(
+                        batch_rows,
+                        decay_rate=decay_rate,
+                        days=days,
+                        access_window_start=access_window_start,
+                        max_access_count=max_access_count,
+                        access_decay_multiplier=access_decay_multiplier,
+                        protected_threshold=protected_threshold,
+                    )
+                    sql_rows = []
+                    for raw_json, doc_id in batch_updates:
+                        parsed = json.loads(raw_json)
+                        sql_rows.append(
+                            (
+                                parsed["importance"],
+                                access_decay_multiplier,
+                                doc_id,
+                            )
+                        )
+                    return sql_rows, batch_skipped
+
+                sql_params, skipped = await asyncio.to_thread(_compute_batch, rows)
                 skipped_noop += skipped
-                affected += len(updates) + skipped
-                if updates:
+                affected += len(sql_params) + skipped
+                if sql_params:
                     # 每批一个短事务：写锁分段释放，不再把整趟衰减压在一个长事务里。
+                    # 使用 SQL 侧 json_extract(metadata, '$.access_count') * multiplier
+                    # 保留快照之后并发召回写入的 access_count 增量。
                     async with self._write_db() as db:
                         await db.executemany(
-                            "UPDATE documents SET metadata = json_set(metadata, '$.importance', ?, '$.access_count', CAST(COALESCE(json_extract(metadata, '$.access_count'),0) * ? AS INTEGER)) WHERE id = ?",
-                            [
-                                (
-                                    json.loads(raw)["importance"],
-                                    access_decay_multiplier,
-                                    doc_id,
-                                )
-                                for raw, doc_id in updates
-                            ],
+                            "UPDATE documents "
+                            "SET metadata = json_set("
+                            "metadata, '$.importance', ?, '$.access_count', "
+                            "CAST(COALESCE(json_extract(metadata, '$.access_count'), 0) * ? AS INTEGER)"
+                            ") WHERE id = ? AND json_valid(metadata)",
+                            sql_params,
                         )
-                    written += len(updates)
+                    written += len(sql_params)
 
             if affected == 0:
                 return 0
