@@ -75,11 +75,7 @@ def _is_daily_backup(entry: _BackupEntry) -> bool:
 
 def _is_staging_or_bak(entry: _BackupEntry) -> bool:
     name = entry.path.name
-    return (
-        name.startswith(".tmp_")
-        or name.endswith(".tmp")
-        or name.endswith(".bak")
-    )
+    return name.startswith(".tmp_") or name.endswith(".tmp") or name.endswith(".bak")
 
 
 class _BackupEntry(NamedTuple):
@@ -558,7 +554,9 @@ class BackupManager:
             kept_versions = [e for e in remaining if _is_version_backup(e)]
             if kept_versions:
                 compressed_versions = [
-                    e for e in kept_versions if not e.is_dir and e.path.name.endswith(".tar.gz")
+                    e
+                    for e in kept_versions
+                    if not e.is_dir and e.path.name.endswith(".tar.gz")
                 ]
                 pool = compressed_versions or kept_versions
                 protected.add(max(pool, key=lambda e: e.mtime).path)

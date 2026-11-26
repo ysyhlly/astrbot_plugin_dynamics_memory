@@ -217,17 +217,41 @@ async def test_p02_batch_delete_memories_shared_edge_partial_and_full(tmp_path: 
     )
 
     e201 = await store.add_entry(
-        GraphEntry("e:201", 201, "s1", "p1", "fact", "m201", node_keys=[rust.node_key, wasm.node_key]),
+        GraphEntry(
+            "e:201",
+            201,
+            "s1",
+            "p1",
+            "fact",
+            "m201",
+            node_keys=[rust.node_key, wasm.node_key],
+        ),
         node_map,
         edge_id=edge_id,
     )
     e202 = await store.add_entry(
-        GraphEntry("e:202", 202, "s1", "p1", "fact", "m202", node_keys=[rust.node_key, wasm.node_key]),
+        GraphEntry(
+            "e:202",
+            202,
+            "s1",
+            "p1",
+            "fact",
+            "m202",
+            node_keys=[rust.node_key, wasm.node_key],
+        ),
         node_map,
         edge_id=edge_id,
     )
     e203 = await store.add_entry(
-        GraphEntry("e:203", 203, "s1", "p1", "fact", "m203", node_keys=[rust.node_key, wasm.node_key]),
+        GraphEntry(
+            "e:203",
+            203,
+            "s1",
+            "p1",
+            "fact",
+            "m203",
+            node_keys=[rust.node_key, wasm.node_key],
+        ),
         node_map,
         edge_id=edge_id,
     )
@@ -245,9 +269,7 @@ async def test_p02_batch_delete_memories_shared_edge_partial_and_full(tmp_path: 
             ).fetchone()
         )[0]
         assert int(edge_owner) == 203
-        remaining = await (
-            await db.execute("SELECT id FROM graph_entries")
-        ).fetchall()
+        remaining = await (await db.execute("SELECT id FROM graph_entries")).fetchall()
         assert [int(r[0]) for r in remaining] == [e203]
 
     removed_last = await store.batch_delete_memories([203])
@@ -292,7 +314,9 @@ async def test_p218_orphan_node_cleanup_uses_indexed_edge_id_and_targets_candida
         edge_id=edge_301,
     )
     await store.add_entry(
-        GraphEntry("e:302", 302, "s1", "p1", "summary", "m302", node_keys=[shared.node_key]),
+        GraphEntry(
+            "e:302", 302, "s1", "p1", "summary", "m302", node_keys=[shared.node_key]
+        ),
         node_map,
     )
 
@@ -348,7 +372,9 @@ async def test_p218_orphan_node_cleanup_uses_indexed_edge_id_and_targets_candida
 
 
 @pytest.mark.asyncio
-async def test_p03_concurrent_writes_across_stores_and_vacuum_serialized(tmp_path: Path):
+async def test_p03_concurrent_writes_across_stores_and_vacuum_serialized(
+    tmp_path: Path,
+):
     db_path = tmp_path / "livingmemory.db"
     graph_docs_path = tmp_path / "livingmemory_graph_documents.db"
 
@@ -359,7 +385,9 @@ async def test_p03_concurrent_writes_across_stores_and_vacuum_serialized(tmp_pat
         conn.execute("INSERT INTO documents (id, text) VALUES (1, 'seed')")
         conn.commit()
 
-    engine = MemoryEngine(db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={})
+    engine = MemoryEngine(
+        db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={}
+    )
     await engine.initialize()
     graph_store = GraphStore(str(db_path))
     await graph_store.initialize()
@@ -431,9 +459,13 @@ async def test_p03_concurrent_writes_across_stores_and_vacuum_serialized(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_p18_p215_decay_skips_compact_noop_and_survives_corrupt_json(tmp_path: Path):
+async def test_p18_p215_decay_skips_compact_noop_and_survives_corrupt_json(
+    tmp_path: Path,
+):
     db_path = tmp_path / "decay_p18.db"
-    engine = MemoryEngine(db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={})
+    engine = MemoryEngine(
+        db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={}
+    )
     await engine.initialize()
     try:
         # Drop any expression indexes on documents.metadata to simulate a legacy DB
@@ -444,7 +476,7 @@ async def test_p18_p215_decay_skips_compact_noop_and_survives_corrupt_json(tmp_p
             )
         ).fetchall()
         for idx_row in idx_rows:
-            await engine.db_connection.execute(f"DROP INDEX IF EXISTS \"{idx_row[0]}\"")
+            await engine.db_connection.execute(f'DROP INDEX IF EXISTS "{idx_row[0]}"')
 
         # Row 1: compact JSON already at floor -> MUST be skipped as no-op!
         compact_floor = json.dumps(
@@ -502,9 +534,13 @@ async def test_p18_p215_decay_skips_compact_noop_and_survives_corrupt_json(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_p18_bounds_provenance_sources_history_and_drops_legacy_fts(tmp_path: Path):
+async def test_p18_bounds_provenance_sources_history_and_drops_legacy_fts(
+    tmp_path: Path,
+):
     db_path = tmp_path / "bloat_p18.db"
-    engine = MemoryEngine(db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={})
+    engine = MemoryEngine(
+        db_path=str(db_path), faiss_db=_StubFaissDB(db_path), config={}
+    )
     await engine.initialize()
     try:
         # 1. narrative_provenance capped at 64 entries.
@@ -518,7 +554,11 @@ async def test_p18_bounds_provenance_sources_history_and_drops_legacy_fts(tmp_pa
         )
         rec = await engine.get_memory_record(mid)
         assert rec is not None
-        meta_obj = rec["metadata"] if isinstance(rec["metadata"], dict) else json.loads(rec["metadata"])
+        meta_obj = (
+            rec["metadata"]
+            if isinstance(rec["metadata"], dict)
+            else json.loads(rec["metadata"])
+        )
         stored_prov = meta_obj["narrative_provenance"]
         assert len(stored_prov) == 64
         assert stored_prov[0]["event_id"] == "e-36"
@@ -630,7 +670,9 @@ def test_p18_backup_sqlite_no_copy2_fallback_and_sidecar_meta(
     def _forbid_copy2(*a, **kw):
         nonlocal copy_called
         copy_called = True
-        raise AssertionError("shutil.copy2 MUST NOT be called as fallback for live SQLite DB")
+        raise AssertionError(
+            "shutil.copy2 MUST NOT be called as fallback for live SQLite DB"
+        )
 
     monkeypatch.setattr(bm_mod.sqlite3, "connect", _patched_connect)
     monkeypatch.setattr(bm_mod.shutil, "copy2", _forbid_copy2)
@@ -665,7 +707,9 @@ def test_p18_backup_sidecar_meta_and_schema_bak_pruning(tmp_path: Path, monkeypa
 
     # list_backups MUST read from sidecar .meta.json without opening .tar.gz!
     def _forbid_tar_open(*a, **kw):
-        raise AssertionError("list_backups should use .meta.json sidecar instead of tarfile.open")
+        raise AssertionError(
+            "list_backups should use .meta.json sidecar instead of tarfile.open"
+        )
 
     monkeypatch.setattr(tarfile, "open", _forbid_tar_open)
     listed = BackupManager.list_backups(str(tmp_path))

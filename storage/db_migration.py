@@ -653,9 +653,10 @@ class DBMigration:
     @staticmethod
     def _gzip_file_sync(src: Path, dst_tmp: Path, dst_final: Path) -> None:
         try:
-            with src.open("rb") as f_in, gzip.open(
-                dst_tmp, "wb", compresslevel=6
-            ) as f_out:
+            with (
+                src.open("rb") as f_in,
+                gzip.open(dst_tmp, "wb", compresslevel=6) as f_out,
+            ):
                 shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
             os.replace(dst_tmp, dst_final)
         finally:

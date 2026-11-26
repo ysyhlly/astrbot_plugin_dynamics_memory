@@ -2032,7 +2032,11 @@ class TestPageApiAdminAuthAndCsrf:
     def _make_plugin(admin_username: str | None = "admin"):
         plugin = FakePlugin()
         plugin.config_manager = SimpleNamespace(get=lambda _k, d=None: d)
-        cfg = {"dashboard": {"username": admin_username}} if admin_username is not None else {}
+        cfg = (
+            {"dashboard": {"username": admin_username}}
+            if admin_username is not None
+            else {}
+        )
         ctx = MagicMock()
         ctx.get_config = MagicMock(return_value=cfg)
 
@@ -2045,7 +2049,11 @@ class TestPageApiAdminAuthAndCsrf:
         return plugin
 
     @staticmethod
-    def _admin_request(method: str = "GET", headers: dict[str, str] | None = None, username: str | None = "admin"):
+    def _admin_request(
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        username: str | None = "admin",
+    ):
         req_headers = dict(headers or {})
         raw = SimpleNamespace(method=method, headers=req_headers, cookies={})
         return SimpleNamespace(
@@ -2064,8 +2072,12 @@ class TestPageApiAdminAuthAndCsrf:
         try:
             import astrbot.dashboard.api.auth as auth_mod
         except ModuleNotFoundError:
-            dashboard_pkg = sys.modules.get("astrbot.dashboard") or types.ModuleType("astrbot.dashboard")
-            api_pkg = sys.modules.get("astrbot.dashboard.api") or types.ModuleType("astrbot.dashboard.api")
+            dashboard_pkg = sys.modules.get("astrbot.dashboard") or types.ModuleType(
+                "astrbot.dashboard"
+            )
+            api_pkg = sys.modules.get("astrbot.dashboard.api") or types.ModuleType(
+                "astrbot.dashboard.api"
+            )
             auth_mod = types.ModuleType("astrbot.dashboard.api.auth")
             dashboard_pkg.api = api_pkg
             api_pkg.auth = auth_mod
@@ -2080,21 +2092,35 @@ class TestPageApiAdminAuthAndCsrf:
         )
 
     @pytest.mark.asyncio
-    async def test_get_and_post_routes_reject_unauthenticated_and_non_admin(self, monkeypatch):
+    async def test_get_and_post_routes_reject_unauthenticated_and_non_admin(
+        self, monkeypatch
+    ):
         import astrbot.api.web as web_mod
         import astrbot_plugin_dynamics_memory.series_panels as sp
 
         plugin = self._make_plugin("admin")
         api = PluginPageApi(plugin)
         api.register_routes()
-        routes = {route: (handler, methods) for route, handler, methods, _ in plugin._api_routes}
+        routes = {
+            route: (handler, methods)
+            for route, handler, methods, _ in plugin._api_routes
+        }
 
-        monkeypatch.setattr(sp, "json_response", lambda data, status_code=200: (status_code, data))
+        monkeypatch.setattr(
+            sp, "json_response", lambda data, status_code=200: (status_code, data)
+        )
 
         # 1. Missing request -> 403 on both GET and POST
         monkeypatch.setattr(sp, "request", None)
         monkeypatch.setattr(web_mod, "request", None, raising=False)
-        for suffix in ("stats", "readiness", "memories/update", "memories/batch-delete", "storage/repair", "evidence/correct"):
+        for suffix in (
+            "stats",
+            "readiness",
+            "memories/update",
+            "memories/batch-delete",
+            "storage/repair",
+            "evidence/correct",
+        ):
             handler, _ = routes[f"{PAGE_API_PREFIX}/{suffix}"]
             status, payload = await handler()
             assert status == 403, suffix
@@ -2102,7 +2128,9 @@ class TestPageApiAdminAuthAndCsrf:
 
         # 2. api_key principal -> 403
         self._patch_dashboard_auth(monkeypatch, "api_key:token1")
-        monkeypatch.setattr(sp, "request", self._admin_request("GET", username="api_key:token1"))
+        monkeypatch.setattr(
+            sp, "request", self._admin_request("GET", username="api_key:token1")
+        )
         status, _ = await routes[f"{PAGE_API_PREFIX}/stats"][0]()
         assert status == 403
 
@@ -2116,14 +2144,18 @@ class TestPageApiAdminAuthAndCsrf:
         empty_plugin = self._make_plugin("")
         empty_api = PluginPageApi(empty_plugin)
         empty_api.register_routes()
-        empty_routes = {route: handler for route, handler, _, _ in empty_plugin._api_routes}
+        empty_routes = {
+            route: handler for route, handler, _, _ in empty_plugin._api_routes
+        }
         self._patch_dashboard_auth(monkeypatch, "admin")
         monkeypatch.setattr(sp, "request", self._admin_request("GET", username="admin"))
         status, _ = await empty_routes[f"{PAGE_API_PREFIX}/stats"]()
         assert status == 403
 
     @pytest.mark.asyncio
-    async def test_post_routes_enforce_csrf_and_allow_same_origin_admin(self, monkeypatch):
+    async def test_post_routes_enforce_csrf_and_allow_same_origin_admin(
+        self, monkeypatch
+    ):
         import astrbot_plugin_dynamics_memory.series_panels as sp
 
         plugin = self._make_plugin("admin")
@@ -2131,17 +2163,27 @@ class TestPageApiAdminAuthAndCsrf:
         api.register_routes()
         routes = {route: handler for route, handler, _, _ in plugin._api_routes}
 
-        monkeypatch.setattr(sp, "json_response", lambda data, status_code=200: (status_code, data))
+        monkeypatch.setattr(
+            sp, "json_response", lambda data, status_code=200: (status_code, data)
+        )
         self._patch_dashboard_auth(monkeypatch, "admin")
 
         # GET route succeeds without Origin/Referer
-        monkeypatch.setattr(sp, "request", self._admin_request("GET", headers={"Host": "dashboard.local"}))
+        monkeypatch.setattr(
+            sp,
+            "request",
+            self._admin_request("GET", headers={"Host": "dashboard.local"}),
+        )
         with _patch_page_request(_mock_page_request(method="GET")):
             res = await routes[f"{PAGE_API_PREFIX}/readiness"]()
         assert res["status"] == "ok"
 
         # POST route without Origin/Referer/Bearer/Sec-Fetch-Site -> 403 CSRF
-        monkeypatch.setattr(sp, "request", self._admin_request("POST", headers={"Host": "dashboard.local"}))
+        monkeypatch.setattr(
+            sp,
+            "request",
+            self._admin_request("POST", headers={"Host": "dashboard.local"}),
+        )
         with _patch_page_request(_mock_page_request(method="POST", get_json={})):
             status, payload = await routes[f"{PAGE_API_PREFIX}/memories/batch-delete"]()
         assert status == 403
@@ -2193,6 +2235,8 @@ class TestPageApiAdminAuthAndCsrf:
                 },
             ),
         )
-        with _patch_page_request(_mock_page_request(method="POST", get_json={"memory_ids": [1]})):
+        with _patch_page_request(
+            _mock_page_request(method="POST", get_json={"memory_ids": [1]})
+        ):
             res = await routes[f"{PAGE_API_PREFIX}/memories/batch-delete"]()
         assert res["status"] == "ok"

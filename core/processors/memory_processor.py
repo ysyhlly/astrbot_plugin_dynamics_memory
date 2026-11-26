@@ -955,7 +955,9 @@ class MemoryProcessor:
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
             if structured_data.get("_quality_warning"):
-                metadata["summary_quality_warning"] = structured_data["_quality_warning"]
+                metadata["summary_quality_warning"] = structured_data[
+                    "_quality_warning"
+                ]
 
             importance = float(structured_data.get("importance", 0.5))
 

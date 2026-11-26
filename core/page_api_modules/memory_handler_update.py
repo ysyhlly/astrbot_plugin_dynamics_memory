@@ -476,7 +476,9 @@ class MemoryHandlerUpdateMixin:
                         )
                         current_status = str(meta.get("status") or "active")
                         if current_status == "archived":
-                            success = bool(await memory_engine.restore_memory(memory_id))
+                            success = bool(
+                                await memory_engine.restore_memory(memory_id)
+                            )
                         elif rec is not None and current_status == "active":
                             success = True
                         else:

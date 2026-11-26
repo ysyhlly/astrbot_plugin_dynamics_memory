@@ -400,7 +400,10 @@ class MemoryReflectionStorageMixin:
                         and pending.get("end_index") == end_index
                         else 0
                     )
-                    if retry_count >= SUMMARY_RETRY_LIMIT - 1 or prev_exhausted_cycles >= 1:
+                    if (
+                        retry_count >= SUMMARY_RETRY_LIMIT - 1
+                        or prev_exhausted_cycles >= 1
+                    ):
                         proc_fn = getattr(
                             self.memory_processor, "process_conversation", None
                         )
@@ -751,9 +754,7 @@ class MemoryReflectionStorageMixin:
             )
         )
         prev_exhausted_cycles = (
-            int(existing_pending.get("exhausted_cycles", 0) or 0)
-            if same_window
-            else 0
+            int(existing_pending.get("exhausted_cycles", 0) or 0) if same_window else 0
         )
         now_ts = time.time()
         backoff_idx = min(
@@ -807,12 +808,14 @@ class MemoryReflectionStorageMixin:
                     pending_summary["exhausted_cycles"] = next_exhausted_cycles
                     pending_summary["retry_count"] = 0
                     pending_summary["failure_stage"] = "poisoned_window"
-                    committed = await self.conversation_manager.write_managed_summary_progress(
-                        session_id,
-                        window_messages,
-                        pending_summary,
-                        expected_revision,
-                        retry_refused=retry_refused,
+                    committed = (
+                        await self.conversation_manager.write_managed_summary_progress(
+                            session_id,
+                            window_messages,
+                            pending_summary,
+                            expected_revision,
+                            retry_refused=retry_refused,
+                        )
                     )
                     if committed:
                         logger.warning(

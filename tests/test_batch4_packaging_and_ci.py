@@ -117,9 +117,15 @@ def test_package_release_install_zip_single_root_and_blacklist(tmp_path: Path):
         }
         for name in names:
             rel_parts = Path(name.split("/", 1)[1]).parts
-            assert rel_parts[0] not in forbidden_top_dirs, f"blacklisted dir leaked: {name}"
-            assert not (set(rel_parts) & forbidden_any_dirs), f"blacklisted dir leaked: {name}"
-            assert rel_parts[-1] not in forbidden_filenames, f"blacklisted file leaked: {name}"
+            assert rel_parts[0] not in forbidden_top_dirs, (
+                f"blacklisted dir leaked: {name}"
+            )
+            assert not (set(rel_parts) & forbidden_any_dirs), (
+                f"blacklisted dir leaked: {name}"
+            )
+            assert rel_parts[-1] not in forbidden_filenames, (
+                f"blacklisted file leaked: {name}"
+            )
 
     # Verify the validator itself catches leaks and bad roots.
     base_valid = [
@@ -161,12 +167,22 @@ def test_ci_workflow_covers_offline_pytest_frontend_package_and_deps():
         "metadata.yaml",
         "requirements.txt",
     ):
-        assert required_token in text, f"ci.yml missing required check: {required_token}"
+        assert required_token in text, (
+            f"ci.yml missing required check: {required_token}"
+        )
 
 
 def test_metadata_yaml_requirements_and_version_parity():
     meta_raw = (REPO_ROOT / "metadata.yaml").read_text(encoding="utf-8-sig")
-    for field in ("name:", "display_name:", "author:", "version:", "desc:", "astrbot_version:", "repo:"):
+    for field in (
+        "name:",
+        "display_name:",
+        "author:",
+        "version:",
+        "desc:",
+        "astrbot_version:",
+        "repo:",
+    ):
         assert re.search(rf"^{re.escape(field)}\s*\S+", meta_raw, re.MULTILINE), (
             f"metadata.yaml missing {field}"
         )
@@ -179,7 +195,9 @@ def test_metadata_yaml_requirements_and_version_parity():
 
     req_lines = [
         line.strip()
-        for line in (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        for line in (REPO_ROOT / "requirements.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
     assert len(req_lines) >= 6

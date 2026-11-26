@@ -186,14 +186,39 @@ async def test_evidence_sidecar_prune_old_cleans_stale_queue_and_per_scope_cap(
                         source_position,source_family_id,text_hash,projection_key,card_version,
                         status,diagnostics_code,created_at,updated_at
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (mid, "sc1", "host_record_only", "user", "c1", "fp", idx, "", f"h{idx}", "pk", "v1", st, "", old_ts, old_ts),
+                    (
+                        mid,
+                        "sc1",
+                        "host_record_only",
+                        "user",
+                        "c1",
+                        "fp",
+                        idx,
+                        "",
+                        f"h{idx}",
+                        "pk",
+                        "v1",
+                        st,
+                        "",
+                        old_ts,
+                        old_ts,
+                    ),
                 )
                 conn.execute(
                     """INSERT INTO evidence_derivation_queue(
                         material_id,scope_key,umo,source_locator_json,correction_revision,
                         projection_key,text_hash,status,available_at,lease_id,lease_until,created_at,updated_at
                     ) VALUES (?,?,?,?,0,'pk',?,?,0,'',0,?,?)""",
-                    (mid, "sc1", "u1", "{}", f"h{idx}", "deferred" if st == "ready" else st, old_ts, old_ts),
+                    (
+                        mid,
+                        "sc1",
+                        "u1",
+                        "{}",
+                        f"h{idx}",
+                        "deferred" if st == "ready" else st,
+                        old_ts,
+                        old_ts,
+                    ),
                 )
             # 10 recent unreferenced materials in sc2 to test per-scope cap=4
             for idx in range(10):
@@ -205,7 +230,23 @@ async def test_evidence_sidecar_prune_old_cleans_stale_queue_and_per_scope_cap(
                         source_position,source_family_id,text_hash,projection_key,card_version,
                         status,diagnostics_code,created_at,updated_at
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (mid, "sc2", "host_record_only", "user", "c2", "fp", idx, "", f"hc{idx}", "pk", "v1", "deferred", "", ts, ts),
+                    (
+                        mid,
+                        "sc2",
+                        "host_record_only",
+                        "user",
+                        "c2",
+                        "fp",
+                        idx,
+                        "",
+                        f"hc{idx}",
+                        "pk",
+                        "v1",
+                        "deferred",
+                        "",
+                        ts,
+                        ts,
+                    ),
                 )
             conn.commit()
 
@@ -232,7 +273,9 @@ async def test_enforce_message_limit_hard_ceiling_and_narrative_prune(tmp_path: 
     db_path = tmp_path / "conversations.db"
     store = ConversationStore(str(db_path))
     await store.initialize()
-    manager = ConversationManager(store=store, max_cache_size=10, context_window_size=20)
+    manager = ConversationManager(
+        store=store, max_cache_size=10, context_window_size=20
+    )
     sid = "test:GroupMessage:stalled"
     try:
         # Verify redundant idx_session_id and unused idx_msg_timestamp are dropped,
@@ -361,9 +404,7 @@ async def test_purge_expired_archived_memories_and_strip_write_ops_payloads(
             retention_days=14, payload_retention_days=3
         )
         assert ops_deleted == 2  # 20d completed + 40d stale pending
-        cur = await engine.db_connection.execute(
-            "SELECT payload FROM memory_write_ops"
-        )
+        cur = await engine.db_connection.execute("SELECT payload FROM memory_write_ops")
         remaining_ops = await cur.fetchall()
         assert len(remaining_ops) == 1
         assert remaining_ops[0]["payload"] == "{}"  # Bulky payload stripped!
@@ -413,7 +454,9 @@ async def test_summary_quality_idiom_exemptions_and_rich_summary_downgrade():
     # MemoryProcessor stores it with summary_quality="degraded" instead of raising
     class _StubLLM:
         async def text_chat(self, **_kw):
-            return SimpleNamespace(completion_text=json.dumps(rich_data, ensure_ascii=False))
+            return SimpleNamespace(
+                completion_text=json.dumps(rich_data, ensure_ascii=False)
+            )
 
     processor = MemoryProcessor(llm_provider=_StubLLM())
     msgs = [
@@ -428,7 +471,9 @@ async def test_summary_quality_idiom_exemptions_and_rich_summary_downgrade():
             timestamp=time.time(),
         )
     ]
-    _content, meta, _imp = await processor.process_conversation(msgs, is_group_chat=True)
+    _content, meta, _imp = await processor.process_conversation(
+        msgs, is_group_chat=True
+    )
     assert meta["summary_quality"] == "degraded"
     assert meta["summary_quality_warning"] == "summary_generic_reference_degraded"
 
@@ -471,7 +516,14 @@ async def test_reflection_exponential_retry_backoff_and_cursor_deadlock_escape(
         # Retry 1 -> ~60s backoff
         t0 = time.time()
         await reflection._record_pending_summary(
-            sid, 0, 4, 0, None, failure_stage="model", error_code="err", window_messages=msgs
+            sid,
+            0,
+            4,
+            0,
+            None,
+            failure_stage="model",
+            error_code="err",
+            window_messages=msgs,
         )
         p1 = await manager.get_session_metadata(sid, "pending_summary")
         assert 50 <= p1["retry_after"] - t0 <= 70
@@ -486,7 +538,14 @@ async def test_reflection_exponential_retry_backoff_and_cursor_deadlock_escape(
         # Retry 2 -> ~300s backoff
         t1 = time.time()
         await reflection._record_pending_summary(
-            sid, 0, 4, 1, None, failure_stage="model", error_code="err", window_messages=msgs
+            sid,
+            0,
+            4,
+            1,
+            None,
+            failure_stage="model",
+            error_code="err",
+            window_messages=msgs,
         )
         p2 = await manager.get_session_metadata(sid, "pending_summary")
         assert 290 <= p2["retry_after"] - t1 <= 310
@@ -494,7 +553,14 @@ async def test_reflection_exponential_retry_backoff_and_cursor_deadlock_escape(
         # Retry 3 -> >=900s cooldown, exhausted_cycles=1
         t2 = time.time()
         await reflection._record_pending_summary(
-            sid, 0, 4, 2, None, failure_stage="model", error_code="err", window_messages=msgs
+            sid,
+            0,
+            4,
+            2,
+            None,
+            failure_stage="model",
+            error_code="err",
+            window_messages=msgs,
         )
         p3 = await manager.get_session_metadata(sid, "pending_summary")
         assert p3["failure_stage"] == "retry_exhausted"
@@ -503,7 +569,14 @@ async def test_reflection_exponential_retry_backoff_and_cursor_deadlock_escape(
 
         # Second exhaustion cycle -> advances cursor so last_summarized_index never deadlocks
         await reflection._record_pending_summary(
-            sid, 0, 4, 2, None, failure_stage="model", error_code="err", window_messages=msgs
+            sid,
+            0,
+            4,
+            2,
+            None,
+            failure_stage="model",
+            error_code="err",
+            window_messages=msgs,
         )
         assert await manager.get_session_metadata(sid, "last_summarized_index", 0) == 4
         assert await manager.get_session_metadata(sid, "pending_summary", None) is None
@@ -571,7 +644,10 @@ def test_should_skip_group_recall_query_filters_noise_and_keeps_valid():
             == "trivial_short"
         )
     # Private messages with command/short are NOT filtered by group noise filter
-    assert should_skip_group_recall_query(_private_ev([Plain(text="/help")]), "/help") is None
+    assert (
+        should_skip_group_recall_query(_private_ev([Plain(text="/help")]), "/help")
+        is None
+    )
     assert should_skip_group_recall_query(_private_ev([Plain(text="嗯")]), "嗯") is None
 
 
@@ -626,7 +702,9 @@ async def test_main_handle_memory_recall_skips_projection_on_excluded_or_noise()
     )
     req2 = ProviderRequest(prompt="/今日运势")
     await plugin.handle_memory_recall(ev_cmd, req2)
-    assert getattr(req2, "_lm_private_hook_outcome_v1", None) == "skipped_command_prefix"
+    assert (
+        getattr(req2, "_lm_private_hook_outcome_v1", None) == "skipped_command_prefix"
+    )
     plugin._prepare_native_memory_projection.assert_not_awaited()
 
 
@@ -775,4 +853,3 @@ async def test_graph_read_pool_discards_connection_on_cancellation(tmp_path: Pat
     finally:
         await store.close()
         assert not store._closing_tasks
-

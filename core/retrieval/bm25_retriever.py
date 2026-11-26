@@ -259,7 +259,9 @@ class BM25Retriever:
             if not allowed_types:
                 return []
             if len(allowed_types) == 1:
-                filters.append(f"json_extract({metadata_sql}, '$.interaction_type') = ?")
+                filters.append(
+                    f"json_extract({metadata_sql}, '$.interaction_type') = ?"
+                )
                 params.append(allowed_types[0])
             else:
                 placeholders = ",".join("?" for _ in allowed_types)

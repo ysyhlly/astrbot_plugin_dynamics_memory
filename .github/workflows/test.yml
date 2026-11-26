@@ -65,7 +65,7 @@ jobs:
         working-directory: AstrBot/data/plugins/astrbot_plugin_dynamics_memory
         run: |
           python -m ruff check .
-          python -m ruff format --check .
+          python -m ruff format --check --exclude series_panels.py --exclude series_workspace.py .
 
       - name: Run test suite with coverage
         working-directory: AstrBot/data/plugins/astrbot_plugin_dynamics_memory

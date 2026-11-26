@@ -256,24 +256,21 @@ class MemoryEngineRecallMixin:
                     ):
                         continue
                     if (
+                        persona_id is not None
+                        and metadata.get("persona_id") != persona_id
+                    ) or (
                         (
-                            persona_id is not None
-                            and metadata.get("persona_id") != persona_id
+                            interaction_type is not None
+                            or source_platform is not None
+                            or source_session_id is not None
+                            or excluded_session_ids
                         )
-                        or (
-                            (
-                                interaction_type is not None
-                                or source_platform is not None
-                                or source_session_id is not None
-                                or excluded_session_ids
-                            )
-                            and not memory_metadata_matches_policy(
-                                metadata,
-                                interaction_type=interaction_type,
-                                source_platform=source_platform,
-                                source_session_id=source_session_id,
-                                excluded_session_ids=excluded_session_ids,
-                            )
+                        and not memory_metadata_matches_policy(
+                            metadata,
+                            interaction_type=interaction_type,
+                            source_platform=source_platform,
+                            source_session_id=source_session_id,
+                            excluded_session_ids=excluded_session_ids,
                         )
                     ):
                         continue

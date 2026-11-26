@@ -283,7 +283,11 @@ class MemoryEngineStatsMixin:
             data_dir / "livingmemory_graph_documents.db",
             data_dir / "evidence_sidecar.sqlite3",
         ]
-        graph_doc_cfg = self.config.get("graph_document_path") if isinstance(self.config, dict) else None
+        graph_doc_cfg = (
+            self.config.get("graph_document_path")
+            if isinstance(self.config, dict)
+            else None
+        )
         if graph_doc_cfg and str(graph_doc_cfg).strip() not in {"", ":memory:"}:
             candidates.append(Path(str(graph_doc_cfg)))
 
@@ -355,9 +359,7 @@ class MemoryEngineStatsMixin:
             "db_size_after": after_db,
             "wal_size_before": before_wal,
             "wal_size_after": after_wal,
-            "bytes_reclaimed": max(
-                0, before_db + before_wal - after_db - after_wal
-            ),
+            "bytes_reclaimed": max(0, before_db + before_wal - after_db - after_wal),
         }
 
     async def prune_memory_sources(
@@ -508,10 +510,9 @@ class MemoryEngineStatsMixin:
                         exc_info=True,
                     )
 
-            separate_file = (
-                isinstance(self.db_path, (str, Path))
-                and str(self.db_path) not in ("", ":memory:")
-            )
+            separate_file = isinstance(self.db_path, (str, Path)) and str(
+                self.db_path
+            ) not in ("", ":memory:")
             primary_auto_vacuum = 0
             if separate_file:
                 # Hold the per-path write lock and use a dedicated autocommit
@@ -574,7 +575,9 @@ class MemoryEngineStatsMixin:
                         await av_set.fetchall()
                         await av_set.close()
                         await self.db_connection.execute("VACUUM")
-                        av_after = await self.db_connection.execute("PRAGMA auto_vacuum")
+                        av_after = await self.db_connection.execute(
+                            "PRAGMA auto_vacuum"
+                        )
                         av_after_row = await av_after.fetchone()
                         await av_after.close()
                         primary_auto_vacuum = (

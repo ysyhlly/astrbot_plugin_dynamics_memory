@@ -572,9 +572,7 @@ class VectorRetriever:
                             if sim < threshold:
                                 continue
                             a, b = (
-                                (doc_id, nb_id)
-                                if doc_id < nb_id
-                                else (nb_id, doc_id)
+                                (doc_id, nb_id) if doc_id < nb_id else (nb_id, doc_id)
                             )
                             if (a, b) not in seen:
                                 seen.add((a, b))

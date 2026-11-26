@@ -135,7 +135,9 @@ async def test_p04_managed_scope_poison_window_circuit_breaks_after_two_cycles(
 
         # pending_summary MUST be cleared so managed recovery stops looping every 15m!
         assert await manager.get_session_metadata(session_id, "pending_summary") is None
-        due = await store.managed_summary_recovery_candidates(0, time.time() + 10**6, 10)
+        due = await store.managed_summary_recovery_candidates(
+            0, time.time() + 10**6, 10
+        )
         assert due == []
 
         # Quarantined window is preserved in managed_summary_refusals as poisoned_window.
@@ -215,13 +217,19 @@ async def test_p15_hybrid_retriever_oversamples_so_mmr_deduplicates():
     # Doc 1 & Doc 2 are nearly identical; Doc 3 is distinct and slightly lower scored.
     bm25_hits = [
         BM25Result(1, 0.95, "Alice loves hiking in Kyoto mountains every autumn", meta),
-        BM25Result(2, 0.94, "Alice loves hiking in Kyoto mountains every autumn!", meta),
+        BM25Result(
+            2, 0.94, "Alice loves hiking in Kyoto mountains every autumn!", meta
+        ),
         BM25Result(3, 0.80, "Bob built a Rust WebAssembly audio synthesizer", meta),
         BM25Result(4, 0.70, "Charlie prefers dark roast coffee in the morning", meta),
     ]
     vec_hits = [
-        VectorResult(1, 0.95, "Alice loves hiking in Kyoto mountains every autumn", meta),
-        VectorResult(2, 0.94, "Alice loves hiking in Kyoto mountains every autumn!", meta),
+        VectorResult(
+            1, 0.95, "Alice loves hiking in Kyoto mountains every autumn", meta
+        ),
+        VectorResult(
+            2, 0.94, "Alice loves hiking in Kyoto mountains every autumn!", meta
+        ),
         VectorResult(3, 0.80, "Bob built a Rust WebAssembly audio synthesizer", meta),
         VectorResult(4, 0.70, "Charlie prefers dark roast coffee in the morning", meta),
     ]
@@ -424,7 +432,9 @@ async def test_p110_consolidation_reentrancy_prompt_cap_atoms_and_scope_isolatio
 
     # Oversized session A group must be chunked into prompt-bounded sub-groups,
     # while never mixing session A and session B!
-    groups = await mgr._build_groups(candidates, cfg_mgr.get_section("memory_consolidation"))
+    groups = await mgr._build_groups(
+        candidates, cfg_mgr.get_section("memory_consolidation")
+    )
     assert len(groups) >= 2
     for grp in groups:
         sessions = {m["metadata"]["session_id"] for m in grp}
@@ -451,8 +461,7 @@ async def test_p110_derive_evidence_materials_streaming_and_batch_slice_consiste
             completion_text=json.dumps(
                 {
                     "materials": [
-                        {"material_id": f"m{i}", "atoms": []}
-                        for i in range(1, 5)
+                        {"material_id": f"m{i}", "atoms": []} for i in range(1, 5)
                     ]
                 }
             ),
@@ -489,7 +498,9 @@ async def test_p110_derive_evidence_materials_streaming_and_batch_slice_consiste
     async def hallucinating_stream(**kwargs):
         yield SimpleNamespace(
             is_chunk=False,
-            completion_text=json.dumps({"materials": [{"material_id": "m5", "atoms": []}]}),
+            completion_text=json.dumps(
+                {"materials": [{"material_id": "m5", "atoms": []}]}
+            ),
         )
 
     stream_only_provider.text_chat_stream = hallucinating_stream
@@ -636,7 +647,9 @@ async def test_p217_adapter_id_index_schema_completeness_and_lazy_i18n(tmp_path:
         assert idx_row is not None
 
         cfg = SimpleNamespace(
-            get=lambda p, d=None: [] if p == "filtering_settings.shared_adapter_ids" else d
+            get=lambda p, d=None: (
+                [] if p == "filtering_settings.shared_adapter_ids" else d
+            )
         )
         ev = SimpleNamespace(
             get_platform_id=lambda: "qq-main",
@@ -663,7 +676,10 @@ async def test_p217_adapter_id_index_schema_completeness_and_lazy_i18n(tmp_path:
     assert "hard_max_messages_per_session" in schema["session_manager"]["items"]
     assert "archived_retention_days" in schema["forgetting_agent"]["items"]
     assert "graph_route_timeout_seconds" in schema["graph_memory"]["items"]
-    assert "跨会话按语义" not in schema["memory_consolidation"]["items"]["granularity"]["hint"]
+    assert (
+        "跨会话按语义"
+        not in schema["memory_consolidation"]["items"]["granularity"]["hint"]
+    )
 
     # Every validator field has a corresponding schema entry.
     schema_paths: set[str] = set()

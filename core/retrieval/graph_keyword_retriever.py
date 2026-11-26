@@ -54,7 +54,9 @@ class GraphKeywordRetriever:
         raw_items = list(tokens)
         if 2 <= len(q_clean) <= 12 and not any(ch.isspace() for ch in q_clean):
             raw_items.insert(0, q_clean)
-        deduped = list(dict.fromkeys(str(t).strip() for t in raw_items if str(t).strip()))
+        deduped = list(
+            dict.fromkeys(str(t).strip() for t in raw_items if str(t).strip())
+        )
         if not deduped:
             return []
         multi = [t for t in deduped if len(t) >= 2]
@@ -88,9 +90,7 @@ class GraphKeywordRetriever:
         fts_tokens = list(dict.fromkeys([*node_tokens, *tokens]))[
             : self.max_query_tokens * 2
         ]
-        escaped_tokens = [
-            '"' + token.replace('"', '""') + '"' for token in fts_tokens
-        ]
+        escaped_tokens = ['"' + token.replace('"', '""') + '"' for token in fts_tokens]
         fts_query = " OR ".join(escaped_tokens)
         extra_kwargs = (
             {"excluded_session_ids": tuple(excluded_session_ids)}
@@ -137,9 +137,7 @@ class GraphKeywordRetriever:
             )
             matched_node_set = set(matched_node_ids)
             first_hop_node_ids = [
-                node_id
-                for node_id in first_hop_raw
-                if node_id not in matched_node_set
+                node_id for node_id in first_hop_raw if node_id not in matched_node_set
             ]
             if first_hop_node_ids:
                 if self.expansion_hops >= 2:
@@ -166,8 +164,22 @@ class GraphKeywordRetriever:
                         if node_id not in excluded_node_ids
                     ]
                     if second_hop_node_ids:
-                        second_hop_hits = await self.graph_store.get_entries_for_node_ids(
-                            node_ids=second_hop_node_ids,
+                        second_hop_hits = (
+                            await self.graph_store.get_entries_for_node_ids(
+                                node_ids=second_hop_node_ids,
+                                limit=max(self.expansion_limit, limit * 3),
+                                session_id=session_id,
+                                persona_id=persona_id,
+                                source_platform=source_platform,
+                                interaction_type=interaction_type,
+                                source_session_id=source_session_id,
+                                **extra_kwargs,
+                            )
+                        )
+                else:
+                    edge_neighbor_hits = (
+                        await self.graph_store.get_entries_for_node_ids(
+                            node_ids=first_hop_node_ids,
                             limit=max(self.expansion_limit, limit * 3),
                             session_id=session_id,
                             persona_id=persona_id,
@@ -176,16 +188,6 @@ class GraphKeywordRetriever:
                             source_session_id=source_session_id,
                             **extra_kwargs,
                         )
-                else:
-                    edge_neighbor_hits = await self.graph_store.get_entries_for_node_ids(
-                        node_ids=first_hop_node_ids,
-                        limit=max(self.expansion_limit, limit * 3),
-                        session_id=session_id,
-                        persona_id=persona_id,
-                        source_platform=source_platform,
-                        interaction_type=interaction_type,
-                        source_session_id=source_session_id,
-                        **extra_kwargs,
                     )
 
         aggregated: dict[int, GraphKeywordResult] = {}

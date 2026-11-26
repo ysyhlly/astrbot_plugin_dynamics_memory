@@ -263,7 +263,11 @@ class GraphStoreReadMixin:
             )
             subparams.extend(excl)
             subparams.extend(excl)
-        return f"EXISTS (SELECT 1 FROM documents d WHERE {' AND '.join(subclauses)})", subparams, False
+        return (
+            f"EXISTS (SELECT 1 FROM documents d WHERE {' AND '.join(subclauses)})",
+            subparams,
+            False,
+        )
 
     async def search_entries_by_bm25(
         self,

@@ -445,33 +445,52 @@ def test_memory_metadata_matches_policy_tuple_types_and_exclusions():
         "memory_visibility": "private",
     }
 
-    assert memory_metadata_matches_policy(
-        group_meta, interaction_type=("group_chat", "unknown")
-    ) is True
-    assert memory_metadata_matches_policy(
-        legacy_meta, interaction_type=("group_chat", "unknown")
-    ) is True
-    assert memory_metadata_matches_policy(
-        private_meta, interaction_type=("group_chat", "unknown")
-    ) is False
-    assert memory_metadata_matches_policy(
-        private_chat_meta, interaction_type=("group_chat", "unknown")
-    ) is False
-    assert memory_metadata_matches_policy(
-        {}, interaction_type=("group_chat", "unknown")
-    ) is False
-    assert memory_metadata_matches_policy(
-        group_meta,
-        interaction_type="group_chat",
-        source_platform="test",
-        excluded_session_ids=("test:GroupMessage:g1",),
-    ) is False
-    assert memory_metadata_matches_policy(
-        group_meta,
-        interaction_type="group_chat",
-        source_platform="test",
-        excluded_session_ids=("test:GroupMessage:other",),
-    ) is True
+    assert (
+        memory_metadata_matches_policy(
+            group_meta, interaction_type=("group_chat", "unknown")
+        )
+        is True
+    )
+    assert (
+        memory_metadata_matches_policy(
+            legacy_meta, interaction_type=("group_chat", "unknown")
+        )
+        is True
+    )
+    assert (
+        memory_metadata_matches_policy(
+            private_meta, interaction_type=("group_chat", "unknown")
+        )
+        is False
+    )
+    assert (
+        memory_metadata_matches_policy(
+            private_chat_meta, interaction_type=("group_chat", "unknown")
+        )
+        is False
+    )
+    assert (
+        memory_metadata_matches_policy({}, interaction_type=("group_chat", "unknown"))
+        is False
+    )
+    assert (
+        memory_metadata_matches_policy(
+            group_meta,
+            interaction_type="group_chat",
+            source_platform="test",
+            excluded_session_ids=("test:GroupMessage:g1",),
+        )
+        is False
+    )
+    assert (
+        memory_metadata_matches_policy(
+            group_meta,
+            interaction_type="group_chat",
+            source_platform="test",
+            excluded_session_ids=("test:GroupMessage:other",),
+        )
+        is True
+    )
 
 
 @pytest.mark.asyncio

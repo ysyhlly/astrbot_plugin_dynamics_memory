@@ -205,7 +205,12 @@ async def test_entry_points_self_heal_missing_runtime_components():
     # 2. get_evidence_view
     plugin._narrative_scope_allowed = AsyncMock(return_value=True)
     view = await plugin.get_evidence_view(
-        {"platform": "qq", "umo": "qq:GroupMessage:1", "persona_id": "p", "instance_id": "p"}
+        {
+            "platform": "qq",
+            "umo": "qq:GroupMessage:1",
+            "persona_id": "p",
+            "instance_id": "p",
+        }
     )
     assert view["available"] is False
     assert plugin._ensure_runtime_components.await_count == 2
@@ -213,7 +218,12 @@ async def test_entry_points_self_heal_missing_runtime_components():
     # 3. recall_context
     plugin._narrative_scope_allowed = AsyncMock(return_value=False)
     res = await plugin.recall_context(
-        {"platform": "qq", "umo": "qq:GroupMessage:1", "persona_id": "p", "instance_id": "p"},
+        {
+            "platform": "qq",
+            "umo": "qq:GroupMessage:1",
+            "persona_id": "p",
+            "instance_id": "p",
+        },
         "hello",
     )
     assert res["available"] is False
@@ -223,7 +233,9 @@ async def test_entry_points_self_heal_missing_runtime_components():
 @pytest.mark.asyncio
 async def test_cold_start_provider_lookup_uses_find_provider_silently(tmp_path):
     """During cold start, missing provider lookup never calls noisy context.get_provider_by_id."""
-    get_by_id = Mock(side_effect=AssertionError("should not call noisy get_provider_by_id"))
+    get_by_id = Mock(
+        side_effect=AssertionError("should not call noisy get_provider_by_id")
+    )
     emb_stub = SimpleNamespace(id="emb-1")
     ctx = SimpleNamespace(
         provider_manager=SimpleNamespace(
@@ -404,8 +416,13 @@ async def test_evidence_sidecar_prune_old_cleans_expired_and_preserves_active(tm
 
         with sqlite3.connect(str(db_path)) as conn:
             atoms = {r[0] for r in conn.execute("SELECT atom_id FROM evidence_atoms")}
-            mats = {r[0] for r in conn.execute("SELECT material_id FROM evidence_materials")}
-            cors = {r[0] for r in conn.execute("SELECT correction_id FROM evidence_corrections")}
+            mats = {
+                r[0] for r in conn.execute("SELECT material_id FROM evidence_materials")
+            }
+            cors = {
+                r[0]
+                for r in conn.execute("SELECT correction_id FROM evidence_corrections")
+            }
             rev = conn.execute(
                 "SELECT correction_revision FROM evidence_scope_revisions WHERE scope_key='sc1'"
             ).fetchone()[0]
@@ -453,6 +470,7 @@ async def test_maintain_storage_and_decay_scheduler_checkpoint_all_companion_dbs
     sidecar = EvidenceSidecar(sidecar_db)
     await sidecar.initialize()
     try:
+
         class _DummyEngine(MemoryEngineStatsMixin):
             def __init__(self, db_path_str: str, conn):
                 self.db_path = db_path_str
@@ -496,7 +514,9 @@ async def test_maintain_storage_and_decay_scheduler_checkpoint_all_companion_dbs
             # Verify no memory/conversation/graph rows were lost
             for path in (primary, conv_db, graph_db):
                 with sqlite3.connect(str(path)) as check_conn:
-                    count = check_conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+                    count = check_conn.execute("SELECT COUNT(*) FROM items").fetchone()[
+                        0
+                    ]
                 assert count == 19
         finally:
             await conn.close()
@@ -824,7 +844,10 @@ async def test_embedding_telemetry_reports_duration_and_outcomes():
     set_active_plugin(fake_plugin)
     try:
         emb_provider = SimpleNamespace(
-            provider_config={"id": "openai-emb", "embedding_model": "text-embedding-3-small"},
+            provider_config={
+                "id": "openai-emb",
+                "embedding_model": "text-embedding-3-small",
+            },
             get_embedding=AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4]),
         )
 
@@ -832,7 +855,9 @@ async def test_embedding_telemetry_reports_duration_and_outcomes():
         fake_index = SimpleNamespace(ntotal=1)
 
         async def fake_search(_vec, _k):
-            return np.asarray([[0.1]], dtype=np.float32), np.asarray([[1]], dtype=np.int64)
+            return np.asarray([[0.1]], dtype=np.float32), np.asarray(
+                [[1]], dtype=np.int64
+            )
 
         fake_db = SimpleNamespace(
             embedding_provider=emb_provider,
@@ -841,7 +866,9 @@ async def test_embedding_telemetry_reports_duration_and_outcomes():
             ),
             document_storage=SimpleNamespace(
                 get_documents=AsyncMock(
-                    return_value=[{"id": 1, "text": "hello", "metadata": {"status": "active"}}]
+                    return_value=[
+                        {"id": 1, "text": "hello", "metadata": {"status": "active"}}
+                    ]
                 )
             ),
         )

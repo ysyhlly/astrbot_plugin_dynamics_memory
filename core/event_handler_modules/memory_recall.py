@@ -64,7 +64,9 @@ def should_skip_group_recall_query(
     """
     get_msg_type = getattr(event, "get_message_type", None)
     try:
-        is_group = callable(get_msg_type) and get_msg_type() == MessageType.GROUP_MESSAGE
+        is_group = (
+            callable(get_msg_type) and get_msg_type() == MessageType.GROUP_MESSAGE
+        )
     except Exception:
         is_group = False
     if not is_group:

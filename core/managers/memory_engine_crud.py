@@ -585,9 +585,7 @@ class MemoryEngineCrudMixin:
     _MAX_NARRATIVE_PROVENANCE_ENTRIES = 64
 
     @classmethod
-    def _cap_memory_source_payload(
-        cls, source_messages: list[dict[str, Any]]
-    ) -> str:
+    def _cap_memory_source_payload(cls, source_messages: list[dict[str, Any]]) -> str:
         """Serialize source messages compactly and bound single-row byte size."""
         serialized = json.dumps(
             source_messages, ensure_ascii=False, separators=(",", ":")
@@ -1990,15 +1988,11 @@ class MemoryEngineCrudMixin:
                 try:
                     parsed = json.loads(raw_meta)
                 except (json.JSONDecodeError, TypeError, ValueError):
-                    logger.warning(
-                        f"[衰减] 跳过损坏 metadata JSON 行 (id={row['id']})"
-                    )
+                    logger.warning(f"[衰减] 跳过损坏 metadata JSON 行 (id={row['id']})")
                     skipped_noop += 1
                     continue
                 if not isinstance(parsed, dict):
-                    logger.warning(
-                        f"[衰减] 跳过非对象 metadata 行 (id={row['id']})"
-                    )
+                    logger.warning(f"[衰减] 跳过非对象 metadata 行 (id={row['id']})")
                     skipped_noop += 1
                     continue
                 metadata = parsed
@@ -2040,8 +2034,6 @@ class MemoryEngineCrudMixin:
                 continue
             metadata["importance"] = new_importance
             metadata["access_count"] = new_access_count
-            serialized = json.dumps(
-                metadata, ensure_ascii=False, separators=(",", ":")
-            )
+            serialized = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
             updates.append((serialized, int(row["id"])))
         return updates, skipped_noop

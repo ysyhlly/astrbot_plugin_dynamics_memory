@@ -154,7 +154,9 @@ class MemoryConsolidationManager:
         ).strip()
         facts_len = sum(len(str(f)) for f in (metadata.get("key_facts") or []))
         topics_len = sum(len(str(t)) for t in (metadata.get("topics") or []))
-        return min(len(summary), cls._MAX_ITEM_SUMMARY_CHARS) + facts_len + topics_len + 80
+        return (
+            min(len(summary), cls._MAX_ITEM_SUMMARY_CHARS) + facts_len + topics_len + 80
+        )
 
     @classmethod
     def _chunk_group_by_chars(

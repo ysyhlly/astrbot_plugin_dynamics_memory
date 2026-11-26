@@ -266,9 +266,7 @@ class PluginInitializer(InitializerFaissMixin):
                 f"降频为每 {self._long_retry_interval:.0f}s 探测一次"
             )
             if not self._initialization_error:
-                self._initialization_error = (
-                    f"初始化在 {self._provider_check_attempts} 次尝试后仍未完成（已转入低频探测）"
-                )
+                self._initialization_error = f"初始化在 {self._provider_check_attempts} 次尝试后仍未完成（已转入低频探测）"
 
     async def _notify_initialized(self) -> None:
         """触发可选的初始化完成回调（幂等，异常不回滚初始化状态）。"""
@@ -323,9 +321,7 @@ class PluginInitializer(InitializerFaissMixin):
         slow_probe_logged = False
 
         while not self._initialization_complete and not self._initialization_failed:
-            in_slow_probe = (
-                self._provider_check_attempts >= self._max_provider_attempts
-            )
+            in_slow_probe = self._provider_check_attempts >= self._max_provider_attempts
             if in_slow_probe:
                 self._in_slow_probe_mode = True
                 if not slow_probe_logged:

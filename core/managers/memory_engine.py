@@ -241,15 +241,15 @@ class MemoryEngine(
                 ),
             )
             hr.fusion_mode = (
-                self.config.get("fusion_mode", hr.fusion_mode) or "score"
-            ).strip().lower()
+                (self.config.get("fusion_mode", hr.fusion_mode) or "score")
+                .strip()
+                .lower()
+            )
             hr.fusion_bm25_weight = min(
                 1.0,
                 max(
                     0.0,
-                    float(
-                        self.config.get("fusion_bm25_weight", hr.fusion_bm25_weight)
-                    ),
+                    float(self.config.get("fusion_bm25_weight", hr.fusion_bm25_weight)),
                 ),
             )
             hr.candidate_multiplier = max(
@@ -289,9 +289,7 @@ class MemoryEngine(
                 self.config.get("cross_route_bonus", dr.cross_route_bonus)
             )
             dr.dynamic_route_weighting = bool(
-                self.config.get(
-                    "dynamic_route_weighting", dr.dynamic_route_weighting
-                )
+                self.config.get("dynamic_route_weighting", dr.dynamic_route_weighting)
             )
             dr.graph_route_timeout_seconds = float(
                 self.config.get(

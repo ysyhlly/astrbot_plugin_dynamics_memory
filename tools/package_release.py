@@ -216,7 +216,9 @@ def verify_install_archive_members(names: list[str], plugin_name: str) -> None:
         if not parts:
             continue
         if parts[0] in SOURCE_ONLY or any(part in SKIP_DIRS for part in parts):
-            raise ValueError(f"Blacklisted dev directory leaked into install zip: {entry}")
+            raise ValueError(
+                f"Blacklisted dev directory leaked into install zip: {entry}"
+            )
         filename = parts[-1]
         if (
             filename in SKIP_FILES
@@ -224,7 +226,9 @@ def verify_install_archive_members(names: list[str], plugin_name: str) -> None:
             or Path(filename).suffix in STATE_SUFFIXES
             or filename.endswith(("-wal", "-shm"))
         ):
-            raise ValueError(f"Blacklisted dev/state file leaked into install zip: {entry}")
+            raise ValueError(
+                f"Blacklisted dev/state file leaked into install zip: {entry}"
+            )
         rels.add(rel)
 
     required = {

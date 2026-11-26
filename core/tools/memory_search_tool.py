@@ -134,7 +134,10 @@ def _json_result(
             return encoded
 
     # 4. 兜底：若 query 过长导致超限，截断 query
-    if isinstance(bounded.get("query"), str) and len(_raw_json_result(bounded)) > max_chars:
+    if (
+        isinstance(bounded.get("query"), str)
+        and len(_raw_json_result(bounded)) > max_chars
+    ):
         query_text = bounded["query"]
 
         def _fits_query(candidate: str) -> bool:
@@ -1030,10 +1033,24 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                             entry_idx, mem, s_scope, row_id = job
                             async with source_sem:
                                 if deadline.search_remaining() <= 0:
-                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                    return (
+                                        entry_idx,
+                                        mem,
+                                        s_scope,
+                                        row_id,
+                                        "timeout",
+                                        None,
+                                    )
                                 source_context = search_context_by_id.get(mem.doc_id)
                                 if source_context is None:
-                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                    return (
+                                        entry_idx,
+                                        mem,
+                                        s_scope,
+                                        row_id,
+                                        "timeout",
+                                        None,
+                                    )
                                 try:
                                     row_outcome = await source_context.run(
                                         "tool-source-row",
@@ -1048,9 +1065,23 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                                 except asyncio.CancelledError:
                                     raise
                                 except asyncio.TimeoutError:
-                                    return entry_idx, mem, s_scope, row_id, "timeout", None
+                                    return (
+                                        entry_idx,
+                                        mem,
+                                        s_scope,
+                                        row_id,
+                                        "timeout",
+                                        None,
+                                    )
                                 except Exception:
-                                    return entry_idx, mem, s_scope, row_id, "error", None
+                                    return (
+                                        entry_idx,
+                                        mem,
+                                        s_scope,
+                                        row_id,
+                                        "error",
+                                        None,
+                                    )
                                 state = str(row_outcome.get("state", "error"))
                                 if state != "completed":
                                     return entry_idx, mem, s_scope, row_id, state, None

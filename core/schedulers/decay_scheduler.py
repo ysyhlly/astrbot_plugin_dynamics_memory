@@ -334,7 +334,9 @@ class DecayScheduler:
                     "narrative_events_pruned": narrative_pruned,
                 }
             except Exception as exc:
-                logger.warning(f"[衰减调度] conversations.db narrative_events 维护失败: {exc}")
+                logger.warning(
+                    f"[衰减调度] conversations.db narrative_events 维护失败: {exc}"
+                )
 
         # 3. 对 conversations.db / livingmemory_graph_documents.db / evidence_sidecar.sqlite3 持锁 WAL 截断
         for db_name in (

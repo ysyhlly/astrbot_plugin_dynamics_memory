@@ -385,7 +385,9 @@ class SettingsHandler:
                 if callable(invalidate_fn):
                     invalidate_fn()
         processor = getattr(initializer, "memory_processor", None)
-        if processor is not None and isinstance(getattr(processor, "config", None), dict):
+        if processor is not None and isinstance(
+            getattr(processor, "config", None), dict
+        ):
             processor.config["llm_stream_mode"] = config_manager.get(
                 "provider_settings.llm_stream_mode", "auto"
             )

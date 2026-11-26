@@ -18,9 +18,7 @@ class SessionManagerConfig(BaseModel):
     context_window_size: int = Field(default=50, ge=1, le=1000)
     enable_full_group_capture: bool = True
     max_messages_per_session: int = Field(default=1000, ge=100, le=10000)
-    hard_max_messages_per_session: int | None = Field(
-        default=None, ge=100, le=50000
-    )
+    hard_max_messages_per_session: int | None = Field(default=None, ge=100, le=50000)
     cleanup_batch_size: int = Field(default=50, ge=1, le=1000)
 
 
