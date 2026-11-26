@@ -54,7 +54,11 @@ jobs:
 
           bm_text = (root / "core/managers/backup_manager.py").read_text(encoding="utf-8")
           bm_match = re.search(r'^PLUGIN_VERSION\s*=\s*"([^"]+)"', bm_text, re.M)
-          assert bm_match and bm_match.group(1) == str(meta["version"]), "PLUGIN_VERSION drift"
+          if bm_match:
+              assert bm_match.group(1) == str(meta["version"]), "PLUGIN_VERSION drift"
+          else:
+              assert "PLUGIN_VERSION = _read_plugin_version()" in bm_text, "PLUGIN_VERSION missing"
+              assert "metadata.yaml" in bm_text, "backup_manager.py must read version from metadata.yaml"
 
           reqs = [
               line.strip()
