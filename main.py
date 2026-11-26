@@ -41,12 +41,12 @@ from .core.base.config_manager import ConfigManager
 from .core.blocking_policy import BlockingPolicyGate
 from .core.command_handler import CommandHandler
 from .core.event_handler import EventHandler
+from .core.event_handler_modules.memory_recall import should_skip_group_recall_query
 from .core.evidence_projection import MAX_MATERIALS, PURPOSES
 from .core.evidence_view import EvidenceViewService
 from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
-from .core.event_handler_modules.memory_recall import should_skip_group_recall_query
 from .core.memory_scope import (
     adapter_access,
     is_event_excluded_by_series,
