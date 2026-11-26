@@ -1,7 +1,7 @@
 name: astrbot_plugin_dynamics_memory
 display_name: 群间记忆 · Dynamics Memory
 author: ysyhlly, lxfight
-version: 0.2.0-rc.9
+version: 0.2.0
 desc: 群间系列长期记忆与证据库插件：提供完整记忆生命周期、BM25+向量+2D/3D 图谱混合召回、原文证据溯源与来源冲突审查。
 astrbot_version: ">=4.29.4,<5"
 tags: [chat-dynamics, memory, evidence]

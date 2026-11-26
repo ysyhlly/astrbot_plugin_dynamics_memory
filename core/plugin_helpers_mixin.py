@@ -13,6 +13,7 @@ import uuid
 import weakref
 from contextvars import ContextVar
 from types import SimpleNamespace
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent

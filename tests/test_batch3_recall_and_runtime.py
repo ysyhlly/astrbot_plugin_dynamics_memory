@@ -51,7 +51,6 @@ from astrbot_plugin_dynamics_memory.core.retrieval.rrf_fusion import (
     BM25Result as RRFBM25Result,
     FusedResult,
     RRFFusion,
-    VectorResult as RRFVectorResult,
 )
 from astrbot_plugin_dynamics_memory.core.retrieval.vector_retriever import (
     VectorResult,
