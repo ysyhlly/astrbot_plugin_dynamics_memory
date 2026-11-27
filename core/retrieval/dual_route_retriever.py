@@ -604,8 +604,10 @@ class DualRouteRetriever:
             score_breakdown.update(
                 {
                     "document_route_score": round(doc_signal, 4),
+                    "document_route_weight": round(document_weight, 4),
                     "atom_route_score": round(atom_signal, 4),
                     "graph_route_score": round(graph_signal, 4),
+                    "graph_route_weight": round(graph_weight, 4),
                     "pre_fusion_rrf": round(pre_rrf, 6),
                     "routes_hit_count": len(routes_hit),
                     "dual_route_final_score": round(fused_fallback_score, 4),
@@ -783,9 +785,10 @@ class DualRouteRetriever:
                 effective_k = min(k, int(rerank_meta.get("effective_k", k)))
                 if effective_k <= 0:
                     return []
-                if len(reranked) > 1:
+                mmr_fn = getattr(self.document_retriever, "_apply_mmr", None)
+                if len(reranked) > 1 and callable(mmr_fn):
                     final_results = await asyncio.to_thread(
-                        self.document_retriever._apply_mmr, reranked, effective_k
+                        mmr_fn, reranked, effective_k
                     )
                 else:
                     final_results = reranked[:effective_k]
@@ -810,10 +813,9 @@ class DualRouteRetriever:
         merged_candidates.sort(
             key=lambda item: (item.final_score, -item.doc_id), reverse=True
         )
-        if not relevance_only and len(merged_candidates) > 1:
-            final_results = await asyncio.to_thread(
-                self.document_retriever._apply_mmr, merged_candidates, k
-            )
+        mmr_fn = getattr(self.document_retriever, "_apply_mmr", None)
+        if not relevance_only and len(merged_candidates) > 1 and callable(mmr_fn):
+            final_results = await asyncio.to_thread(mmr_fn, merged_candidates, k)
         else:
             final_results = merged_candidates[:k]
         if diagnostics is not None and len(merged_candidates) > k:

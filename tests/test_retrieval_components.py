@@ -1334,8 +1334,13 @@ class _FakeRerankProvider:
 
 
 def _make_rerank_retriever(provider, config=None) -> HybridRetriever:
-    # 这些用例校验的是 rerank 失败/关闭时"保持基础排序"，把基础融合显式固定为 RRF
-    merged = {"rerank_enabled": True, "rerank_candidates": 4, "fusion_mode": "rrf"}
+    # 这些用例校验的是 rerank 排序与降级回退，固定基础融合为 RRF 且关闭阈值过滤
+    merged = {
+        "rerank_enabled": True,
+        "rerank_candidates": 4,
+        "fusion_mode": "rrf",
+        "rerank_min_score": 0.0,
+    }
     merged.update(config or {})
     return HybridRetriever(
         bm25_retriever=cast(BM25Retriever, _RerankDocBM25()),
@@ -1357,7 +1362,7 @@ async def test_hybrid_rerank_overrides_relevance_ordering():
 
     assert len(results) == 2
     assert results[0].doc_id == 4
-    assert results[0].score_breakdown["rerank"] == 1.0
+    assert abs(results[0].score_breakdown["rerank"] - 0.9) < 1e-6
     assert provider.calls and provider.calls[0][0] == "query"
     # rerank_candidates=4 candidates sent from each route
     assert len(provider.calls[0][1]) == 4
@@ -1590,21 +1595,23 @@ def _dual_route(
 
 @pytest.mark.asyncio
 async def test_dual_route_keeps_graph_only_result_in_top_k():
+    # Recall-v2 removed forced graph presence floor: low-scoring graph-only hits
+    # must not displace higher-scoring document hits, while graph hits that fit
+    # within top-k (or outscore doc hits) are preserved without forced injection.
     retriever = _dual_route(_doc_route_results(5), _graph_route_results([99]))
     diagnostics: dict[str, Any] = {}
 
     results = await retriever.search("query", k=5, diagnostics=diagnostics)
 
     doc_ids = [result.doc_id for result in results]
-    assert len(doc_ids) == 5
-    assert doc_ids.count(99) == 1, "graph-exclusive result must survive fusion"
-    assert doc_ids[:4] == [1, 2, 3, 4], "fused head order must stay stable"
-    assert doc_ids[4] == 99
-    assert diagnostics["graph_presence_injected"] == 1
+    assert doc_ids == [1, 2, 3, 4, 5]
+    assert "graph_presence_injected" not in diagnostics
 
 
 @pytest.mark.asyncio
 async def test_dual_route_quota_scales_with_k():
+    # Without a forced graph quota floor, top-k strictly follows fused scores
+    # with no duplicate IDs and no forced displacement of document hits.
     retriever = _dual_route(
         _doc_route_results(10), _graph_route_results([101, 102, 103])
     )
@@ -1612,9 +1619,7 @@ async def test_dual_route_quota_scales_with_k():
     results = await retriever.search("query", k=10)
 
     doc_ids = [result.doc_id for result in results]
-    assert len(doc_ids) == 10
-    assert doc_ids[:8] == [index + 1 for index in range(8)]
-    assert doc_ids[8:] == [101, 102], "max(1, k // 5) == 2 graph slots"
+    assert doc_ids == [index + 1 for index in range(10)]
     assert len(set(doc_ids)) == len(doc_ids)
 
 

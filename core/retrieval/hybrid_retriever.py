@@ -168,6 +168,12 @@ class HybridRetriever:
     5. 确保两个索引中doc_id的一致性
     """
 
+    rerank_excerpt_max_chars: int = 350
+    rerank_min_score: float = 0.60
+    rerank_high_confidence_score: float = 0.85
+    rerank_medium_confidence_cap: int = 3
+    rerank_timeout_seconds: float = 1.2
+
     def __init__(
         self,
         bm25_retriever: BM25Retriever,
@@ -872,13 +878,15 @@ class HybridRetriever:
         compact=False,
     ) -> list[FusedResult]:
         """Backwards-compatible wrapper delegating to calibrated ``score_rerank_candidates``."""
+        if len(fused_results) <= 1 or k <= 0:
+            return fused_results[: max(0, k)]
         ranked, _ = await self.score_rerank_candidates(
             query,
             fused_results,
             k,
             timings=timings,
             compact=compact,
-            apply_threshold=True,
+            apply_threshold=False,
         )
         return ranked
 
