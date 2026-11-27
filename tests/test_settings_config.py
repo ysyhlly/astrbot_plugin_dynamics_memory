@@ -265,7 +265,10 @@ async def test_nullable_hard_max_messages_per_session_accepts_none_and_blank():
     assert field["value"] is None
 
     updated = manager.apply_updates(
-        {"session_manager.hard_max_messages_per_session": None, "recall_engine.top_k": 6}
+        {
+            "session_manager.hard_max_messages_per_session": None,
+            "recall_engine.top_k": 6,
+        }
     )
     assert updated["session_manager"]["hard_max_messages_per_session"] is None
     assert updated["recall_engine"]["top_k"] == 6

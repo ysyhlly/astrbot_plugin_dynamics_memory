@@ -131,6 +131,61 @@ async def call_embedding_with_telemetry(provider, text: str, *, context=None):
     return value
 
 
+async def call_embeddings_batch_with_telemetry(
+    provider, texts: list[str], *, context=None
+) -> list[list[float]]:
+    """Invoke ``provider.get_embeddings(texts)`` in one batch call with telemetry.
+
+    Falls back to concurrent single ``get_embedding`` calls when a provider
+    test double only implements the single-text API.
+    """
+    if not texts:
+        return []
+    started = time.monotonic()
+    get_batch = getattr(provider, "get_embeddings", None)
+    try:
+        if callable(get_batch):
+            values = await get_batch(list(texts))
+        else:
+            values = list(
+                await asyncio.gather(*(provider.get_embedding(t) for t in texts))
+            )
+    except BaseException as exc:
+        report_embedding_usage(
+            provider,
+            elapsed_seconds=time.monotonic() - started,
+            ok=False,
+            error_type=type(exc).__name__,
+            context=context,
+        )
+        raise
+    report_embedding_usage(
+        provider,
+        elapsed_seconds=time.monotonic() - started,
+        ok=True,
+        context=context,
+    )
+    return list(values)
+
+
+async def get_cached_embedding(provider, query: str) -> list[float]:
+    """Retrieve a query embedding using the request-scoped QueryEmbeddingCache."""
+    normalized = str(query or "")[:2000]
+    cache = query_embeddings.get()
+    if cache is None:
+        return await call_embedding_with_telemetry(provider, normalized)
+    key = (id(provider), normalized)
+    if key not in cache:
+        if isinstance(cache, QueryEmbeddingCache):
+            cache[key] = cache.start(provider, normalized)
+        else:
+            cache[key] = asyncio.create_task(
+                call_embedding_with_telemetry(provider, normalized)
+            )
+            cache[key].add_done_callback(_observe_embedding)
+    return await asyncio.shield(cache[key])
+
+
 async def retrieve_documents(
     db, metadata_filters, ids=None, limit=100, offset=0, *, ids_only=False
 ):
@@ -365,6 +420,72 @@ class QueryEmbeddingCache(dict):
                 raise RuntimeError("query_embedding_pool_" + handle["state"])
             return task
         task = asyncio.create_task(embed())
+        task.add_done_callback(_observe_embedding)
+        return task
+
+    async def get_embeddings_batch(
+        self, provider, queries: list[str]
+    ) -> list[list[float]]:
+        """Batch-embed missing queries in one API call and populate this cache.
+
+        All subsequent single-query lookups (document, atom, graph routes) for
+        any query in ``queries`` reuse the cached vector without extra API calls.
+        """
+        normalized = [str(q or "")[:2000] for q in queries]
+        if not normalized:
+            return []
+
+        missing: list[str] = []
+        seen_missing: set[str] = set()
+        for q in normalized:
+            key = (id(provider), q)
+            if key not in self and q not in seen_missing:
+                seen_missing.add(q)
+                missing.append(q)
+
+        if missing:
+            if len(missing) == 1:
+                only = missing[0]
+                self[(id(provider), only)] = self.start(provider, only)
+            else:
+                batch_task = self._start_batch(provider, missing)
+                for idx, q in enumerate(missing):
+
+                    async def _extract(task=batch_task, pos=idx):
+                        batch_values = await asyncio.shield(task)
+                        if pos >= len(batch_values):
+                            raise ValueError(
+                                f"Batch embedding size mismatch: expected > {pos}, got {len(batch_values)}"
+                            )
+                        return batch_values[pos]
+
+                    item_task = asyncio.create_task(_extract())
+                    item_task.add_done_callback(_observe_embedding)
+                    self[(id(provider), q)] = item_task
+
+        return [await asyncio.shield(self[(id(provider), q)]) for q in normalized]
+
+    def _start_batch(self, provider, queries: list[str]):
+        async def embed_batch():
+            loop = asyncio.get_running_loop()
+            if loop.time() >= self.deadline:
+                raise TimeoutError("query_embedding_deadline")
+            async with asyncio.timeout_at(self.deadline):
+                values = await call_embeddings_batch_with_telemetry(provider, queries)
+            if loop.time() >= self.deadline:
+                raise TimeoutError("query_embedding_deadline")
+            return values
+
+        if self.owner is not None:
+            joined = "\n".join(queries)
+            batch_hash = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+            key = f"query-embedding-batch:{id(self)}:{id(provider)}:{batch_hash}"
+            handle = self.owner.submit(key, embed_batch, cache_result=False)
+            task = handle.get("task")
+            if task is None:
+                raise RuntimeError("query_embedding_pool_" + handle["state"])
+            return task
+        task = asyncio.create_task(embed_batch())
         task.add_done_callback(_observe_embedding)
         return task
 

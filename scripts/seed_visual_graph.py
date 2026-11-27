@@ -64,14 +64,13 @@ async def seed_visual_graph(
     """
     root = Path(__file__).resolve().parents[1]
     sys.path[:0] = [str(root.parent), str(root.parents[2])]
+    from astrbot.core.db.vec_db.faiss_impl.document_storage import DocumentStorage
     from astrbot_plugin_dynamics_memory.core.models.graph_models import (
         GraphEdge,
         GraphEntry,
         GraphNode,
     )
     from astrbot_plugin_dynamics_memory.storage.graph_store import GraphStore
-
-    from astrbot.core.db.vec_db.faiss_impl.document_storage import DocumentStorage
 
     path = (data_dir / "livingmemory.db").resolve(strict=True)
     if not 1 <= communities <= len(DOMAINS) or min(nodes, edges, memories) <= 0:

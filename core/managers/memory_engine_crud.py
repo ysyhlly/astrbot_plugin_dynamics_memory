@@ -261,6 +261,10 @@ class MemoryEngineCrudMixin:
                 prepared_atoms.append(atom)
             try:
                 await self.atom_store.insert_many(prepared_atoms)
+                if self.index_writer is not None and hasattr(
+                    self.index_writer, "sync_atoms_added"
+                ):
+                    await self.index_writer.sync_atoms_added(prepared_atoms)
                 await self._advance_write_op(
                     op_id,
                     "atoms_indexed",
@@ -540,6 +544,10 @@ class MemoryEngineCrudMixin:
             atom.parent_memory_id = doc_id
             prepared_atoms.append(atom)
         await self.atom_store.insert_many(prepared_atoms)
+        if self.index_writer is not None and hasattr(
+            self.index_writer, "sync_atoms_added"
+        ):
+            await self.index_writer.sync_atoms_added(prepared_atoms)
 
     async def _index_memory_graph(
         self,
@@ -1537,6 +1545,10 @@ class MemoryEngineCrudMixin:
             atom.persona_id = atom.persona_id or persona_id
             try:
                 await self.atom_store.insert(atom)
+                if self.index_writer is not None and hasattr(
+                    self.index_writer, "sync_atoms_added"
+                ):
+                    await self.index_writer.sync_atoms_added([atom])
                 existing_contents.add(content)
             except asyncio.CancelledError:
                 raise
@@ -1629,13 +1641,14 @@ class MemoryEngineCrudMixin:
             * int(getattr(document, "candidate_multiplier", 3)),
             graph_ceiling=outer_k * 2,
         )
+        route_diag = diagnostics if isinstance(diagnostics, dict) else {}
         options = {
             "execution_context": retrieval_context,
-            "diagnostics": diagnostics,
+            "diagnostics": route_diag,
             "narrative_plan": plan,
         }
         results = await retriever.search(query, outer_k, origin, None, **options)
-        if not results:
+        if not results and not route_diag.get("rerank_rejected_all"):
             # An optional expansion/fusion failure must not erase a previously
             # validated batch. These are hints; the checks below run again.
             results = list(

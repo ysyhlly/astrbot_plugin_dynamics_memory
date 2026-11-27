@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from .graph_store_read import GraphStoreReadMixin
@@ -18,23 +17,52 @@ from .schema import GRAPH_SCHEMA_STATEMENTS
 from .sqlite_connection import open_connection
 from .sqlite_write import write_transaction
 
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+
+def _resolve_read_pool_size(context: Any = None) -> int:
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if isinstance(limits, dict) and limits.get("memory_read_pool_size"):
+                    return max(1, int(limits["memory_read_pool_size"]))
+            except Exception:
+                pass
+    return 2
+
 
 class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
     """Persist graph nodes, edges, and searchable entries."""
 
     _SQLITE_BATCH_SIZE = 500
     _NODE_TOKEN_QUERY_BATCH_SIZE = 200
-    _READ_POOL_SIZE = 4
+    _READ_POOL_SIZE = 2
 
     # initialize() 中赋值：trigram tokenizer 不可用时保持 False，供节点检索选择回退路径
     _node_fts_available: bool
 
-    def __init__(self, db_path: str, *, cache_reads: bool = False):
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        cache_reads: bool = False,
+        context: Any = None,
+    ):
         self.db_path = db_path
-        # 召回链路只读查询使用小型连接池并发执行 WAL 读（最多 4 条），既避免每次
-        # open/PRAGMA 开销，也不再把 5-7 个图查询串行锁在同一把 _read_lock 上。
+        self._context = context
+        # 召回链路只读查询使用受控小型连接池并发执行 WAL 读（按资源档位 2/2/1 条），
+        # 既避免每次 open/PRAGMA 开销，也控制 2GB 环境下的连接与缓存占用。
         # 写路径仍按操作单独连接以隔离事务。
         self._cache_reads = cache_reads
+        self._READ_POOL_SIZE = _resolve_read_pool_size(context)
         self._read_pool: list[aiosqlite.Connection] = []
         self._read_semaphore: asyncio.Semaphore | None = None
         self._read_pool_closed: bool = False
@@ -173,7 +201,9 @@ class GraphStore(GraphStoreWriteMixin, GraphStoreReadMixin):
             conn = (
                 self._read_pool.pop()
                 if from_pool
-                else await open_connection(self.db_path)
+                else await open_connection(
+                    self.db_path, readonly=True, context=self._context
+                )
             )
             self._read_conn = conn
             broken = False

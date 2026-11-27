@@ -223,6 +223,66 @@
       "narrative_total_timeout_seconds": {
         "description": "叙事召回总预算",
         "hint": "包含检索与最终校验，最高 7 秒；应小于调用方等待时间。"
+      },
+      "rerank_excerpt_max_chars": {
+        "description": "リランク入力文字数上限",
+        "hint": "リランカーへ送る候補ごとの最大文字数（ヒットしたアトムや否定・訂正表現を優先、120～2400）。"
+      },
+      "rerank_post_fusion": {
+        "description": "三経路統合後の統一リランクを有効化",
+        "hint": "文書・アトム・グラフ経路を統合し親記憶で重複排除した後に統一リランクを実行します。"
+      },
+      "rerank_min_score": {
+        "description": "リランク拒否しきい値",
+        "hint": "校正済み関連度確率がこの値未満の候補を除外します（0～1、0で無効）。"
+      },
+      "rerank_high_confidence_score": {
+        "description": "リランク高信頼しきい値",
+        "hint": "この値以上の記憶は top_k まで注入可能で、中信頼帯は上限数で制御されます（0～1）。"
+      },
+      "rerank_medium_confidence_cap": {
+        "description": "中信頼記憶の注入上限数",
+        "hint": "高信頼記憶が不足している場合に中信頼帯から注入できる最大件数（1～20）。"
+      },
+      "rerank_timeout_seconds": {
+        "description": "リランク単回タイムアウト（秒）",
+        "hint": "リランク呼び出しの最大待機時間。超過時はローカル統合スコアにフォールバック（0.1～30）。"
+      },
+      "query_rewrite_enabled": {
+        "description": "条件付き高速モデルクエリ書換えを有効化",
+        "hint": "短文・指示語・引用・相対時間表現の受動検索時のみ高速モデルでクエリを書き換えます。"
+      },
+      "query_rewrite_provider_id": {
+        "description": "クエリ書換え用高速モデル Provider ID",
+        "hint": "受動リコールのクエリ書換えに使う高速モデル ID。空欄時はバックグラウンドモデルを流用します。"
+      },
+      "query_rewrite_timeout_seconds": {
+        "description": "クエリ書換えハードタイムアウト（秒）",
+        "hint": "書換えの最大待機時間。超過時は並列実行済みの元クエリ結果を即座に使用します（0.1～10）。"
+      },
+      "atom_vector_enabled": {
+        "description": "有効アトムのベクトル検索を有効化",
+        "hint": "専用 FAISS インデックス (livingmemory_atoms.index) で有効な memory_atoms をハイブリッド検索します。"
+      },
+      "atom_route_weight": {
+        "description": "アトム経路の統合重み",
+        "hint": "リランク降格時の三経路統合におけるアトム経路の重み（0～1）。"
+      },
+      "affinity_session_bonus": {
+        "description": "同一セッション親和ボーナス",
+        "hint": "しきい値通過後に現在セッション一致へ与える微小な順位加点（0～0.5）。"
+      },
+      "affinity_speaker_bonus": {
+        "description": "同一話者親和ボーナス",
+        "hint": "しきい値通過後に現在話者一致へ与える微小な順位加点（0～0.5）。"
+      },
+      "affinity_multi_route_bonus": {
+        "description": "複数経路一致ボーナス",
+        "hint": "しきい値通過後に複数検索経路で同時ヒットした候補への微小な順位加点（0～0.5）。"
+      },
+      "temporal_recent_bonus": {
+        "description": "直近時間意図ブースト上限",
+        "hint": "直近の時間表現を検出した際のみ適用する exp(-0.08*days_old) 加点の上限（0～0.5）。"
       }
     },
     "importance_decay": {

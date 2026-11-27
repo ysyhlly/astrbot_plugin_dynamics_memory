@@ -144,9 +144,18 @@ class MemoryEngineAgenticMixin:
                     query, pool, session_id, persona_id, diagnostics
                 )
                 saturated = len(results) >= pool
-                results = await self._attach_agentic_atoms(
-                    results, query, pool, session_id, persona_id, diagnostics
+                atom_already_handled = (
+                    self.dual_route_retriever is not None
+                    and getattr(self.dual_route_retriever, "atom_retriever", None)
+                    is not None
                 )
+                if (
+                    not diagnostics.get("rerank_rejected_all")
+                    and not atom_already_handled
+                ):
+                    results = await self._attach_agentic_atoms(
+                        results, query, pool, session_id, persona_id, diagnostics
+                    )
                 saturated = saturated or bool(diagnostics.get("candidate_limited"))
                 # 图索引可能落后于父文档，合并后的实际记忆仍须满足本次访问范围。
                 results = [

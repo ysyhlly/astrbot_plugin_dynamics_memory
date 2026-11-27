@@ -748,6 +748,33 @@ class PluginInitializer(InitializerFaissMixin):
             "fallback_enabled": get("recall_engine.fallback_to_vector", True),
             "rerank_enabled": get("recall_engine.rerank_enabled", False),
             "rerank_candidates": get("recall_engine.rerank_candidates", 20),
+            "rerank_excerpt_max_chars": get(
+                "recall_engine.rerank_excerpt_max_chars", 350
+            ),
+            "rerank_post_fusion": get("recall_engine.rerank_post_fusion", True),
+            "rerank_min_score": get("recall_engine.rerank_min_score", 0.60),
+            "rerank_high_confidence_score": get(
+                "recall_engine.rerank_high_confidence_score", 0.85
+            ),
+            "rerank_medium_confidence_cap": get(
+                "recall_engine.rerank_medium_confidence_cap", 3
+            ),
+            "rerank_timeout_seconds": get("recall_engine.rerank_timeout_seconds", 1.2),
+            "query_rewrite_enabled": get("recall_engine.query_rewrite_enabled", True),
+            "query_rewrite_provider_id": get(
+                "recall_engine.query_rewrite_provider_id", ""
+            ),
+            "query_rewrite_timeout_seconds": get(
+                "recall_engine.query_rewrite_timeout_seconds", 0.55
+            ),
+            "atom_vector_enabled": get("recall_engine.atom_vector_enabled", True),
+            "atom_route_weight": get("recall_engine.atom_route_weight", 0.35),
+            "affinity_session_bonus": get("recall_engine.affinity_session_bonus", 0.04),
+            "affinity_speaker_bonus": get("recall_engine.affinity_speaker_bonus", 0.03),
+            "affinity_multi_route_bonus": get(
+                "recall_engine.affinity_multi_route_bonus", 0.03
+            ),
+            "temporal_recent_bonus": get("recall_engine.temporal_recent_bonus", 0.10),
             "fusion_mode": get("recall_engine.fusion_mode", "score"),
             "fusion_bm25_weight": get("recall_engine.fusion_bm25_weight", 0.5),
             "recall_candidate_multiplier": get(
@@ -953,9 +980,32 @@ class PluginInitializer(InitializerFaissMixin):
             logger.error(f"数据库迁移检查失败: {e}", exc_info=True)
 
     async def _restore_db_backup(self, backup_path: str) -> bool:
-        """用迁移前备份覆盖当前数据库（SQLite backup API，兼容已打开的连接）。"""
+        """用迁移前备份覆盖当前数据库（SQLite backup API，兼容 .db 与 .db.gz 备份）。"""
+        import gzip
+        import os
+        import shutil
+        import tempfile
+
+        temp_plain_path: str | None = None
         try:
-            source = await open_connection(backup_path)
+            source_path = backup_path
+            if str(backup_path).endswith(".gz"):
+                fd, temp_plain_path = tempfile.mkstemp(
+                    prefix="lm_restore_", suffix=".db"
+                )
+                os.close(fd)
+
+                def _gunzip_to_temp() -> None:
+                    with (
+                        gzip.open(backup_path, "rb") as gz_in,
+                        open(temp_plain_path, "wb") as raw_out,
+                    ):
+                        shutil.copyfileobj(gz_in, raw_out)
+
+                await asyncio.to_thread(_gunzip_to_temp)
+                source_path = temp_plain_path
+
+            source = await open_connection(source_path)
             try:
                 dest = await open_connection(self.db_migration.db_path)
                 try:
@@ -969,6 +1019,12 @@ class PluginInitializer(InitializerFaissMixin):
         except Exception as e:
             logger.error(f"从迁移前备份恢复数据库失败: {e}", exc_info=True)
             return False
+        finally:
+            if temp_plain_path:
+                try:
+                    os.unlink(temp_plain_path)
+                except OSError:
+                    pass
 
     async def _auto_rebuild_index_if_needed(self):
         """Schedule index checking without blocking core plugin readiness."""

@@ -15,6 +15,7 @@ import re
 import tempfile
 import time
 from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from typing import Any
 import aiosqlite
 from astrbot.api import logger
 
+from ..storage.sqlite_connection import open_connection as _open_sqlite_connection
 from .memory_scope import (
     is_event_excluded_by_series,
     is_event_memory_allowed,
@@ -184,13 +186,25 @@ class CorrectionQueueStore:
         self.db_path = str(db_path)
         self._initialized = False
 
+    @asynccontextmanager
+    async def _open_db(
+        self, *, apply_journal_mode: bool = False, readonly: bool = False
+    ):
+        db = await _open_sqlite_connection(
+            self.db_path,
+            apply_journal_mode=apply_journal_mode,
+            readonly=readonly,
+        )
+        try:
+            yield db
+        finally:
+            await db.close()
+
     async def initialize(self) -> None:
         if self._initialized:
             return
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA busy_timeout = 5000")
+        async with self._open_db(apply_journal_mode=True) as db:
             for stmt in _CORRECTION_SCHEMA:
                 await db.execute(stmt)
             await db.commit()
@@ -235,7 +249,7 @@ class CorrectionQueueStore:
         if not clean_reason:
             raise ValueError("纠错说明不能为空")
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -270,7 +284,7 @@ class CorrectionQueueStore:
         await self.initialize()
         limit = max(1, min(int(limit), 200))
         norm_status = str(status or "all").strip().lower()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             db.row_factory = aiosqlite.Row
             cur_pending = await db.execute(
                 "SELECT COUNT(*) AS cnt FROM memory_correction_proposals WHERE status = 'pending'"
@@ -315,7 +329,7 @@ class CorrectionQueueStore:
 
     async def get_proposal(self, proposal_id: int) -> dict[str, Any] | None:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT * FROM memory_correction_proposals WHERE id = ?",
@@ -340,7 +354,7 @@ class CorrectionQueueStore:
         next_status = "approved" if norm_decision == "approve" else "rejected"
         now = time.time()
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT * FROM memory_correction_proposals WHERE id = ?",

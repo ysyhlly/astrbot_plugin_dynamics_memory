@@ -279,13 +279,158 @@
       },
       "rerank_candidates": {
         "description": "重排序候选数量",
-        "hint": "送入 Rerank 模型的融合候选记忆条数，重排序后仅保留 top_k 条。值越大排序越准，但每次召回的 Rerank API 调用成本越高，建议 10-30。（允许范围：2–100）",
+        "hint": "送入 Rerank 模型的融合候选记忆条数，重排序后按绝对概率阈值门控并保留 top_k 条。经 Stage 0 评测锁定的帕累托最优值为 20。（允许范围：2–100）",
         "type": "int",
         "default": 20,
         "slider": {
           "min": 2,
           "max": 100,
           "step": 1
+        }
+      },
+      "rerank_excerpt_max_chars": {
+        "description": "精排输入文本上限（字符）",
+        "hint": "送入 Rerank 模型的单条候选最大字符数（优先保留命中原子与否定/更正限定词）。默认 350 匹配 RTX 3060 BGE-M3 帕累托最优延迟。（允许范围：120–2400）",
+        "type": "int",
+        "default": 350,
+        "slider": {
+          "min": 120,
+          "max": 2400,
+          "step": 10
+        }
+      },
+      "rerank_post_fusion": {
+        "description": "启用三路融合后统一精排",
+        "hint": "开启后文档路/原子路/图谱路并发召回并按父记忆去重后，执行一次统一交叉编码器精排；关闭则回退为文档路内部精排。",
+        "type": "bool",
+        "default": true
+      },
+      "rerank_min_score": {
+        "description": "精排绝对拒召阈值",
+        "hint": "校准后的绝对相关性概率低于该值将被直接拒召；全部低于阈值时本轮返回空列表（宁缺毋滥）。BGE-M3 标定最优值 0.60，设为 0 表示不拒召。（允许范围：0–1）",
+        "type": "float",
+        "default": 0.6,
+        "slider": {
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.01
+        }
+      },
+      "rerank_high_confidence_score": {
+        "description": "精排高置信阈值",
+        "hint": "高于该阈值的强相关记忆可注入至 top_k 上限；位于 [rerank_min_score, rerank_high_confidence_score) 的中置信记忆受中置信条数上限约束。BGE-M3 标定值 0.85。（允许范围：0–1）",
+        "type": "float",
+        "default": 0.85,
+        "slider": {
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.01
+        }
+      },
+      "rerank_medium_confidence_cap": {
+        "description": "中置信注入条数上限",
+        "hint": "当高置信记忆不足时，中置信区间最多允许注入的记忆条数。（允许范围：1–20）",
+        "type": "int",
+        "default": 3,
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        }
+      },
+      "rerank_timeout_seconds": {
+        "description": "精排单次超时（秒）",
+        "hint": "调用 Rerank 服务的最大等待时间，超时自动降级为本地融合分。（允许范围：0.1–30）",
+        "type": "float",
+        "default": 1.2,
+        "slider": {
+          "min": 0.1,
+          "max": 30.0,
+          "step": 0.1
+        }
+      },
+      "query_rewrite_enabled": {
+        "description": "启用条件触发快模型查询改写",
+        "hint": "仅在短句（含上下文）、代词指代、引用回复或相对时间表达时触发快模型改写，并与原始查询并行兜底；LLM 主动工具检索不触发改写。",
+        "type": "bool",
+        "default": true
+      },
+      "query_rewrite_provider_id": {
+        "description": "查询改写快模型 Provider ID",
+        "hint": "用于被动召回查询改写的高速模型 ID（如 cmdcode/deepseek/deepseek-v4.1-flash）。留空时优先复用后台任务模型。",
+        "type": "string",
+        "default": ""
+      },
+      "query_rewrite_timeout_seconds": {
+        "description": "查询改写硬超时（秒）",
+        "hint": "改写协程的最大等待时间（默认 0.55 秒），超时立即使用已并发预跑的原始查询结果，零尾延迟拖累。（允许范围：0.1–10）",
+        "type": "float",
+        "default": 0.55,
+        "slider": {
+          "min": 0.1,
+          "max": 10.0,
+          "step": 0.05
+        }
+      },
+      "atom_vector_enabled": {
+        "description": "启用活跃原子向量检索",
+        "hint": "开启后使用独立 FAISS IndexIDMap (livingmemory_atoms.index) 对活跃 memory_atoms 进行向量+FTS5 混合检索并按父记忆聚合。",
+        "type": "bool",
+        "default": true
+      },
+      "atom_route_weight": {
+        "description": "原子路融合权重",
+        "hint": "精排降级时原子路分数在三路融合中的权重。（允许范围：0–1）",
+        "type": "float",
+        "default": 0.35,
+        "slider": {
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.01
+        }
+      },
+      "affinity_session_bonus": {
+        "description": "同会话亲和微加权",
+        "hint": "精排通过绝对阈值后，命中当前会话的微弱排位加成，不改变拒召判定。（允许范围：0–0.5）",
+        "type": "float",
+        "default": 0.04,
+        "slider": {
+          "min": 0.0,
+          "max": 0.5,
+          "step": 0.01
+        }
+      },
+      "affinity_speaker_bonus": {
+        "description": "同发言人亲和微加权",
+        "hint": "精排通过绝对阈值后，命中当前发言人的微弱排位加成，不改变拒召判定。（允许范围：0–0.5）",
+        "type": "float",
+        "default": 0.03,
+        "slider": {
+          "min": 0.0,
+          "max": 0.5,
+          "step": 0.01
+        }
+      },
+      "affinity_multi_route_bonus": {
+        "description": "多路共识微加权",
+        "hint": "精排通过绝对阈值后，同时被多条检索路命中的微弱排位加成。（允许范围：0–0.5）",
+        "type": "float",
+        "default": 0.03,
+        "slider": {
+          "min": 0.0,
+          "max": 0.5,
+          "step": 0.01
+        }
+      },
+      "temporal_recent_bonus": {
+        "description": "近期时间意图提权上限",
+        "hint": "仅当识别到近期时间意图（昨天/上次/最近/刚才等）时给予 exp(-0.08*days_old) 近期加成；长期事实与偏好为零惩罚。（允许范围：0–0.5）",
+        "type": "float",
+        "default": 0.1,
+        "slider": {
+          "min": 0.0,
+          "max": 0.5,
+          "step": 0.01
         }
       },
       "fusion_mode": {

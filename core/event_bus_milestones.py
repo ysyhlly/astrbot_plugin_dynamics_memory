@@ -14,6 +14,7 @@ import inspect
 import json
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from .. import series_panels
+from ..storage.sqlite_connection import open_connection as _open_sqlite_connection
 from .memory_scope import is_member_privacy_muted
 
 PLUGIN_ID = "astrbot_plugin_dynamics_memory"
@@ -93,13 +95,25 @@ class MilestoneStore:
         self.db_path = str(db_path)
         self._initialized = False
 
+    @asynccontextmanager
+    async def _open_db(
+        self, *, apply_journal_mode: bool = False, readonly: bool = False
+    ):
+        db = await _open_sqlite_connection(
+            self.db_path,
+            apply_journal_mode=apply_journal_mode,
+            readonly=readonly,
+        )
+        try:
+            yield db
+        finally:
+            await db.close()
+
     async def initialize(self) -> None:
         if self._initialized:
             return
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA journal_mode = WAL")
-            await db.execute("PRAGMA busy_timeout = 5000")
+        async with self._open_db(apply_journal_mode=True) as db:
             for stmt in _MILESTONE_SCHEMA:
                 await db.execute(stmt)
             await db.commit()
@@ -132,7 +146,7 @@ class MilestoneStore:
 
     async def has_archived_topic(self, dedup_key: str) -> bool:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             cur = await db.execute(
                 "SELECT 1 FROM archived_topic_dedup WHERE dedup_key = ?",
                 (dedup_key,),
@@ -143,7 +157,7 @@ class MilestoneStore:
         self, dedup_key: str, umo: str, topic_id: str, memory_id: int | None
     ) -> None:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             await db.execute(
                 """
                 INSERT OR IGNORE INTO archived_topic_dedup
@@ -156,14 +170,14 @@ class MilestoneStore:
 
     async def count_archived_topics(self) -> int:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             cur = await db.execute("SELECT COUNT(*) FROM archived_topic_dedup")
             row = await cur.fetchone()
             return int(row[0]) if row else 0
 
     async def count_milestones_for_day(self, umo: str, day_key: str) -> int:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             cur = await db.execute(
                 "SELECT COUNT(*) FROM memory_milestones WHERE umo = ? AND day_key = ?",
                 (umo, day_key),
@@ -173,7 +187,7 @@ class MilestoneStore:
 
     async def get_milestone_for_memory(self, memory_id: int) -> dict[str, Any] | None:
         await self.initialize()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT * FROM memory_milestones WHERE memory_id = ? ORDER BY id DESC LIMIT 1",
@@ -200,7 +214,7 @@ class MilestoneStore:
     ) -> dict[str, Any]:
         await self.initialize()
         now = time.time()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
@@ -238,7 +252,7 @@ class MilestoneStore:
     ) -> dict[str, Any]:
         await self.initialize()
         limit = max(1, min(int(limit), 100))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._open_db(readonly=True) as db:
             db.row_factory = aiosqlite.Row
             if umo:
                 cur_t = await db.execute(

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
@@ -1068,6 +1067,10 @@ class MemoryEngineBatchMixin:
                 atom.parent_memory_id = memory_id
             if atoms and self.atom_store is not None:
                 await self.atom_store.insert_many(atoms)
+                if self.index_writer is not None and hasattr(
+                    self.index_writer, "sync_atoms_added"
+                ):
+                    await self.index_writer.sync_atoms_added(atoms)
             if self.graph_memory_manager is not None:
                 indexed = await self.graph_memory_manager.index_memory(
                     memory_id, content, metadata, atoms

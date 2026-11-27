@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from .schema import (
@@ -655,7 +654,7 @@ class DBMigration:
         try:
             with (
                 src.open("rb") as f_in,
-                gzip.open(dst_tmp, "wb", compresslevel=6) as f_out,
+                gzip.open(dst_tmp, "wb", compresslevel=3) as f_out,
             ):
                 shutil.copyfileobj(f_in, f_out, length=1024 * 1024)
             os.replace(dst_tmp, dst_final)
@@ -687,7 +686,7 @@ class DBMigration:
             # 使用SQLite在线备份API写到临时staging文件，避免留下半成品或未压缩巨文件
             async with self._open_db(self.db_path) as source:
                 async with self._open_db(str(staged_path)) as dest:
-                    await source.backup(dest)
+                    await source.backup(dest, pages=256, sleep=0.05)
 
             if compress:
                 gz_tmp = backup_dir / f".tmp_{base_name}.gz"

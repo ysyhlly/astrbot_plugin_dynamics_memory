@@ -133,14 +133,18 @@ async def test_open_connection_applies_journal_mode_when_requested(
 
 @pytest.mark.asyncio
 async def test_open_connection_sets_wal_safe_pragmas(tmp_path):
-    """WAL 下使用 NORMAL 同步级别并启用内存临时表。"""
+    """WAL 下使用 NORMAL 同步级别、FILE 临时表与受控页缓存/零 mmap。"""
     sqlite_connection._journal_mode = sqlite_connection.JOURNAL_MODE_WAL
     connection = await sqlite_connection.open_connection(str(tmp_path / "pragmas.db"))
     try:
         cursor = await connection.execute("PRAGMA synchronous")
         assert (await cursor.fetchone())[0] == 1  # NORMAL
         cursor = await connection.execute("PRAGMA temp_store")
-        assert (await cursor.fetchone())[0] == 2  # MEMORY
+        assert (await cursor.fetchone())[0] == 1  # FILE
+        cursor = await connection.execute("PRAGMA mmap_size")
+        assert (await cursor.fetchone())[0] == 0
+        cursor = await connection.execute("PRAGMA cache_size")
+        assert (await cursor.fetchone())[0] < 0
     finally:
         await connection.close()
 

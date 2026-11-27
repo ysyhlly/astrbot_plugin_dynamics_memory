@@ -33,10 +33,15 @@ def timestamp(value) -> float:
 def is_managed_event(event) -> bool:
     """Recognize public markers without treating dynamic mock attributes as flags."""
     getter = getattr(event, "get_extra", None)
-    if not callable(getter):
-        return False
-    value = getter("_narrative_managed_v1")
-    return isinstance(value, (dict, bool, str, int)) and bool(value)
+    if callable(getter):
+        value = getter("_narrative_managed_v1")
+        if isinstance(value, (dict, bool, str, int)) and bool(value):
+            return True
+    extras = getattr(event, "_extras", None)
+    if isinstance(extras, dict):
+        value = extras.get("_narrative_managed_v1")
+        return isinstance(value, (dict, bool, str, int)) and bool(value)
+    return False
 
 
 class ScopeEvent:

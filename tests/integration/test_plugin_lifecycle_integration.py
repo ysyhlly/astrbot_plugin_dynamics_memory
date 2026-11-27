@@ -63,6 +63,15 @@ async def _build_plugin(monkeypatch, tmp_path, config: dict | None = None):
 async def test_page_routes_are_registered_while_providers_are_pending(
     monkeypatch, tmp_path
 ):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from astrbot_plugin_dynamics_memory.core import page_api as page_api_mod
+
+    monkeypatch.setattr(
+        page_api_mod, "require_series_admin", AsyncMock(return_value="admin")
+    )
+    monkeypatch.setattr(page_api_mod, "request", SimpleNamespace(args={}))
     plugin = await _build_plugin(monkeypatch, tmp_path)
     try:
         assert plugin.initializer.is_initialized is False
@@ -70,10 +79,7 @@ async def test_page_routes_are_registered_while_providers_are_pending(
             call.args[0]: call.args[1]
             for call in plugin.context.register_web_api.call_args_list
         }
-        from quart import Quart
-
-        async with Quart(__name__).test_request_context("/"):
-            response = await routes["/astrbot_plugin_dynamics_memory/page/stats"]()
+        response = await routes["/astrbot_plugin_dynamics_memory/page/stats"]()
         assert response["status"] == "error"
         assert "插件" in response["message"]
     finally:

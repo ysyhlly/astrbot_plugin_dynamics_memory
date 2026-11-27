@@ -11,12 +11,11 @@ import time
 from dataclasses import field
 from typing import Any
 
-from pydantic.dataclasses import dataclass
-
 from astrbot.api import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from pydantic.dataclasses import dataclass
 
 from ..memory_scope import adapter_access
 from .agentic_recall_common import json_result as _json_result

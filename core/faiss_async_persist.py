@@ -31,10 +31,12 @@ IndexIDMap(IndexFlatL2)，其查询不在索引上留下可变状态）；读锁
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import functools
 import os
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -42,11 +44,87 @@ from astrbot.api import logger
 
 from .utils.faiss_path_bridge import needs_bridge, write_index_safe
 
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
 _PERSISTER_ATTR = "_async_index_persister"
 # 会被变更锁包裹的索引写方法（save_index 单独整体替换）
 _MUTATION_METHODS = ("insert", "insert_batch", "delete")
 # 默认防抖窗口：窗口内的多次索引变更合并为一次落盘
 DEFAULT_DEBOUNCE_SECONDS = 3.0
+_UNSET_DEBOUNCE = object()
+
+# 共享单线程写盘 executor（引用计数 + atexit 兜底），避免 main/graph/atoms 各自常驻独立 OS 线程
+_SHARED_EXECUTOR_LOCK = threading.Lock()
+_SHARED_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_SHARED_EXECUTOR_REFS: int = 0
+
+
+def _acquire_shared_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _SHARED_EXECUTOR, _SHARED_EXECUTOR_REFS
+    with _SHARED_EXECUTOR_LOCK:
+        if _SHARED_EXECUTOR is None:
+            _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="lmem-faiss-flush"
+            )
+        _SHARED_EXECUTOR_REFS += 1
+        return _SHARED_EXECUTOR
+
+
+def _release_shared_executor(
+    executor: concurrent.futures.ThreadPoolExecutor | None,
+) -> concurrent.futures.ThreadPoolExecutor | None:
+    """Decrement refcount and return the executor to shut down only when last user closes."""
+    global _SHARED_EXECUTOR, _SHARED_EXECUTOR_REFS
+    if executor is None:
+        return None
+    with _SHARED_EXECUTOR_LOCK:
+        if _SHARED_EXECUTOR is not executor:
+            return None
+        _SHARED_EXECUTOR_REFS = max(0, _SHARED_EXECUTOR_REFS - 1)
+        if _SHARED_EXECUTOR_REFS == 0:
+            to_shutdown = _SHARED_EXECUTOR
+            _SHARED_EXECUTOR = None
+            return to_shutdown
+        return None
+
+
+def _shutdown_shared_executor_atexit() -> None:
+    global _SHARED_EXECUTOR, _SHARED_EXECUTOR_REFS
+    with _SHARED_EXECUTOR_LOCK:
+        executor = _SHARED_EXECUTOR
+        _SHARED_EXECUTOR = None
+        _SHARED_EXECUTOR_REFS = 0
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False)
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_shared_executor_atexit)
+
+
+def _resolve_default_debounce_seconds(context: Any = None) -> float:
+    """Resolve default FAISS persist debounce window from series resource limits."""
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if (
+                    isinstance(limits, dict)
+                    and limits.get("memory_faiss_debounce_s") is not None
+                ):
+                    return max(0.0, float(limits["memory_faiss_debounce_s"]))
+            except Exception:
+                pass
+    return DEFAULT_DEBOUNCE_SECONDS
 
 
 def _write_index_atomic(index: Any, path: str) -> None:
@@ -148,18 +226,25 @@ class AsyncIndexPersister:
     """把某个 EmbeddingStorage 实例的落盘替换为防抖异步写。"""
 
     def __init__(
-        self, storage: Any, debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS
+        self,
+        storage: Any,
+        debounce_seconds: float | object = _UNSET_DEBOUNCE,
+        *,
+        context: Any = None,
     ) -> None:
         self._storage = storage
-        self._debounce_seconds = max(0.0, float(debounce_seconds))
+        resolved_debounce = (
+            _resolve_default_debounce_seconds(context)
+            if debounce_seconds is _UNSET_DEBOUNCE
+            else float(debounce_seconds)
+        )
+        self._debounce_seconds = max(0.0, resolved_debounce)
         # 读者 = search/落盘；写者 = insert/insert_batch/delete
         self._index_lock = _ReadersWriterLock()
         # 落盘本身串行（避免两次 flush 同时写同一文件）
         self._flush_lock = asyncio.Lock()
-        # 单线程 executor：写盘严格按提交顺序串行
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="lmem-faiss-flush"
-        )
+        # 共享单线程 executor：多索引复用同一写盘线程，严格按提交顺序串行
+        self._executor = _acquire_shared_executor()
         self._debounce_tasks: set[asyncio.Task] = set()
         self._pending_write: asyncio.Future | None = None
         self._dirty = False
@@ -311,11 +396,12 @@ class AsyncIndexPersister:
                 await pending
         except Exception:
             logger.error("[FAISS] 关闭前落盘索引失败", exc_info=True)
-        # 关线程池交给默认线程池执行：极端情况下仍有飞行中的写盘时，
-        # 不在事件循环上同步等待整文件写完
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._executor.shutdown, True
-        )
+        # 仅当最后一个活跃 persister 关闭时释放共享写盘线程，避免中断其他索引写盘
+        to_shutdown = _release_shared_executor(self._executor)
+        if to_shutdown is not None:
+            await asyncio.get_running_loop().run_in_executor(
+                None, to_shutdown.shutdown, True
+            )
 
 
 def get_async_persister(storage: Any) -> AsyncIndexPersister | None:
@@ -326,7 +412,10 @@ def get_async_persister(storage: Any) -> AsyncIndexPersister | None:
 
 
 def install_async_persist(
-    storage: Any, debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS
+    storage: Any,
+    debounce_seconds: float | object = _UNSET_DEBOUNCE,
+    *,
+    context: Any = None,
 ) -> AsyncIndexPersister | None:
     """在实例级替换 storage 的落盘行为为异步防抖写。
 
@@ -338,7 +427,7 @@ def install_async_persist(
     existing = get_async_persister(storage)
     if existing is not None:
         return existing
-    persister = AsyncIndexPersister(storage, debounce_seconds)
+    persister = AsyncIndexPersister(storage, debounce_seconds, context=context)
     # 先给变更方法套锁，再替换 save_index，保证写盘期间索引静止
     persister.wrap_mutation_methods()
     storage.save_index = persister.save_index

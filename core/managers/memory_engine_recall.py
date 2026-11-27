@@ -79,6 +79,14 @@ class MemoryEngineRecallMixin:
         allow_legacy_session_migration: bool = True,
         execution_context=None,
         excluded_session_ids: tuple[str, ...] | None = None,
+        *,
+        sub_queries: tuple[str, ...] | list[str] | None = None,
+        current_session_id: str | None = None,
+        current_sender_id: str | None = None,
+        current_sender_name: str | None = None,
+        temporal_intent: str | None = None,
+        time_hint_days: int | None = None,
+        phase_timings: dict[str, float] | None = None,
     ) -> list[HybridResult]:
         """
         检索相关记忆
@@ -105,6 +113,10 @@ class MemoryEngineRecallMixin:
             source_session_id,
             touch_access,
             excluded_session_ids=excluded_session_ids,
+            sub_queries=tuple(sub_queries) if sub_queries else None,
+            current_session_id=current_session_id,
+            current_sender_id=current_sender_id,
+            temporal_intent=temporal_intent,
         )
         cached_results = (
             self._get_cached_search_results(cache_key) if cache_results else None
@@ -158,18 +170,53 @@ class MemoryEngineRecallMixin:
             if excluded_session_ids
             else {}
         )
+        route_diagnostics: dict[str, Any] = {}
+        atom_handled_in_dual_route = False
         if self.dual_route_retriever is not None:
-            results = await self.dual_route_retriever.search(
-                query,
-                k,
-                session_id,
-                persona_id,
-                interaction_type=interaction_type,
-                source_platform=source_platform,
-                source_session_id=source_session_id,
-                **exclusion_kwargs,
-                **execution_kwargs,
+            atom_handled_in_dual_route = (
+                getattr(self.dual_route_retriever, "atom_retriever", None) is not None
             )
+            v2_kwargs: dict[str, Any] = {"diagnostics": route_diagnostics}
+            if sub_queries:
+                v2_kwargs["sub_queries"] = tuple(sub_queries)
+            if current_session_id is not None:
+                v2_kwargs["current_session_id"] = current_session_id
+            if current_sender_id is not None:
+                v2_kwargs["current_sender_id"] = current_sender_id
+            if current_sender_name is not None:
+                v2_kwargs["current_sender_name"] = current_sender_name
+            if temporal_intent is not None:
+                v2_kwargs["temporal_intent"] = temporal_intent
+            if time_hint_days is not None:
+                v2_kwargs["time_hint_days"] = time_hint_days
+            if phase_timings is not None:
+                v2_kwargs["phase_timings"] = phase_timings
+            try:
+                results = await self.dual_route_retriever.search(
+                    query,
+                    k,
+                    session_id,
+                    persona_id,
+                    interaction_type=interaction_type,
+                    source_platform=source_platform,
+                    source_session_id=source_session_id,
+                    **exclusion_kwargs,
+                    **execution_kwargs,
+                    **v2_kwargs,
+                )
+            except TypeError:
+                # Compatibility with test doubles using the legacy signature
+                results = await self.dual_route_retriever.search(
+                    query,
+                    k,
+                    session_id,
+                    persona_id,
+                    interaction_type=interaction_type,
+                    source_platform=source_platform,
+                    source_session_id=source_session_id,
+                    **exclusion_kwargs,
+                    **execution_kwargs,
+                )
         else:
             if self.hybrid_retriever is None:
                 raise RuntimeError("混合检索器未初始化")
@@ -181,11 +228,18 @@ class MemoryEngineRecallMixin:
                 interaction_type=interaction_type,
                 source_platform=source_platform,
                 source_session_id=source_session_id,
+                diagnostics=route_diagnostics,
                 **exclusion_kwargs,
                 **execution_kwargs,
             )
 
-        if self.atom_retriever is not None:
+        rerank_rejected_all = bool(route_diagnostics.get("rerank_rejected_all"))
+
+        if (
+            self.atom_retriever is not None
+            and not atom_handled_in_dual_route
+            and not rerank_rejected_all
+        ):
             atom_args = (
                 query,
                 k * 2,
@@ -322,7 +376,11 @@ class MemoryEngineRecallMixin:
 
         if budgeted_reply:
             results = filter_scope(results)
-            if len(results) < k and int(self.config.get("recent_memory_count", 0)) > 0:
+            if (
+                not rerank_rejected_all
+                and len(results) < k
+                and int(self.config.get("recent_memory_count", 0)) > 0
+            ):
                 reserve = min(0.1, execution_context.budget.search_remaining() * 0.25)
                 recent_context = execution_context.with_deadline(
                     execution_context.budget.search_deadline - reserve
@@ -337,6 +395,8 @@ class MemoryEngineRecallMixin:
                 if outcome["state"] == "completed":
                     results = outcome["value"]
             results = results[:k]
+        elif rerank_rejected_all:
+            results = []
         else:
             results = await merge_recent(results)
 
@@ -399,14 +459,28 @@ class MemoryEngineRecallMixin:
             document_sha256 = (
                 previous.document_sha256 if previous else text_sha256(result.content)
             )
+            live_atom_ids = {atom_id for atom_id, _ in atom_proof}
+            updated_metadata = {
+                **result.metadata,
+                "retrieved_atom_ids": [atom_id for atom_id, _ in atom_proof],
+            }
+            existing_matched = result.metadata.get("matched_atoms")
+            if isinstance(existing_matched, list):
+                live_matched = [
+                    atom
+                    for atom in existing_matched
+                    if isinstance(atom, dict)
+                    and int(atom.get("atom_id") or 0) in live_atom_ids
+                ]
+                if live_matched:
+                    updated_metadata["matched_atoms"] = live_matched
+                else:
+                    updated_metadata.pop("matched_atoms", None)
             filtered.append(
                 replace(
                     result,
                     content=content,
-                    metadata={
-                        **result.metadata,
-                        "retrieved_atom_ids": [atom_id for atom_id, _ in atom_proof],
-                    },
+                    metadata=updated_metadata,
                     atom_projection=AtomProjectionProof(document_sha256, atom_proof),
                 )
             )
@@ -963,11 +1037,16 @@ class MemoryEngineRecallMixin:
         source_session_id: str | None = None,
         touch_access: bool = True,
         excluded_session_ids: tuple[str, ...] | None = None,
+        sub_queries: tuple[str, ...] | None = None,
+        current_session_id: str | None = None,
+        current_sender_id: str | None = None,
+        temporal_intent: str | None = None,
     ) -> tuple[Any, ...]:
         return (
             self._search_cache_generation,
             adapter_cache_key(),
             self._normalize_cache_query(query),
+            tuple(self._normalize_cache_query(sq) for sq in (sub_queries or ())),
             int(k),
             session_id or "",
             persona_id or "",
@@ -975,6 +1054,9 @@ class MemoryEngineRecallMixin:
             source_platform or "",
             source_session_id or "",
             tuple(excluded_session_ids or ()),
+            current_session_id or "",
+            current_sender_id or "",
+            temporal_intent or "",
             bool(touch_access),
             bool(self.dual_route_retriever is not None),
             round(float(self.config.get("document_route_weight", 0.65)), 4),
@@ -986,7 +1068,11 @@ class MemoryEngineRecallMixin:
             int(self.config.get("recent_memory_max_age_hours", 72)),
             str(self.config.get("memory_type_filter", "all")),
             bool(self.config.get("rerank_enabled", False)),
+            bool(self.config.get("rerank_post_fusion", True)),
             int(self.config.get("rerank_candidates", 20)),
+            int(self.config.get("rerank_excerpt_max_chars", 350)),
+            round(float(self.config.get("rerank_min_score", 0.60)), 4),
+            bool(self.config.get("atom_vector_enabled", True)),
         )
 
     def _filter_by_retrieval_policy(

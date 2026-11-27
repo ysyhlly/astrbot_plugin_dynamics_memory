@@ -15,8 +15,15 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
+
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
 
 JOURNAL_MODE_WAL = "WAL"
 JOURNAL_MODE_DELETE = "DELETE"
@@ -82,6 +89,8 @@ async def open_connection(
     *,
     apply_journal_mode: bool = False,
     isolation_level: Any = _UNSET,
+    readonly: bool = False,
+    context: Any = None,
 ) -> aiosqlite.Connection:
     """打开插件统一配置的 SQLite 连接。
 
@@ -94,9 +103,11 @@ async def open_connection(
         db_path: 数据库文件路径。
         apply_journal_mode: 是否为该库写入进程级 journal mode（仅启动期）。
         isolation_level: 可选覆写 ``aiosqlite.connect`` 的事务隔离级别（如 ``None``）。
+        readonly: 是否为只读连接（使用更小读缓存并跳过 journal_size_limit）。
+        context: 可选 AstrBot 上下文，用于读取系列资源档位。
 
     Returns:
-        已设置 ``busy_timeout`` 的连接。
+        已设置 ``busy_timeout`` 与低内存 PRAGMA 的连接。
     """
     # The SQLite worker may finish opening even after its caller is cancelled.
     connect_coro = (
@@ -117,8 +128,30 @@ async def open_connection(
             else "PRAGMA synchronous = FULL"
         )
         await cursor.close()
-        cursor = await db.execute("PRAGMA temp_store = MEMORY")
-        await cursor.close()
+        apply_fn = (
+            getattr(_series_panels, "apply_series_aiosqlite_pragmas", None)
+            if _series_panels is not None
+            else None
+        )
+        if callable(apply_fn):
+            await apply_fn(db, context, readonly=readonly)
+        else:
+            fallback_pragmas = [
+                f"PRAGMA cache_size = {-1000 if readonly else -2000}",
+                "PRAGMA temp_store = FILE",
+                "PRAGMA mmap_size = 0",
+            ]
+            if not readonly:
+                fallback_pragmas.append("PRAGMA journal_size_limit = 16777216")
+            for sql in fallback_pragmas:
+                cur = await db.execute(sql)
+                await cur.close()
+        if readonly:
+            try:
+                cur = await db.execute("PRAGMA query_only = ON")
+                await cur.close()
+            except Exception:
+                pass
         if apply_journal_mode:
             # Enable incremental auto_vacuum on fresh DBs (and prepare existing DBs
             # for their next VACUUM) so PRAGMA incremental_vacuum actually reclaims pages.

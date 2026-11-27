@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.sqlite_connection import open_connection
@@ -346,7 +345,9 @@ class BM25Retriever:
                         # Single/tied FTS5 bm25() score (negative = stronger):
                         # calibrate smoothly instead of blindly inflating to 1.0.
                         result.score = (
-                            min(0.85, abs(raw) / (abs(raw) + 2.0)) if raw < 0 else 0.5
+                            max(0.05, min(0.85, abs(raw) / (abs(raw) + 2.0)))
+                            if raw < 0
+                            else 0.5
                         )
                 else:
                     score_range = max_score - min_score

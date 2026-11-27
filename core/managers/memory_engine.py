@@ -31,6 +31,7 @@ from ..managers.graph_memory_manager import GraphMemoryManager
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
+from ..retrieval.atom_vector_retriever import AtomVectorRetriever
 from ..retrieval.bm25_retriever import BM25Retriever
 from ..retrieval.dual_route_retriever import DualRouteRetriever
 from ..retrieval.graph_keyword_retriever import GraphKeywordRetriever
@@ -175,6 +176,7 @@ class MemoryEngine(
         self.dual_route_retriever = None
         self.atom_store = None
         self.atom_lifecycle_manager = None
+        self.atom_vector_retriever = None
         self.atom_retriever = None
         self.db_connection = None
         self.source_loader = None
@@ -239,6 +241,62 @@ class MemoryEngine(
                     ),
                 ),
             )
+            if "rerank_excerpt_max_chars" in new_config:
+                hr.rerank_excerpt_max_chars = max(
+                    120,
+                    min(
+                        2400,
+                        int(
+                            self.config.get(
+                                "rerank_excerpt_max_chars",
+                                hr.rerank_excerpt_max_chars,
+                            )
+                            or hr.rerank_excerpt_max_chars
+                        ),
+                    ),
+                )
+            if "rerank_min_score" in new_config:
+                hr.rerank_min_score = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(self.config.get("rerank_min_score", hr.rerank_min_score)),
+                    ),
+                )
+            if "rerank_high_confidence_score" in new_config:
+                hr.rerank_high_confidence_score = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(
+                            self.config.get(
+                                "rerank_high_confidence_score",
+                                hr.rerank_high_confidence_score,
+                            )
+                        ),
+                    ),
+                )
+            if "rerank_medium_confidence_cap" in new_config:
+                hr.rerank_medium_confidence_cap = max(
+                    1,
+                    int(
+                        self.config.get(
+                            "rerank_medium_confidence_cap",
+                            hr.rerank_medium_confidence_cap,
+                        )
+                        or hr.rerank_medium_confidence_cap
+                    ),
+                )
+            if "rerank_timeout_seconds" in new_config:
+                hr.rerank_timeout_seconds = max(
+                    0.1,
+                    float(
+                        self.config.get(
+                            "rerank_timeout_seconds", hr.rerank_timeout_seconds
+                        )
+                        or hr.rerank_timeout_seconds
+                    ),
+                )
             hr.fusion_mode = (
                 (self.config.get("fusion_mode", hr.fusion_mode) or "score")
                 .strip()
@@ -295,10 +353,46 @@ class MemoryEngine(
                     "graph_route_timeout_seconds",
                     self.config.get(
                         "graph_route_timeout",
-                        getattr(dr, "graph_route_timeout", 3.5),
+                        getattr(dr, "graph_route_timeout", 1.5),
                     ),
                 )
             )
+            dr.rerank_post_fusion = bool(
+                self.config.get("rerank_post_fusion", dr.rerank_post_fusion)
+            )
+            dr.rerank_candidates = max(
+                2,
+                min(
+                    100,
+                    int(
+                        self.config.get("rerank_candidates", dr.rerank_candidates)
+                        or dr.rerank_candidates
+                    ),
+                ),
+            )
+            dr.atom_route_weight = float(
+                self.config.get("atom_route_weight", dr.atom_route_weight)
+            )
+            dr.affinity_session_bonus = float(
+                self.config.get("affinity_session_bonus", dr.affinity_session_bonus)
+            )
+            dr.affinity_speaker_bonus = float(
+                self.config.get("affinity_speaker_bonus", dr.affinity_speaker_bonus)
+            )
+            dr.affinity_multi_route_bonus = float(
+                self.config.get(
+                    "affinity_multi_route_bonus", dr.affinity_multi_route_bonus
+                )
+            )
+            dr.temporal_recent_bonus = float(
+                self.config.get("temporal_recent_bonus", dr.temporal_recent_bonus)
+            )
+        if self.atom_retriever is not None and hasattr(self.atom_retriever, "config"):
+            self.atom_retriever.config = self.config
+        if self.atom_vector_retriever is not None and hasattr(
+            self.atom_vector_retriever, "config"
+        ):
+            self.atom_vector_retriever.config = self.config
         if self.graph_retriever is not None and hasattr(self.graph_retriever, "config"):
             self.graph_retriever.config = self.config
         self._invalidate_search_cache()
@@ -375,7 +469,29 @@ class MemoryEngine(
             self.atom_lifecycle_manager = AtomLifecycleManager(
                 self.atom_store, self.config
             )
-            self.atom_retriever = AtomRetriever(self.atom_store, self.config)
+            emb_provider = getattr(self.faiss_db, "embedding_provider", None)
+            if emb_provider is not None and bool(
+                self.config.get("atom_vector_enabled", True)
+            ):
+                atom_index_path = str(
+                    self.config.get("atom_index_path")
+                    or (Path(self.db_path).parent / "livingmemory_atoms.index")
+                )
+                self.atom_vector_retriever = AtomVectorRetriever(
+                    self.atom_store,
+                    emb_provider,
+                    index_path=atom_index_path,
+                    config=self.config,
+                )
+                await self.atom_vector_retriever.initialize()
+                self.atom_store.set_vector_sync(self.atom_vector_retriever)
+                if self.index_writer is not None:
+                    self.index_writer.atom_vector_retriever = self.atom_vector_retriever
+            self.atom_retriever = AtomRetriever(
+                self.atom_store,
+                self.config,
+                atom_vector_retriever=self.atom_vector_retriever,
+            )
             await self.atom_lifecycle_manager.start()
 
         self.graph_extractor = GraphExtractor(self.config)
@@ -408,7 +524,26 @@ class MemoryEngine(
             self.get_memory,
             self.config,
             memory_batch_loader=partial(retrieve_documents, self.faiss_db),
+            atom_retriever=self.atom_retriever,
         )
+
+    async def rebuild_atom_vector_index(
+        self,
+        *,
+        batch_size: int = 32,
+        request_delay: float = 0.0,
+        progress_callback=None,
+    ) -> dict[str, int]:
+        """Batch-build or rebuild livingmemory_atoms.index from all active atoms."""
+        if self.atom_vector_retriever is None:
+            return {"total": 0, "indexed": 0, "failed": 0}
+        result = await self.atom_vector_retriever.rebuild_from_store(
+            batch_size=batch_size,
+            request_delay=request_delay,
+            progress_callback=progress_callback,
+        )
+        self._invalidate_search_cache()
+        return result
 
     async def close(self):
         """关闭数据库连接和清理资源"""
@@ -436,6 +571,11 @@ class MemoryEngine(
                     await close()
                 except Exception:
                     logger.warning("[MemoryEngine] 关闭存储连接池失败", exc_info=True)
+        if self.atom_vector_retriever is not None:
+            try:
+                await self.atom_vector_retriever.close()
+            except Exception:
+                logger.warning("[MemoryEngine] 关闭原子向量索引失败", exc_info=True)
         if self.graph_vector_db is not None:
             await self.graph_vector_db.close()
 

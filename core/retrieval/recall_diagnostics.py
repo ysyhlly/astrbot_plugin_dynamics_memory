@@ -31,6 +31,8 @@ def merge_route(
             diagnostics.setdefault(key, {})[f"{name}.{route}"] = value
     if child.get("candidate_limited"):
         diagnostics["candidate_limited"] = True
+    if child.get("rerank_rejected_all"):
+        diagnostics["rerank_rejected_all"] = True
 
 
 def all_routes_failed(diagnostics: dict[str, Any]) -> bool:

@@ -311,7 +311,7 @@ class BackupManager:
 
                 tmp_archive = backups_root / f".v{old_label}.tar.gz.tmp"
                 try:
-                    with tarfile.open(tmp_archive, "w:gz") as tar:
+                    with tarfile.open(tmp_archive, "w:gz", compresslevel=3) as tar:
                         for item in sorted(staging_dir.iterdir()):
                             if item.is_file():
                                 tar.add(item, arcname=item.name)

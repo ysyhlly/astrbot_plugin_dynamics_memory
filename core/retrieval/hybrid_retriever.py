@@ -14,6 +14,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 
@@ -22,10 +23,119 @@ from ..utils.json_utils import safe_json_dict
 from ..utils.number_utils import clamp_float, safe_float
 from .bm25_retriever import BM25Retriever
 from .recall_diagnostics import record_route
-from .rerank_text import scoring_excerpt
+from .rerank_text import build_rerank_document
 from .route_execution import search_route
 from .rrf_fusion import BM25Result, FusedResult, RRFFusion, VectorResult
 from .vector_retriever import VectorRetriever
+
+try:
+    from ... import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+_LOCAL_RERANK_HOSTS = frozenset(
+    {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "host.docker.internal",
+        "rerank-sidecar",
+        "astrbot-rerank-sidecar",
+    }
+)
+
+
+def is_local_rerank_provider(provider: Any, provider_id: str = "") -> bool:
+    """Return True when the rerank provider points to a local sidecar rather than a cloud API."""
+    candidates: list[str] = []
+    if provider_id:
+        candidates.append(str(provider_id))
+    if provider is not None:
+        for attr in ("id", "provider_id"):
+            val = getattr(provider, attr, None)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+        meta = getattr(provider, "meta", None)
+        if callable(meta):
+            try:
+                meta = meta()
+            except Exception:
+                meta = None
+        if meta is not None:
+            for attr in ("id", "provider_id"):
+                val = getattr(meta, attr, None)
+                if isinstance(val, str) and val.strip():
+                    candidates.append(val.strip())
+        cfg = getattr(provider, "provider_config", None)
+        if isinstance(cfg, dict):
+            pid = cfg.get("id")
+            if isinstance(pid, str) and pid.strip():
+                candidates.append(pid.strip())
+            for url_key in ("api_base", "base_url", "url", "endpoint"):
+                raw_url = cfg.get(url_key)
+                if isinstance(raw_url, str) and raw_url.strip():
+                    host = (urlsplit(raw_url.strip()).hostname or "").strip().lower()
+                    if host in _LOCAL_RERANK_HOSTS:
+                        return True
+        for url_attr in ("api_base", "base_url", "url", "endpoint"):
+            raw_url = getattr(provider, url_attr, None)
+            if isinstance(raw_url, str) and raw_url.strip():
+                host = (urlsplit(raw_url.strip()).hostname or "").strip().lower()
+                if host in _LOCAL_RERANK_HOSTS:
+                    return True
+    for ident in candidates:
+        lowered = ident.strip().lower()
+        if "sidecar" in lowered or "local" in lowered:
+            return True
+    return False
+
+
+def resolve_effective_rerank_candidates(
+    configured_candidates: int,
+    *,
+    provider: Any = None,
+    provider_id: str = "",
+    context: Any = None,
+) -> int:
+    """Cap remote cloud rerank candidate count in low-memory profiles while preserving standard & local sidecars."""
+    base = max(2, int(configured_candidates))
+    if _series_panels is None:
+        return base
+    getter = getattr(_series_panels, "get_series_resource_limits", None)
+    if not callable(getter):
+        return base
+    try:
+        limits = getter(context)
+    except Exception:
+        return base
+    if (
+        not isinstance(limits, dict)
+        or str(limits.get("profile", "standard")) == "standard"
+    ):
+        return base
+    if is_local_rerank_provider(provider, provider_id):
+        return base
+    cloud_cap = limits.get("memory_rerank_candidates_cloud")
+    if cloud_cap is None:
+        return base
+    return min(base, max(2, int(cloud_cap)))
+
+
+def resolve_rerank_cache_max_size(context: Any = None) -> int:
+    """Resolve bounded _rerank_cache size from series resource limits (128/48/24)."""
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if isinstance(limits, dict) and limits.get("memory_rerank_cache_size"):
+                    return max(8, int(limits["memory_rerank_cache_size"]))
+            except Exception:
+                pass
+    return 128
 
 
 @dataclass
@@ -98,6 +208,29 @@ class HybridRetriever:
         self.rerank_candidates = max(
             2, min(100, int(self.config.get("rerank_candidates", 20) or 20))
         )
+        self.rerank_excerpt_max_chars = max(
+            120,
+            min(2400, int(self.config.get("rerank_excerpt_max_chars", 350) or 350)),
+        )
+        self.rerank_min_score = clamp_float(
+            self.config.get("rerank_min_score"), default=0.60
+        )
+        self.rerank_high_confidence_score = clamp_float(
+            self.config.get("rerank_high_confidence_score"), default=0.85
+        )
+        self.rerank_medium_confidence_cap = max(
+            1, int(self.config.get("rerank_medium_confidence_cap", 3) or 3)
+        )
+        self.rerank_timeout_seconds = max(
+            0.1,
+            float(
+                self.config.get(
+                    "rerank_timeout_seconds",
+                    self.config.get("retrieval_timeout_seconds", 1.2),
+                )
+                or 1.2
+            ),
+        )
 
         # 加权求和各维度权重（可通过配置覆盖）
         self.score_alpha = self.config.get("score_alpha", 0.5)  # 检索相关性
@@ -145,6 +278,8 @@ class HybridRetriever:
         relevance_only: bool = False,
         narrative_plan=None,
         excluded_session_ids: tuple[str, ...] | None = None,
+        *,
+        skip_rerank: bool = False,
     ) -> list[HybridResult]:
         """
         执行混合检索
@@ -155,6 +290,7 @@ class HybridRetriever:
             session_id: 会话ID过滤(可选)
             persona_id: 人格ID过滤(可选)
             diagnostics: 可选路线故障输出（仅 Beta 主动检索使用，不改变返回契约）
+            skip_rerank: 跳过文档路内部精排（由 DualRouteRetriever 汇聚三路后统一精排）
 
         Returns:
             List[HybridResult]: 混合检索结果,按最终分数降序排列
@@ -171,8 +307,9 @@ class HybridRetriever:
                 budget.search_deadline - reserve
             )
         candidate_k = max(k, k * self.candidate_multiplier)
-        if self.rerank_enabled:
-            candidate_k = max(candidate_k, self.rerank_candidates)
+        eff_rerank_candidates = self.effective_rerank_candidates()
+        if self.rerank_enabled and not skip_rerank:
+            candidate_k = max(candidate_k, eff_rerank_candidates)
         if narrative_plan is not None:
             candidate_k = narrative_plan.initial
         # Retrieve enough candidates before reranking, not just before fusion.
@@ -205,6 +342,7 @@ class HybridRetriever:
                 method,
                 *args,
                 discriminator={
+                    "query": args[0],
                     "session_id": session_id,
                     "persona_id": persona_id,
                     "candidate_limit": args[1],
@@ -329,19 +467,22 @@ class HybridRetriever:
 
         # 启用重排序或 MMR 去重时保留超采候选池，避免截断到 k 后 _apply_mmr 沦为死代码
         rerank_active = (
-            self.rerank_enabled
+            not skip_rerank
+            and self.rerank_enabled
             and self.rerank_provider_resolver is not None
             and not local_only
         )
         mmr_pool_k = (
-            min(max(k * 2, k + 4), max(k, 40)) if (not relevance_only and k > 1) else k
+            min(max(k * 2, k + 4), max(k, 40))
+            if (not relevance_only and not skip_rerank and k > 1)
+            else k
         )
         fuse_top_k = max(
-            self.rerank_candidates if rerank_active else k,
+            eff_rerank_candidates if rerank_active else k,
             mmr_pool_k,
         )
-        if relevance_only:
-            fuse_top_k = max(k, self.rerank_candidates if rerank_active else k)
+        if relevance_only or skip_rerank:
+            fuse_top_k = max(k, eff_rerank_candidates if rerank_active else k)
         if diagnostics is not None and len(
             {r.doc_id for r in bm25_results} | {r.doc_id for r in vector_results}
         ) > min(k, fuse_top_k):
@@ -365,13 +506,16 @@ class HybridRetriever:
 
         # 3.5 Rerank 重排序：按查询相关性重打分，保留 MMR 超采池供后续加权与多样性去重
         rerank_top_k = k if relevance_only else mmr_pool_k
+        rerank_meta: dict[str, Any] = {}
         if rerank_active:
             if execution_context is None:
-                fused_results = await self._apply_rerank(
+                fused_results, rerank_meta = await self.score_rerank_candidates(
                     query,
                     fused_results,
                     rerank_top_k,
-                    compact=narrative_plan is not None,
+                    compact=True,
+                    apply_threshold=True,
+                    confidence_target_k=k,
                 )
             else:
                 rerank_context = execution_context
@@ -384,14 +528,17 @@ class HybridRetriever:
                     )
                 rerank = await rerank_context.run(
                     "document_rerank",
-                    self._apply_rerank,
+                    self.score_rerank_candidates,
                     query,
                     copy.deepcopy(fused_results),
                     rerank_top_k,
                     timings=execution_context.route_elapsed_ms,
-                    compact=narrative_plan is not None,
+                    compact=True,
+                    apply_threshold=True,
+                    confidence_target_k=k,
                     remote=True,
                     discriminator={
+                        "query": query,
                         "candidate_ids": [item.doc_id for item in fused_results],
                         "session_id": session_id,
                         "persona_id": persona_id,
@@ -399,11 +546,28 @@ class HybridRetriever:
                     },
                 )
                 if rerank.get("state") == "completed":
-                    fused_results = rerank.get("value", fused_results)
+                    val = rerank.get("value")
+                    if isinstance(val, tuple) and len(val) == 2:
+                        fused_results, rerank_meta = val
+                    elif isinstance(val, list):
+                        fused_results = val
+            if diagnostics is not None and rerank_meta:
+                diagnostics["rerank"] = dict(rerank_meta)
+                if rerank_meta.get("rejected_all"):
+                    diagnostics["rerank_rejected_all"] = True
+            if not fused_results:
+                return []
 
         if relevance_only:
             # Beta 在任何新鲜度截断前使用相关性，成功的 Rerank 优先保留。
             return self._apply_relevance(fused_results)[:k]
+
+        if skip_rerank:
+            # Post-fusion orchestrator applies unified rerank, weighting and MMR.
+            current_time = time.time()
+            return await asyncio.to_thread(
+                self._apply_weighting, fused_results[:k], current_time
+            )
 
         # 4. 应用加权（通过线程池卸载 CPU 密集型 json.loads + 循环）
         current_time = time.time()
@@ -411,11 +575,18 @@ class HybridRetriever:
             self._apply_weighting, fused_results, current_time
         )
 
+        effective_k = int(rerank_meta.get("effective_k", k)) if rerank_meta else k
+        effective_k = max(0, min(k, effective_k))
+        if effective_k <= 0:
+            return []
+
         # 5. MMR 去重（通过线程池卸载 O(k*n) Jaccard 集合运算）
         if len(weighted_results) > 1:
             weighted_results = await asyncio.to_thread(
-                self._apply_mmr, weighted_results, k
+                self._apply_mmr, weighted_results, effective_k
             )
+        else:
+            weighted_results = weighted_results[:effective_k]
 
         return weighted_results
 
@@ -439,40 +610,85 @@ class HybridRetriever:
         results.sort(key=lambda result: result.final_score, reverse=True)
         return results
 
-    async def _apply_rerank(
+    @staticmethod
+    def _calibrate_rerank_score(raw_score: float) -> float:
+        """Preserve calibrated [0, 1] probability directly without min-max stretching."""
+        value = float(raw_score)
+        if 0.0 <= value <= 1.0:
+            return value
+        clamped = max(-20.0, min(20.0, value))
+        return 1.0 / (1.0 + math.exp(-clamped))
+
+    def compute_confidence_cap(self, scores: list[float], requested_k: int) -> int:
+        """Determine allowed result count from high- vs medium-confidence scores.
+
+        High-confidence hits (>= ``rerank_high_confidence_score``) may fill up
+        to ``requested_k``; medium-confidence hits are capped at
+        ``rerank_medium_confidence_cap`` (default 3).
+        """
+        if requested_k <= 0 or not scores:
+            return 0
+        high_count = sum(1 for s in scores if s >= self.rerank_high_confidence_score)
+        medium_cap = min(requested_k, self.rerank_medium_confidence_cap)
+        if high_count >= medium_cap:
+            return min(requested_k, high_count)
+        return min(requested_k, medium_cap, len(scores))
+
+    def effective_rerank_candidates(self, provider: Any = None) -> int:
+        """Compute effective rerank candidate pool honoring low-memory cloud caps."""
+        resolved_provider = provider
+        if resolved_provider is None and callable(self.rerank_provider_resolver):
+            try:
+                resolved_provider = self.rerank_provider_resolver()
+            except Exception:
+                resolved_provider = None
+        provider_id = str(self.config.get("rerank_provider_id") or "")
+        return resolve_effective_rerank_candidates(
+            self.rerank_candidates,
+            provider=resolved_provider,
+            provider_id=provider_id,
+            context=getattr(self, "context", None),
+        )
+
+    async def score_rerank_candidates(
         self,
         query: str,
-        fused_results: list[FusedResult],
+        candidates: list[Any],
         k: int,
         *,
         timings=None,
-        compact=False,
-    ) -> list[FusedResult]:
+        compact: bool = True,
+        apply_threshold: bool = True,
+        confidence_target_k: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Score candidates with the Rerank provider using calibrated absolute probabilities.
+
+        - Never applies min-max stretching across candidates.
+        - Rejects candidates below ``self.rerank_min_score`` (returns ``[]`` if all fail).
+        - Works for both ``FusedResult`` and ``HybridResult`` candidates.
         """
-        调用 Rerank 模型对融合候选按查询相关性重打分。
-
-        成功时为每条结果写入 rerank_score（候选集内 min-max 归一化到 [0,1]），
-        按 rerank 分数降序截断到 top_k；后续加权阶段以 rerank 分数替代
-        RRF 归一化排名作为相关性项。
-
-        Args:
-            query: 用户查询
-            fused_results: RRF 融合后的候选（数量为 rerank_candidates）
-            k: 最终返回数量
-
-        Returns:
-            截断到 top_k 的融合结果。解析不到提供商或调用失败时按
-            原 RRF 排名截断（静默降级）。
-        """
-        if len(fused_results) < 2:
-            return fused_results[:k]
+        meta: dict[str, Any] = {
+            "reranked": False,
+            "rejected_all": False,
+            "input_count": len(candidates),
+            "passed_count": len(candidates),
+            "high_confidence_count": 0,
+            "effective_k": confidence_target_k
+            if confidence_target_k is not None
+            else k,
+        }
+        if not candidates or k <= 0:
+            return [], meta
+        if self.rerank_provider_resolver is None:
+            return candidates[:k], meta
         try:
             provider = self.rerank_provider_resolver()
         except Exception as exc:
             logger.warning("Rerank provider resolution failed: %s", type(exc).__name__)
-            return fused_results[:k]
+            return candidates[:k], meta
         if provider is None:
-            return fused_results[:k]
+            return candidates[:k], meta
 
         # Cache scores only. Current candidates and their access checks remain fresh.
         if not hasattr(self, "_rerank_locks"):
@@ -480,20 +696,39 @@ class HybridRetriever:
             self._rerank_cache = OrderedDict()
             self._rerank_provider = provider
             self._rerank_retry_at = 0.0
-        # Canonicalize only the provider input and score cache. Keep every
-        # duplicate and map indexes back to this request's original RRF order.
+
         prepare_started = time.monotonic()
-        scoring_texts = [r.content for r in fused_results]
-        if compact and any(len(text) > 2400 and "\n" in text for text in scoring_texts):
-            scoring_texts = await asyncio.to_thread(
-                lambda: [scoring_excerpt(query, text) for text in scoring_texts]
-            )
-        canonical_order = sorted(
-            range(len(fused_results)), key=lambda i: scoring_texts[i]
-        )
+
+        def _build_texts() -> list[str]:
+            texts: list[str] = []
+            for item in candidates:
+                metadata = getattr(item, "metadata", None)
+                matched_atoms = (
+                    metadata.get("matched_atoms")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                content = str(getattr(item, "content", "") or "")
+                if compact or matched_atoms:
+                    texts.append(
+                        build_rerank_document(
+                            query,
+                            content,
+                            matched_atoms=matched_atoms,
+                            max_chars=self.rerank_excerpt_max_chars,
+                            fallback_target_chars=self.rerank_excerpt_max_chars,
+                        )
+                    )
+                else:
+                    texts.append(content)
+            return texts
+
+        scoring_texts = await asyncio.to_thread(_build_texts)
+        canonical_order = sorted(range(len(candidates)), key=lambda i: scoring_texts[i])
         documents = [scoring_texts[i] for i in canonical_order]
         if timings is not None:
             timings["rerank_prepare"] = int((time.monotonic() - prepare_started) * 1000)
+
         key = hashlib.sha256(
             json.dumps(
                 [id(provider), query, documents],
@@ -501,7 +736,6 @@ class HybridRetriever:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        # Independent queries must not queue behind a slow remote request.
         lock_key = (id(provider), key)
         entry = self._rerank_locks.setdefault(lock_key, [asyncio.Lock(), 0])
         entry[1] += 1
@@ -526,12 +760,17 @@ class HybridRetriever:
                 else:
                     self._rerank_cache.pop(key, None)
                     if now < self._rerank_retry_at:
-                        return fused_results[:k]
+                        return candidates[:k], meta
                     provider_started = time.monotonic()
+                    effective_timeout = (
+                        max(0.05, float(timeout_seconds))
+                        if timeout_seconds is not None
+                        else self.rerank_timeout_seconds
+                    )
                     try:
                         rerank_results = await asyncio.wait_for(
                             provider.rerank(query=query, documents=documents),
-                            timeout=self.config.get("retrieval_timeout_seconds", 10.0),
+                            timeout=effective_timeout,
                         )
                         if not rerank_results or any(
                             not isinstance(r.index, int)
@@ -561,16 +800,18 @@ class HybridRetriever:
                             "Rerank failed; using local ranking during cooldown: %s",
                             type(exc).__name__,
                         )
-                        return fused_results[:k]
+                        return candidates[:k], meta
                     finally:
                         if timings is not None:
                             timings["rerank_provider"] = int(
                                 (time.monotonic() - provider_started) * 1000
                             )
                     self._rerank_cache[key] = (time.monotonic() + 45.0, rerank_results)
-                    while len(self._rerank_cache) > 128:
+                    cache_limit = resolve_rerank_cache_max_size(
+                        getattr(self, "context", None)
+                    )
+                    while len(self._rerank_cache) > cache_limit:
                         self._rerank_cache.popitem(last=False)
-
         finally:
             if timings is not None and not lock_acquired:
                 timings["rerank_lock"] = int((time.monotonic() - lock_started) * 1000)
@@ -578,35 +819,68 @@ class HybridRetriever:
             if not entry[1]:
                 self._rerank_locks.pop(lock_key, None)
 
-        # 按候选索引归一化 Rerank 分数到 [0,1]；单命中或全部分数相同时保留校准原分，
-        # 避免把低相关单命中强行拉满到 1.0 压过主路结果。
-        scores = [float(r.relevance_score) for r in rerank_results]
-        max_score, min_score = max(scores), min(scores)
-        score_range = max_score - min_score
-        rerank_map = {}
+        # Calibrated absolute probability mapping (NO min-max stretching!).
+        rerank_map: dict[int, float] = {}
         for item in rerank_results:
-            if not 0 <= item.index < len(fused_results):
+            if not 0 <= item.index < len(candidates):
                 continue
-            raw_score = float(item.relevance_score)
-            if score_range <= 1e-9:
-                if 0.0 <= raw_score <= 1.0:
-                    calibrated = raw_score
-                else:
-                    # Logit / unbounded score -> smooth sigmoid in (0, 1)
-                    clamped = max(-20.0, min(20.0, raw_score))
-                    calibrated = 1.0 / (1.0 + math.exp(-clamped))
-                rerank_map[canonical_order[item.index]] = calibrated
-            else:
-                rerank_map[canonical_order[item.index]] = (
-                    raw_score - min_score
-                ) / score_range
+            rerank_map[canonical_order[item.index]] = self._calibrate_rerank_score(
+                float(item.relevance_score)
+            )
 
-        # 未出现在重排序结果中的候选一律给 0.0，避免未评分候选被拉满混入前列
-        for i, result in enumerate(fused_results):
-            result.rerank_score = rerank_map.get(i, 0.0)
+        scored: list[tuple[float, Any]] = []
+        for i, cand in enumerate(candidates):
+            prob = rerank_map.get(i, 0.0)
+            if hasattr(cand, "rerank_score"):
+                cand.rerank_score = prob
+            if isinstance(getattr(cand, "score_breakdown", None), dict):
+                cand.score_breakdown["rerank"] = round(prob, 4)
+            scored.append((prob, cand))
 
-        fused_results.sort(key=lambda r: r.rerank_score, reverse=True)
-        return fused_results[:k]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        meta["reranked"] = True
+
+        if apply_threshold and self.rerank_min_score > 0.0:
+            passed = [
+                (prob, cand) for prob, cand in scored if prob >= self.rerank_min_score
+            ]
+        else:
+            passed = scored
+
+        meta["passed_count"] = len(passed)
+        meta["high_confidence_count"] = sum(
+            1 for prob, _ in passed if prob >= self.rerank_high_confidence_score
+        )
+        if not passed:
+            meta["rejected_all"] = True
+            meta["effective_k"] = 0
+            return [], meta
+
+        target_k = confidence_target_k if confidence_target_k is not None else k
+        meta["effective_k"] = self.compute_confidence_cap(
+            [prob for prob, _ in passed], target_k
+        )
+        return [cand for _, cand in passed[:k]], meta
+
+    async def _apply_rerank(
+        self,
+        query: str,
+        fused_results: list[FusedResult],
+        k: int,
+        *,
+        timings=None,
+        compact=False,
+    ) -> list[FusedResult]:
+        """Backwards-compatible wrapper delegating to calibrated ``score_rerank_candidates``."""
+        ranked, _ = await self.score_rerank_candidates(
+            query,
+            fused_results,
+            k,
+            timings=timings,
+            compact=compact,
+            apply_threshold=True,
+        )
+        return ranked
 
     def _apply_weighting(
         self, fused_results: list[FusedResult], current_time: float

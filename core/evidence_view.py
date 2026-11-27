@@ -55,7 +55,7 @@ class EvidenceViewService:
         owner_readiness: Callable[[str], Awaitable[bool | None]] | None = None,
         clock: Callable[[], float] = time.time,
         lease_seconds: float = 120,
-        scheduler_poll_seconds: float = 1.0,
+        scheduler_poll_seconds: float = 30.0,
     ):
         self.sidecar = sidecar
         self.scope_key_fn = scope_key_fn
@@ -74,7 +74,8 @@ class EvidenceViewService:
         self._shutdown_task: asyncio.Task | None = None
         self._stopping = False
         self._wakeup = asyncio.Event()
-        self._volatile_materials: dict[str, dict] = {}
+        self._volatile_materials: OrderedDict[str, dict] = OrderedDict()
+        self._volatile_materials_cap: int = max(64, self.queue_size * 2)
         self._admissions = OrderedDict()
         self._admission_worker = None
         self._admission_stats = Counter()
@@ -140,6 +141,19 @@ class EvidenceViewService:
         self._worker = None
         self._volatile_materials.clear()
         await self.sidecar.close()
+
+    def _remember_volatile_material(self, material_id: str, material: dict) -> None:
+        """Retain bounded volatile fallback payloads only when no material_loader is configured."""
+        if self.material_loader is not None:
+            return
+        locator = material.get("source_locator") if isinstance(material, dict) else None
+        if isinstance(locator, dict) and locator.get("kind") == "conversation_row":
+            return
+        cap = max(64, self.queue_size * 2)
+        self._volatile_materials[material_id] = material
+        self._volatile_materials.move_to_end(material_id)
+        while len(self._volatile_materials) > cap:
+            self._volatile_materials.popitem(last=False)
 
     def admission_diagnostics(self) -> dict:
         return {**self._admission_stats, "pending": len(self._admissions)}
@@ -849,12 +863,12 @@ class EvidenceViewService:
             )
             if outcome == "queued":
                 accepted += 1
-                self._volatile_materials[material_id] = material
+                self._remember_volatile_material(material_id, material)
             elif outcome == "deferred":
                 deferred += 1
             elif outcome == "owner_wait":
                 deferred += 1
-                self._volatile_materials[material_id] = material
+                self._remember_volatile_material(material_id, material)
             elif outcome == "duplicate":
                 duplicates += 1
             elif outcome == "terminal":

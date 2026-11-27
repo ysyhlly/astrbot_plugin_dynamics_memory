@@ -5,9 +5,8 @@
 import time
 from typing import TYPE_CHECKING, Any
 
-from quart import request
-
 from astrbot.api import logger
+from quart import request
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils

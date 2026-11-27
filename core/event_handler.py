@@ -116,6 +116,12 @@ class EventHandler:
         self, event: AstrMessageEvent, req: ProviderRequest, *, budget=None
     ):
         """Query and inject long-term memory before LLM request"""
+        if is_managed_event(event):
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "skipped_managed")
+            except Exception:
+                pass
+            return
         with adapter_access(self.config_manager, event):
             return await self._memory_recall.handle_memory_recall(
                 event, req, budget=budget
@@ -125,6 +131,8 @@ class EventHandler:
         self, event: AstrMessageEvent, resp: LLMResponse
     ):
         """Check if reflection and memory storage is needed after LLM response"""
+        if is_managed_event(event):
+            return
         with adapter_access(self.config_manager, event, write=True):
             await self._memory_reflection.handle_memory_reflection(event, resp)
 

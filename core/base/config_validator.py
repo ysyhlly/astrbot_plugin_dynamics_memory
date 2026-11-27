@@ -44,6 +44,21 @@ class RecallEngineConfig(BaseModel):
     rerank_enabled: bool = False
     rerank_provider_id: str = ""
     rerank_candidates: int = Field(default=20, ge=2, le=100)
+    rerank_excerpt_max_chars: int = Field(default=350, ge=120, le=2400)
+    rerank_post_fusion: bool = True
+    rerank_min_score: float = Field(default=0.60, ge=0.0, le=1.0)
+    rerank_high_confidence_score: float = Field(default=0.85, ge=0.0, le=1.0)
+    rerank_medium_confidence_cap: int = Field(default=3, ge=1, le=20)
+    rerank_timeout_seconds: float = Field(default=1.2, ge=0.1, le=30.0)
+    query_rewrite_enabled: bool = True
+    query_rewrite_provider_id: str = ""
+    query_rewrite_timeout_seconds: float = Field(default=0.55, ge=0.1, le=10.0)
+    atom_vector_enabled: bool = True
+    atom_route_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    affinity_session_bonus: float = Field(default=0.04, ge=0.0, le=0.5)
+    affinity_speaker_bonus: float = Field(default=0.03, ge=0.0, le=0.5)
+    affinity_multi_route_bonus: float = Field(default=0.03, ge=0.0, le=0.5)
+    temporal_recent_bonus: float = Field(default=0.10, ge=0.0, le=0.5)
     # 旧注入方式仅保留为合法枚举值，避免老配置升级后启动失败；运行时统一按
     # extra_user_content 处理（见 ConfigManager）。
     injection_method: Literal[

@@ -298,12 +298,11 @@ async def _build_engine(workdir: Path, corpus: list[str]):
     _ensure_import_path()
     _silence_host_logs()
 
+    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
     from astrbot_plugin_dynamics_memory.core.faiss_async_persist import (
         install_async_persist,
     )
     from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
-
-    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
     database_path = workdir / "memory.db"
     index_path = workdir / "memory.index"

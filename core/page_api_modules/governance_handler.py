@@ -137,7 +137,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 class GovernanceHandler:
     """Memory health checkup, dedup merge, bulk governance, and correction review."""
 
-    def __init__(self, utils: "PageApiUtils", plugin: Any) -> None:
+    def __init__(self, utils: PageApiUtils, plugin: Any) -> None:
         self.utils = utils
         self.plugin = plugin
 

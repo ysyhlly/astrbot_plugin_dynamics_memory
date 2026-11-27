@@ -46,6 +46,39 @@ _OWNED_DRAFT_LINEAGE_KEY = "_lm_owned_model_output_lineage_v1"
 
 
 _OWNED_LINEAGE_LIMIT = 64
+_RECORDED_SCOPE_WAKES_LIMIT = 512
+
+
+class _BoundedWakeSet:
+    """Set-compatible FIFO-bounded container for pending recorded scope wakeups."""
+
+    def __init__(self, max_size: int = _RECORDED_SCOPE_WAKES_LIMIT) -> None:
+        self._max_size = max(1, int(max_size))
+        self._items: OrderedDict[str, None] = OrderedDict()
+
+    def add(self, item: str) -> None:
+        self._items[item] = None
+        self._items.move_to_end(item)
+        while len(self._items) > self._max_size:
+            self._items.popitem(last=False)
+
+    def discard(self, item: str) -> None:
+        self._items.pop(item, None)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._items
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __bool__(self) -> bool:
+        return bool(self._items)
 
 
 _OWNED_VALIDATION_TIMEOUT_SECONDS = 1.0
@@ -190,11 +223,17 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         self._storage_session_tasks: dict[str, asyncio.Task] = (
             storage_session_tasks if storage_session_tasks is not None else {}
         )
-        self._recorded_scope_wakes: set[str] = set()
+        self._recorded_scope_wakes = _BoundedWakeSet(_RECORDED_SCOPE_WAKES_LIMIT)
         self.consolidation_manager = consolidation_manager
         self._shutting_down = False
         self._owned_source_lineages: OrderedDict[str, tuple[Any, Any]] = OrderedDict()
         self._reflection_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REFLECTIONS)
+
+    def _add_recorded_scope_wake(self, session_id: str) -> None:
+        self._recorded_scope_wakes.add(session_id)
+
+    def _discard_recorded_scope_wake(self, session_id: str) -> None:
+        self._recorded_scope_wakes.discard(session_id)
 
     def _schedule_consolidation(self) -> None:
         """反思触发时在后台顺带检查记忆整合（带冷却，不会频繁执行）。"""
@@ -572,9 +611,11 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         ):
             logger.warning("Summary paused; original input retained")
             return None
-        # Enforce retry_after backoff across all failure stages (retries 1-3 + cooldown).
-        if pending_summary and time.time() < float(
-            pending_summary.get("retry_after", 0) or 0
+        # Enforce retry_after backoff across retryable failure stages (not immediate source eviction).
+        if (
+            pending_summary
+            and pending_summary.get("failure_stage") != "source_unavailable"
+            and time.time() < float(pending_summary.get("retry_after", 0) or 0)
         ):
             return None
         if (
@@ -749,7 +790,7 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 return False
             if session_id in self._storage_sessions_inflight:
                 if not retry_refused:
-                    self._recorded_scope_wakes.add(session_id)
+                    self._add_recorded_scope_wake(session_id)
                 return False
             self._storage_sessions_inflight.add(session_id)
         requested_retry = retry_refused
@@ -769,13 +810,13 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 if session_id not in self._recorded_scope_wakes or self._shutting_down:
                     self._storage_sessions_inflight.discard(session_id)
                     return False
-                self._recorded_scope_wakes.discard(session_id)
+                self._discard_recorded_scope_wake(session_id)
                 if retry_refused:
                     # A delivery arrived while checking for an explicit retry.
                     retry_refused = False
         except BaseException:
             self._storage_sessions_inflight.discard(session_id)
-            self._recorded_scope_wakes.discard(session_id)
+            self._discard_recorded_scope_wake(session_id)
             raise
 
     async def schedule_high_watermark_summary(self, session_id: str) -> bool:
@@ -940,7 +981,7 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 and session_id in self._recorded_scope_wakes
                 and not self._shutting_down
             ):
-                self._recorded_scope_wakes.discard(session_id)
+                self._discard_recorded_scope_wake(session_id)
                 revision = await self._read_session_revision(session_id)
                 next_plan = await self._build_recorded_scope_plan(
                     session_id,
@@ -1319,6 +1360,17 @@ class MemoryReflection(MemoryReflectionStorageMixin):
                 and pair[0] is event
                 and pair[1] is validator
             ):
+                lineages.pop(token, None)
+
+    def _release_owned_source_lineages(self, messages) -> None:
+        """Drop event references for assistant drafts once their reflection window commits."""
+        lineages = getattr(self, "_owned_source_lineages", None)
+        if not isinstance(lineages, OrderedDict) or not lineages:
+            return
+        for message in messages or ():
+            _role, metadata = self._message_role_metadata(message)
+            token = metadata.get(_OWNED_DRAFT_LINEAGE_KEY)
+            if isinstance(token, str) and token:
                 lineages.pop(token, None)
 
     @staticmethod

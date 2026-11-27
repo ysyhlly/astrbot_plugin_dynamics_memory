@@ -106,6 +106,7 @@ class GraphRetriever:
                 *args,
                 remote=route_name == "graph vector",
                 discriminator={
+                    "query": args[0],
                     "session_id": session_id,
                     "persona_id": persona_id,
                     "candidate_limit": args[1],

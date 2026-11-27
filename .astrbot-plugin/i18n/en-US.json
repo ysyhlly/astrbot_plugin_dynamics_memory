@@ -223,6 +223,66 @@
       "narrative_total_timeout_seconds": {
         "description": "叙事召回总预算",
         "hint": "包含检索与最终校验，最高 7 秒；应小于调用方等待时间。"
+      },
+      "rerank_excerpt_max_chars": {
+        "description": "Rerank input character limit",
+        "hint": "Maximum characters per candidate sent to the reranker, prioritizing matched atoms and negation/correction qualifiers (120-2400)."
+      },
+      "rerank_post_fusion": {
+        "description": "Enable unified post-fusion rerank",
+        "hint": "Run a single cross-encoder rerank after merging and deduplicating document, atom, and graph routes; disable to fall back to document-route rerank."
+      },
+      "rerank_min_score": {
+        "description": "Rerank rejection threshold",
+        "hint": "Candidates with calibrated relevance probability below this score are dropped; returns empty if all fall below (0-1, 0 disables rejection)."
+      },
+      "rerank_high_confidence_score": {
+        "description": "Rerank high-confidence threshold",
+        "hint": "Memories above this score can fill up to top_k; medium-confidence items between min_score and this threshold are capped (0-1)."
+      },
+      "rerank_medium_confidence_cap": {
+        "description": "Medium-confidence injection cap",
+        "hint": "Maximum number of medium-confidence memories injected when high-confidence hits are insufficient (1-20)."
+      },
+      "rerank_timeout_seconds": {
+        "description": "Rerank timeout (seconds)",
+        "hint": "Maximum wait time for a rerank call before falling back to local fused scores (0.1-30)."
+      },
+      "query_rewrite_enabled": {
+        "description": "Enable conditional fast-model query rewrite",
+        "hint": "Triggers fast-model query rewriting only for short, pronoun, quoted, or relative-time passive queries alongside raw query fallback."
+      },
+      "query_rewrite_provider_id": {
+        "description": "Query rewrite fast-model Provider ID",
+        "hint": "Fast LLM provider ID used for passive recall query rewriting; leave blank to reuse the background task provider."
+      },
+      "query_rewrite_timeout_seconds": {
+        "description": "Query rewrite hard timeout (seconds)",
+        "hint": "Maximum wait time for query rewrite before immediately using pre-launched raw query results (0.1-10)."
+      },
+      "atom_vector_enabled": {
+        "description": "Enable active atom vector retrieval",
+        "hint": "Uses a dedicated FAISS IndexIDMap (livingmemory_atoms.index) for hybrid vector+FTS5 retrieval over active memory atoms."
+      },
+      "atom_route_weight": {
+        "description": "Atom route fusion weight",
+        "hint": "Weight of the atom route in three-route fusion when rerank falls back (0-1)."
+      },
+      "affinity_session_bonus": {
+        "description": "Same-session affinity bonus",
+        "hint": "Small post-threshold ranking boost for memories from the current session without altering rejection decisions (0-0.5)."
+      },
+      "affinity_speaker_bonus": {
+        "description": "Same-speaker affinity bonus",
+        "hint": "Small post-threshold ranking boost for memories from the current speaker without altering rejection decisions (0-0.5)."
+      },
+      "affinity_multi_route_bonus": {
+        "description": "Multi-route consensus bonus",
+        "hint": "Small post-threshold ranking boost for memories hit by multiple retrieval routes (0-0.5)."
+      },
+      "temporal_recent_bonus": {
+        "description": "Recent temporal intent boost cap",
+        "hint": "Maximum exp(-0.08*days_old) recency boost applied only when recent temporal intent is detected (0-0.5)."
       }
     },
     "importance_decay": {

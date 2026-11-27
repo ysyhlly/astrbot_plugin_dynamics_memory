@@ -22,6 +22,30 @@ from .sqlite_connection import (
     resolve_journal_mode,
 )
 
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+
+def _resolve_read_executor_workers() -> int:
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter()
+                if isinstance(limits, dict) and limits.get("memory_executor_workers"):
+                    return max(1, min(4, int(limits["memory_executor_workers"])))
+            except Exception:
+                pass
+    return 2
+
+
+_ADMISSION_PRUNE_INTERVAL_SECONDS = 300.0
+
 # Retry columns are an additive v3 extension. Keeping the marker at v3 lets
 # the deployed rc7 reader reopen this sidecar during a source-only rollback.
 SCHEMA_VERSION = 3
@@ -49,12 +73,14 @@ class EvidenceSidecar:
         self._revision_cache: dict[str, dict] = {}
         self._ready = False
         self._read_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="evidence-read"
+            max_workers=_resolve_read_executor_workers(),
+            thread_name_prefix="evidence-read",
         )
         self._read_local = threading.local()
         self._read_stats_lock = threading.Lock()
         self._read_stats: dict[str, dict] = {}
         self._journal_mode = JOURNAL_MODE_WAL
+        self._last_admission_prune_ts: float | None = None
 
     async def initialize(self) -> None:
         journal_mode = await resolve_journal_mode(self.path.parent)
@@ -83,6 +109,29 @@ class EvidenceSidecar:
         db = sqlite3.connect(str(self.path), timeout=5.0, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=5000")
+        db.execute(
+            "PRAGMA synchronous=NORMAL"
+            if self._journal_mode == JOURNAL_MODE_WAL
+            else "PRAGMA synchronous=FULL"
+        )
+        if _series_panels is not None and callable(
+            getattr(_series_panels, "apply_series_sqlite_pragmas", None)
+        ):
+            try:
+                _series_panels.apply_series_sqlite_pragmas(db)
+            except Exception:
+                pass
+        else:
+            for sql in (
+                "PRAGMA cache_size=-1024",
+                "PRAGMA temp_store=FILE",
+                "PRAGMA mmap_size=0",
+                "PRAGMA journal_size_limit=8388608",
+            ):
+                try:
+                    db.execute(sql)
+                except sqlite3.Error:
+                    pass
         return db
 
     @contextmanager
@@ -976,11 +1025,36 @@ class EvidenceSidecar:
     ) -> list[dict]:
         claimed = []
         with self._lock, self._session() as db:
-            db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                "DELETE FROM evidence_queue_admissions WHERE admitted_at<=?",
-                (now - 86400,),
+            need_prune = (
+                self._last_admission_prune_ts is None
+                or abs(now - self._last_admission_prune_ts)
+                >= _ADMISSION_PRUNE_INTERVAL_SECONDS
             )
+            # Fast read-only idle check before opening a BEGIN IMMEDIATE write transaction.
+            has_work = db.execute(
+                "SELECT 1 FROM evidence_derivation_queue "
+                "WHERE (status IN ('queued','deferred') AND available_at<=?) "
+                "OR (status='leased' AND lease_until<=?) LIMIT 1",
+                (now, now),
+            ).fetchone()
+            if has_work is None:
+                if need_prune:
+                    has_stale_adm = db.execute(
+                        "SELECT 1 FROM evidence_queue_admissions WHERE admitted_at<=? LIMIT 1",
+                        (now - 86400,),
+                    ).fetchone()
+                    if has_stale_adm is None:
+                        self._last_admission_prune_ts = now
+                        return []
+                else:
+                    return []
+            db.execute("BEGIN IMMEDIATE")
+            if need_prune:
+                db.execute(
+                    "DELETE FROM evidence_queue_admissions WHERE admitted_at<=?",
+                    (now - 86400,),
+                )
+                self._last_admission_prune_ts = now
             db.execute(
                 "UPDATE evidence_derivation_queue SET status='queued',lease_id='',lease_until=0,available_at=?,updated_at=? "
                 "WHERE status='leased' AND lease_until<=?",

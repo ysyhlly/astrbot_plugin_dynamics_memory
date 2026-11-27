@@ -4,6 +4,7 @@
 """
 
 import asyncio
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 class GroupCapture:
     """群聊消息捕获类"""
 
+    _LIMIT_CHECK_INTERVAL = 20
+    _LIMIT_COUNTER_MAX_SESSIONS = 1024
+
     def __init__(
         self,
         config_manager: "ConfigManager",
@@ -46,6 +50,21 @@ class GroupCapture:
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
         self.context = context
+        self._limit_check_counters: OrderedDict[str, int] = OrderedDict()
+
+    def _should_check_message_limit(self, session_id: str) -> bool:
+        """每 20 条群聊消息触发一次上限检查，避免逐条 SELECT COUNT(*)。"""
+        interval = max(1, int(getattr(self, "_LIMIT_CHECK_INTERVAL", 20)))
+        count = self._limit_check_counters.get(session_id, 0) + 1
+        if count >= interval:
+            self._limit_check_counters[session_id] = 0
+            self._limit_check_counters.move_to_end(session_id)
+            return True
+        self._limit_check_counters[session_id] = count
+        self._limit_check_counters.move_to_end(session_id)
+        while len(self._limit_check_counters) > self._LIMIT_COUNTER_MAX_SESSIONS:
+            self._limit_check_counters.popitem(last=False)
+        return False
 
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """Capture all group messages for memory storage"""
@@ -101,8 +120,9 @@ class GroupCapture:
             if dedup_key:
                 await self.message_utils.mark_message_processed(dedup_key)
 
-            # 执行消息数量上限控制
-            await self.message_utils.enforce_message_limit(session_id)
+            # 每 20 条群聊消息执行一次消息数量上限控制，避免每条消息都查 SELECT COUNT(*)
+            if self._should_check_message_limit(session_id):
+                await self.message_utils.enforce_message_limit(session_id)
 
             logger.debug(
                 f"[{session_id}] 捕获群聊消息: "

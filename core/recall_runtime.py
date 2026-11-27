@@ -17,6 +17,28 @@ from typing import Any
 
 from astrbot.api import logger
 
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+
+def _resolve_copy_executor_workers(context: Any = None) -> int:
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if isinstance(limits, dict) and limits.get("memory_executor_workers"):
+                    return max(1, min(4, int(limits["memory_executor_workers"])))
+            except Exception:
+                pass
+    return 2
+
+
 _ADAPTER_SNAPSHOT_UNSET = object()
 
 
@@ -461,9 +483,10 @@ class BoundedRecallTaskPool:
         self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._closed = False
         self._drain_task: asyncio.Task | None = None
-        self._copy_slots = asyncio.Semaphore(4)
+        workers = _resolve_copy_executor_workers()
+        self._copy_slots = asyncio.Semaphore(workers)
         self._copy_executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="recall-copy"
+            max_workers=workers, thread_name_prefix="recall-copy"
         )
         self._copy_tasks: set[asyncio.Task] = set()
         self._coalesced = 0

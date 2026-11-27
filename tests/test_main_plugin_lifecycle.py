@@ -121,7 +121,9 @@ def test_plugin_init_wires_runtime_dependencies(tmp_path, monkeypatch):
     )
     page_api.register_routes.assert_called_once_with()
     set_active_plugin.assert_called_once_with(plugin)
-    i18n_init.assert_called_once_with("en")
+    i18n_init.assert_called_once()
+    assert i18n_init.call_args.args == ("en",)
+    assert callable(i18n_init.call_args.kwargs.get("resolver"))
     assert plugin.event_handler is None
     assert plugin.command_handler is None
     assert len(scheduled) == 1
@@ -438,6 +440,60 @@ async def test_recall_hook_requires_ready_plugin_and_event_handler():
     plugin.event_handler.handle_memory_recall.assert_awaited_once()
     assert plugin.event_handler.handle_memory_recall.await_args.args == (event, request)
     assert "budget" in plugin.event_handler.handle_memory_recall.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_recall_hook_managed_event_schedules_blocking_owner_in_background(
+    monkeypatch,
+):
+    plugin = _make_plugin(event_handler=Mock())
+    release_owner = asyncio.Event()
+    owner_finished = asyncio.Event()
+
+    async def _slow_owner(_event):
+        await release_owner.wait()
+        owner_finished.set()
+
+    plugin._remember_blocking_owner = _slow_owner
+    monkeypatch.setattr(main_module, "is_managed_event", lambda _event: True)
+
+    event, request = Mock(), Mock()
+    started = asyncio.get_running_loop().time()
+    await plugin.handle_memory_recall(event, request)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.05
+    assert request._lm_private_hook_outcome_v1 == "skipped_managed"
+    assert not owner_finished.is_set()
+    assert len(plugin._background_tasks) == 1
+
+    release_owner.set()
+    await asyncio.wait_for(owner_finished.wait(), timeout=1.0)
+    await asyncio.gather(*list(plugin._background_tasks), return_exceptions=True)
+    await asyncio.sleep(0)
+    assert len(plugin._background_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_recall_hook_managed_event_falls_back_to_await_without_tracked_task_helper(
+    monkeypatch,
+):
+    called = []
+
+    async def _owner(event):
+        called.append(event)
+
+    stub = types.SimpleNamespace(
+        series_runtime_allowed=lambda: True,
+        _remember_blocking_owner=_owner,
+    )
+    monkeypatch.setattr(main_module, "is_managed_event", lambda _event: True)
+
+    event, request = Mock(), Mock()
+    await LivingMemoryPlugin.handle_memory_recall(stub, event, request)
+
+    assert called == [event]
+    assert request._lm_private_hook_outcome_v1 == "skipped_managed"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,6 @@ import time
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore

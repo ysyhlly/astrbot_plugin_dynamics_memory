@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import re
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -34,8 +35,14 @@ from ..recall_runtime import (
     RecallOperationContext,
     discard_private_summary_segment,
     remember_private_segment,
+    timed_recall_phase,
 )
-from ..retrieval.vector_search import QueryEmbeddingCache
+from ..retrieval.query_rewriter import (
+    QueryRewriter,
+    extract_reply_quote,
+    should_rewrite_query,
+)
+from ..retrieval.vector_search import QueryEmbeddingCache, query_embeddings
 from ..summary_source import AtomProjectionProof, summary_metadata_sha256, text_sha256
 from ..utils import (
     format_memories_for_injection,
@@ -147,6 +154,7 @@ class MemoryRecall:
         evidence_revision_provider=None,
         summary_guard=None,
         storage_session_tasks: dict[str, asyncio.Task] | None = None,
+        query_rewriter: QueryRewriter | None = None,
     ):
         """
         初始化记忆召回模块
@@ -170,6 +178,9 @@ class MemoryRecall:
         self.recall_runtime = recall_runtime
         self.evidence_revision_provider = evidence_revision_provider
         self.summary_guard = summary_guard
+        self.query_rewriter = query_rewriter or QueryRewriter(
+            context=context, config_manager=config_manager
+        )
         self._message_limit_tasks: dict[str, asyncio.Task] = {}
         self._message_limit_task_limit = 16
         self._scope_tasks: set[asyncio.Task] = set()
@@ -210,6 +221,7 @@ class MemoryRecall:
                 getattr(self, "context", None), event
             ) or not is_event_memory_allowed(self.config_manager, event):
                 logger.debug("[LMRecall] route=policy outcome=denied")
+                self._set_recall_outcome(req, "policy_denied")
                 return
             if is_event_privacy_muted(getattr(self, "context", None), event, "memory"):
                 logger.debug("[LMRecall] route=privacy_mute outcome=skipped")
@@ -388,6 +400,15 @@ class MemoryRecall:
                 # concatenate stored assistant turns or rewritten request text.
                 query_for_search = actual_query
 
+                # Extract speaker identity & reply quote for conditional query
+                # rewriting and post-rerank affinity weighting.
+                sender_id = self._extract_event_sender_id(event)
+                sender_name = self._extract_event_sender_name(event)
+                reply_quote = extract_reply_quote(event)
+                recent_messages = await self._load_recent_messages_for_rewrite(
+                    session_id, actual_query, deadline
+                )
+
                 # 执行记忆召回
                 logger.info(
                     "[LMRecall] route=search outcome=start query_chars=%d",
@@ -408,6 +429,19 @@ class MemoryRecall:
                     budget=deadline,
                     req=req,
                 )
+                local_only = getattr(req, "_cd_local_recall_only_v1", False) is True
+                request_emb_cache = (
+                    search_context.embedding_cache
+                    if search_context is not None
+                    and getattr(search_context, "embedding_cache", None) is not None
+                    else QueryEmbeddingCache(deadline.search_deadline)
+                )
+                emb_token = (
+                    query_embeddings.set(request_emb_cache)
+                    if query_embeddings.get() is None
+                    else None
+                )
+
                 phase_started = time.monotonic()
                 scope_jobs = []
                 for scope in access_policy.read_scopes:
@@ -427,24 +461,171 @@ class MemoryRecall:
                     scope_jobs.append(
                         (scope, scope_session_id, scope_persona_id, interaction_type)
                     )
-                scope_results_list = await self._run_scope_searches(
-                    scope_jobs,
-                    deadline,
-                    query_for_search,
-                    recall_k,
-                    search_context,
-                    req,
-                    session_id,
-                    persona_id,
-                )
-                phases = getattr(req, "_lm_private_phase_ms_v1", {})
+
+                async def _prewarm_embeddings(queries: list[str]) -> None:
+                    if local_only or not queries:
+                        return
+                    faiss_db = getattr(self.memory_engine, "faiss_db", None)
+                    provider = getattr(faiss_db, "embedding_provider", None)
+                    if provider is None:
+                        return
+                    try:
+                        await timed_recall_phase(
+                            req,
+                            "embed",
+                            request_emb_cache.get_embeddings_batch(provider, queries),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.debug(
+                            "[LMRecall] route=embed outcome=error exception_type=%s",
+                            type(exc).__name__,
+                        )
+
+                async def _execute_scopes(
+                    search_q: str,
+                    *,
+                    ctx=search_context,
+                    sub_queries: Sequence[str] = (),
+                    temporal_intent: str | None = None,
+                    time_hint_days: int | None = None,
+                    timings: dict[str, float] | None = None,
+                ):
+                    all_q = [search_q, *sub_queries]
+                    if all_q:
+                        await _prewarm_embeddings(all_q)
+                    return await self._run_scope_searches(
+                        scope_jobs,
+                        deadline,
+                        search_q,
+                        recall_k,
+                        ctx,
+                        req,
+                        session_id,
+                        persona_id,
+                        sub_queries=tuple(sub_queries) if sub_queries else None,
+                        current_session_id=session_id,
+                        current_sender_id=sender_id,
+                        current_sender_name=sender_name,
+                        temporal_intent=temporal_intent,
+                        time_hint_days=time_hint_days,
+                        phase_timings=timings,
+                    )
+
+                phase_timings: dict[str, float] = {}
+                active_search_context = search_context
+                try:
+                    (
+                        should_trigger,
+                        _trigger_reason,
+                        heuristic_temporal,
+                        heuristic_days,
+                    ) = should_rewrite_query(
+                        actual_query,
+                        recent_messages=recent_messages,
+                        reply_quote=reply_quote,
+                    )
+                    if (
+                        should_trigger
+                        and self.query_rewriter.enabled
+                        and not local_only
+                    ):
+                        raw_timings: dict[str, float] = {}
+                        # Separate context for speculative raw fallback so cancelling
+                        # it on rewrite success never pollutes route_failures.
+                        raw_search_context = self._make_search_context(
+                            session_id=session_id,
+                            query=actual_query,
+                            persona_id=persona_id,
+                            budget=deadline,
+                            req=req,
+                        )
+                        if raw_search_context is not None:
+                            raw_search_context.embedding_cache = request_emb_cache
+                        rewrite_result, raw_scope_outcomes = await timed_recall_phase(
+                            req,
+                            "rewrite",
+                            self.query_rewriter.rewrite_with_raw_fallback(
+                                actual_query,
+                                lambda: _execute_scopes(
+                                    actual_query,
+                                    ctx=raw_search_context,
+                                    temporal_intent=heuristic_temporal,
+                                    time_hint_days=heuristic_days,
+                                    timings=raw_timings,
+                                ),
+                                recent_messages=recent_messages,
+                                reply_quote=reply_quote,
+                                sender_name=sender_name,
+                                sender_id=sender_id,
+                            ),
+                        )
+                        if raw_scope_outcomes is not None:
+                            scope_results_list = raw_scope_outcomes
+                            phase_timings = raw_timings
+                            active_search_context = raw_search_context
+                        else:
+                            query_for_search = rewrite_result.standalone_query
+                            rewritten_search_context = self._make_search_context(
+                                session_id=session_id,
+                                query=query_for_search,
+                                persona_id=persona_id,
+                                budget=deadline,
+                                req=req,
+                            )
+                            if rewritten_search_context is not None:
+                                rewritten_search_context.embedding_cache = (
+                                    request_emb_cache
+                                )
+                            active_search_context = rewritten_search_context
+                            scope_results_list = await _execute_scopes(
+                                query_for_search,
+                                ctx=rewritten_search_context,
+                                sub_queries=rewrite_result.sub_queries,
+                                temporal_intent=rewrite_result.temporal_intent,
+                                time_hint_days=rewrite_result.time_hint_days,
+                                timings=phase_timings,
+                            )
+                    else:
+                        phases_init = getattr(req, "_lm_private_phase_ms_v1", None)
+                        if not isinstance(phases_init, dict):
+                            phases_init = {}
+                            req._lm_private_phase_ms_v1 = phases_init
+                        phases_init.setdefault("rewrite", 0.0)
+                        scope_results_list = await _execute_scopes(
+                            query_for_search,
+                            ctx=search_context,
+                            temporal_intent=heuristic_temporal,
+                            time_hint_days=heuristic_days,
+                            timings=phase_timings,
+                        )
+                finally:
+                    if emb_token is not None:
+                        query_embeddings.reset(emb_token)
+
+                phases = getattr(req, "_lm_private_phase_ms_v1", None)
+                if not isinstance(phases, dict):
+                    phases = {}
                 phases["scope_searches"] = round(
                     (time.monotonic() - phase_started) * 1000, 1
                 )
+                for phase_key in (
+                    "doc_route",
+                    "atom_route",
+                    "graph_route",
+                    "rerank",
+                ):
+                    if phase_key in phase_timings:
+                        phases[phase_key] = round(
+                            phases.get(phase_key, 0.0) + phase_timings[phase_key], 1
+                        )
                 req._lm_private_phase_ms_v1 = phases
                 search_partial = any(
                     outcome["state"] != "completed" for outcome in scope_results_list
-                ) or bool(search_context and search_context.route_failures)
+                ) or bool(
+                    active_search_context and active_search_context.route_failures
+                )
                 for (scope, scope_session_id, _, _), outcome in zip(
                     scope_jobs, scope_results_list
                 ):
@@ -532,11 +713,19 @@ class MemoryRecall:
 
                     if self.evidence_filter:
                         try:
-                            projected = await asyncio.wait_for(
-                                self.evidence_filter(
-                                    event, req, memory_list, actual_query, persona_id
+                            projected = await timed_recall_phase(
+                                req,
+                                "evidence",
+                                asyncio.wait_for(
+                                    self.evidence_filter(
+                                        event,
+                                        req,
+                                        memory_list,
+                                        actual_query,
+                                        persona_id,
+                                    ),
+                                    timeout=deadline.remaining(),
                                 ),
-                                timeout=deadline.remaining(),
                             )
                         except asyncio.TimeoutError:
                             self._set_recall_outcome(req, "deadline_exceeded")
@@ -1069,6 +1258,72 @@ class MemoryRecall:
         )
 
     @staticmethod
+    def _extract_event_sender_id(event: Any) -> str | None:
+        getter = getattr(event, "get_sender_id", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if isinstance(val, (str, int)) and str(val).strip():
+                    return str(val).strip()
+            except Exception:
+                pass
+        val = getattr(event, "sender_id", None)
+        if isinstance(val, (str, int)) and str(val).strip():
+            return str(val).strip()
+        return None
+
+    @staticmethod
+    def _extract_event_sender_name(event: Any) -> str | None:
+        getter = getattr(event, "get_sender_name", None)
+        if callable(getter):
+            try:
+                val = getter()
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            except Exception:
+                pass
+        msg_obj = getattr(event, "message_obj", None)
+        sender = getattr(msg_obj, "sender", None)
+        nick = getattr(sender, "nickname", None)
+        if isinstance(nick, str) and nick.strip():
+            return nick.strip()
+        return None
+
+    async def _load_recent_messages_for_rewrite(
+        self, session_id: str, actual_query: str, deadline: RecallDeadline
+    ) -> list[Any]:
+        """Fetch up to 6 recent same-session messages within a tight read budget."""
+        if not session_id or self.conversation_manager is None:
+            return []
+        get_messages = getattr(self.conversation_manager, "get_messages", None)
+        if not callable(get_messages):
+            return []
+        budget = min(0.15, deadline.search_remaining())
+        if budget <= 0:
+            return []
+        try:
+            msgs = await asyncio.wait_for(
+                get_messages(session_id=session_id, limit=7, use_cache=True),
+                timeout=budget,
+            )
+        except Exception:
+            return []
+        if not isinstance(msgs, list):
+            return []
+        # Exclude the just-persisted copy of the current user message at the tail
+        cleaned = list(msgs)
+        if cleaned:
+            tail = cleaned[-1]
+            tail_content = (
+                tail.get("content")
+                if isinstance(tail, dict)
+                else getattr(tail, "content", "")
+            )
+            if str(tail_content or "").strip() == actual_query.strip():
+                cleaned = cleaned[:-1]
+        return cleaned[-6:]
+
+    @staticmethod
     def _is_valid_recall_outcome(outcome: Any) -> bool:
         if not isinstance(outcome, str) or not outcome:
             return False
@@ -1084,6 +1339,10 @@ class MemoryRecall:
             "disabled",
             "privacy_muted",
             "policy_denied",
+            "retry_without_memory",
+            "managed_skipped",
+            "not_ready",
+            "rejected_low_confidence",
         }:
             return True
         return (
@@ -1102,7 +1361,23 @@ class MemoryRecall:
             pass
 
     async def _run_scope_searches(
-        self, jobs, deadline, query, k, context, req, session_id, persona_id
+        self,
+        jobs,
+        deadline,
+        query,
+        k,
+        context,
+        req,
+        session_id,
+        persona_id,
+        *,
+        sub_queries: tuple[str, ...] | None = None,
+        current_session_id: str | None = None,
+        current_sender_id: str | None = None,
+        current_sender_name: str | None = None,
+        temporal_intent: str | None = None,
+        time_hint_days: int | None = None,
+        phase_timings: dict[str, float] | None = None,
     ):
         """Collect completed scopes by the search cutoff, with three reads at a time."""
         outcomes = [{"state": "timeout", "value": []} for _ in jobs]
@@ -1127,11 +1402,26 @@ class MemoryRecall:
                     if context
                     else None
                 )
-                extra_kwargs = (
-                    {"excluded_session_ids": scope.excluded_session_ids}
-                    if scope.excluded_session_ids
+                excluded_sessions = getattr(scope, "excluded_session_ids", None)
+                extra_kwargs: dict[str, Any] = (
+                    {"excluded_session_ids": excluded_sessions}
+                    if excluded_sessions
                     else {}
                 )
+                if sub_queries:
+                    extra_kwargs["sub_queries"] = tuple(sub_queries)
+                if current_session_id is not None:
+                    extra_kwargs["current_session_id"] = current_session_id
+                if current_sender_id is not None:
+                    extra_kwargs["current_sender_id"] = current_sender_id
+                if current_sender_name is not None:
+                    extra_kwargs["current_sender_name"] = current_sender_name
+                if temporal_intent is not None:
+                    extra_kwargs["temporal_intent"] = temporal_intent
+                if time_hint_days is not None:
+                    extra_kwargs["time_hint_days"] = time_hint_days
+                if phase_timings is not None:
+                    extra_kwargs["phase_timings"] = phase_timings
                 task = self._submit_scope_search(
                     query=query,
                     k=k,
@@ -1188,11 +1478,31 @@ class MemoryRecall:
         search = self.memory_engine.search_memories
 
         async def read():
-            result = await search(**search_kwargs)
+            try:
+                result = await search(**search_kwargs)
+            except TypeError:
+                legacy_kwargs = {
+                    k: v
+                    for k, v in search_kwargs.items()
+                    if k
+                    not in {
+                        "sub_queries",
+                        "current_session_id",
+                        "current_sender_id",
+                        "current_sender_name",
+                        "temporal_intent",
+                        "time_hint_days",
+                        "phase_timings",
+                    }
+                }
+                result = await search(**legacy_kwargs)
             return time.monotonic(), result
 
         task_context = contextvars.Context()
         task_context.run(current_adapter_access.set, current_adapter_access.get())
+        current_emb_cache = query_embeddings.get()
+        if current_emb_cache is not None:
+            task_context.run(query_embeddings.set, current_emb_cache)
         if self.recall_runtime is not None:
             return self.recall_runtime.submit_scope(read, context=task_context)
         if len(self._scope_tasks) >= 16:

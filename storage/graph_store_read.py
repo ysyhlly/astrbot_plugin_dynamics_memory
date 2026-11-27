@@ -10,7 +10,6 @@ import math
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ..core.memory_scope import adapter_sql, normalize_interaction_types
@@ -437,9 +436,13 @@ class GraphStoreReadMixin:
                         )
                         params.append(f"%{token}%")
                     else:
-                        lo, hi = self._prefix_range_bounds(token)
-                        clauses.append("(canonical_value >= ? AND canonical_value < ?)")
-                        params.extend([lo, hi])
+                        escaped = (
+                            token.replace("\\", "\\\\")
+                            .replace("%", "\\%")
+                            .replace("_", "\\_")
+                        )
+                        clauses.append("canonical_value LIKE ? ESCAPE '\\'")
+                        params.append(f"%{escaped}%")
                 cursor = await db.execute(
                     f"""
                     SELECT id, node_key, node_type, node_value, canonical_value, metadata
@@ -1176,62 +1179,75 @@ class GraphStoreReadMixin:
             )
             edge_rows = await edge_cursor.fetchall()
 
-            memory_cursor = await db.execute(
-                f"""
-                SELECT ge.source_memory_id, ge.session_id, ge.persona_id,
-                       ge.content, ge.metadata
-                FROM graph_entries ge
-                JOIN (
-                    SELECT ge.source_memory_id, MAX(ge.id) AS latest_entry_id
-                    FROM graph_entries ge
-                    {entry_where}
-                    GROUP BY ge.source_memory_id
-                ) latest ON latest.latest_entry_id = ge.id
-                ORDER BY ge.source_memory_id ASC
-                """,
-                tuple(params),
-            )
-            memory_rows = await memory_cursor.fetchall()
-
-        node_map: dict[int, dict[str, Any]] = {}
-        memory_node_ids: dict[int, list[int]] = {}
-        for row in node_rows:
-            node_id = int(row["id"])
-            memory_ids = row["memory_ids"].split(",")
-            node_map[node_id] = {
-                "id": node_id,
-                "key": row["node_key"],
-                "type": row["node_type"],
-                "label": row["node_value"],
-                "canonical_value": row["canonical_value"],
-                "metadata": safe_json_dict(row["metadata"]),
-                "entry_count": int(row["entry_count"] or 0),
-                "memory_count": len(memory_ids),
-                "degree": 0,
-                "weight": 0.0,
-            }
-            for memory_id in memory_ids:
-                memory_node_ids.setdefault(int(memory_id), []).append(node_id)
-
-        edges: list[dict[str, Any]] = []
-        for row in edge_rows:
-            source = int(row["source_node_id"])
-            target = int(row["target_node_id"])
-            if source not in node_map or target not in node_map:
-                continue
-            edges.append(
-                {
-                    "id": int(row["id"]),
-                    "source": source,
-                    "target": target,
-                    "relation_type": row["relation_type"],
-                    "memory_id": int(row["source_memory_id"]),
-                    "weight": float(row["weight"]),
-                    "confidence": float(row["confidence"]),
+            node_map: dict[int, dict[str, Any]] = {}
+            memory_node_ids: dict[int, list[int]] = {}
+            for row in node_rows:
+                node_id = int(row["id"])
+                memory_ids = row["memory_ids"].split(",")
+                node_map[node_id] = {
+                    "id": node_id,
+                    "key": row["node_key"],
+                    "type": row["node_type"],
+                    "label": row["node_value"],
+                    "canonical_value": row["canonical_value"],
+                    "metadata": safe_json_dict(row["metadata"]),
+                    "entry_count": int(row["entry_count"] or 0),
+                    "memory_count": len(memory_ids),
+                    "degree": 0,
+                    "weight": 0.0,
                 }
-            )
-            node_map[source]["degree"] += 1
-            node_map[target]["degree"] += 1
+                for memory_id in memory_ids:
+                    memory_node_ids.setdefault(int(memory_id), []).append(node_id)
+
+            edges: list[dict[str, Any]] = []
+            for row in edge_rows:
+                source = int(row["source_node_id"])
+                target = int(row["target_node_id"])
+                if source not in node_map or target not in node_map:
+                    continue
+                edges.append(
+                    {
+                        "id": int(row["id"]),
+                        "source": source,
+                        "target": target,
+                        "relation_type": row["relation_type"],
+                        "memory_id": int(row["source_memory_id"]),
+                        "weight": float(row["weight"]),
+                        "confidence": float(row["confidence"]),
+                    }
+                )
+                node_map[source]["degree"] += 1
+                node_map[target]["degree"] += 1
+
+            referenced_memory_ids = set(memory_node_ids)
+            referenced_memory_ids.update(edge["memory_id"] for edge in edges)
+            memory_rows: list[Any] = []
+            if referenced_memory_ids and max_memories > 0:
+                sorted_ref_ids = sorted(referenced_memory_ids)
+                batch_size = max(1, int(getattr(self, "_SQLITE_BATCH_SIZE", 500)))
+                for start in range(0, len(sorted_ref_ids), batch_size):
+                    remaining = max_memories - len(memory_rows)
+                    if remaining <= 0:
+                        break
+                    chunk = sorted_ref_ids[start : start + batch_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    memory_cursor = await db.execute(
+                        f"""
+                        SELECT ge.source_memory_id, ge.session_id, ge.persona_id,
+                               ge.content, ge.metadata
+                        FROM graph_entries ge
+                        JOIN (
+                            SELECT ge.source_memory_id, MAX(ge.id) AS latest_entry_id
+                            FROM graph_entries ge
+                            {entry_where} AND ge.source_memory_id IN ({placeholders})
+                            GROUP BY ge.source_memory_id
+                        ) latest ON latest.latest_entry_id = ge.id
+                        ORDER BY ge.source_memory_id ASC
+                        LIMIT ?
+                        """,
+                        (*params, *chunk, remaining),
+                    )
+                    memory_rows.extend(await memory_cursor.fetchall())
 
         for node in node_map.values():
             node["weight"] = round(
@@ -1241,8 +1257,6 @@ class GraphStoreReadMixin:
                 4,
             )
 
-        referenced_memory_ids = set(memory_node_ids)
-        referenced_memory_ids.update(edge["memory_id"] for edge in edges)
         memories: list[dict[str, Any]] = []
         for row in memory_rows:
             memory_id = int(row["source_memory_id"])

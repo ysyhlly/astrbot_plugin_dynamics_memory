@@ -43,6 +43,10 @@ def _extract_hook():
         ).timed_recall_phase,
         "RecallDeadline": ShortDeadline,
         "is_managed_event": lambda _event: False,
+        "is_event_excluded_by_series": lambda _ctx, _event: False,
+        "is_event_memory_allowed": lambda _cfg, _event: True,
+        "is_event_privacy_muted": lambda _ctx, _event, _domain: False,
+        "should_skip_group_recall_query": lambda _event: False,
     }
     exec(compile(module, str(PLUGIN_MAIN), "exec"), namespace)
     return namespace["handle_memory_recall"]
@@ -60,6 +64,8 @@ def _harness(*, projection, owner, collect):
     )
     request = SimpleNamespace()
     instance = SimpleNamespace(
+        context=None,
+        config_manager=None,
         series_runtime_allowed=lambda: True,
         initializer=SimpleNamespace(is_initialized=True),
         event_handler=SimpleNamespace(

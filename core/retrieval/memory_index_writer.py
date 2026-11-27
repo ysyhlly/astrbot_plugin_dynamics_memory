@@ -25,12 +25,46 @@ class MemoryIndexWriter:
         bm25_retriever: Any,
         vector_retriever: Any,
         write_transaction: Any = None,
+        atom_vector_retriever: Any = None,
     ):
         self.bm25_retriever = bm25_retriever
         self.vector_retriever = vector_retriever
         # documents 表由 MemoryEngine 主连接持有；写事务必须与引擎共用同一把写锁，
         # 否则批量写入与删除会在两条连接上竞争同一张表。
         self._write_transaction = write_transaction
+        self.atom_vector_retriever = atom_vector_retriever
+
+    async def sync_atoms_added(self, atoms: list[Any]) -> int:
+        """Best-effort incremental sync of newly inserted active atoms to FAISS."""
+        if not atoms or self.atom_vector_retriever is None:
+            return 0
+        try:
+            return await self.atom_vector_retriever.add_atoms(atoms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[同步写入] 原子向量增量写入失败 (count=%d): %s",
+                len(atoms),
+                exc,
+            )
+            return 0
+
+    async def sync_atoms_deleted(self, atom_ids: list[int]) -> int:
+        """Best-effort incremental removal of atom IDs from FAISS."""
+        if not atom_ids or self.atom_vector_retriever is None:
+            return 0
+        try:
+            return await self.atom_vector_retriever.delete_atom_ids(atom_ids)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[同步删除] 原子向量增量删除失败 (count=%d): %s",
+                len(atom_ids),
+                exc,
+            )
+            return 0
 
     async def add_memory(
         self,

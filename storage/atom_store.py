@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ..core.memory_scope import adapter_sql, normalize_interaction_types
@@ -55,6 +54,28 @@ class AtomStore:
         self._read_conn: aiosqlite.Connection | None = None
         self._read_lock: asyncio.Lock | None = None
         self._has_parent_documents: bool | None = None
+        self._vector_sync: Any = None
+
+    def set_vector_sync(self, vector_sync: Any) -> None:
+        """Attach an optional AtomVectorRetriever to keep FAISS synced on deletes/expires."""
+        self._vector_sync = vector_sync
+
+    async def _notify_vector_deleted(self, atom_ids: list[int]) -> None:
+        if not atom_ids or self._vector_sync is None:
+            return
+        delete_fn = getattr(self._vector_sync, "delete_atom_ids", None)
+        if not callable(delete_fn):
+            return
+        try:
+            await delete_fn(atom_ids)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[AtomStore] 同步删除原子向量失败 (count=%d): %s",
+                len(atom_ids),
+                exc,
+            )
 
     def _get_read_lock(self) -> asyncio.Lock:
         if self._read_lock is None:
@@ -73,13 +94,16 @@ class AtomStore:
     async def _read_connect(self):
         """复用长期只读连接并加锁串行化；未开启缓存时按操作建连。"""
         if not self._cache_reads:
-            async with self._connect() as db:
+            db = await open_connection(self.db_path, readonly=True)
+            try:
                 db.row_factory = aiosqlite.Row
                 yield db
+            finally:
+                await db.close()
             return
         async with self._get_read_lock():
             if self._read_conn is None:
-                self._read_conn = await open_connection(self.db_path)
+                self._read_conn = await open_connection(self.db_path, readonly=True)
                 self._read_conn.row_factory = aiosqlite.Row
             yield self._read_conn
 
@@ -92,11 +116,14 @@ class AtomStore:
             self._has_parent_documents = None
 
     def _fts_format(self) -> str:
-        return (
-            self._FTS_FORMAT_TOKENIZED
-            if self._text_processor is not None
-            else self._FTS_FORMAT_RAW
+        if self._text_processor is None:
+            return self._FTS_FORMAT_RAW
+        tokenizer = (
+            str(getattr(self._text_processor, "tokenizer", "jieba") or "jieba")
+            .strip()
+            .lower()
         )
+        return f"{self._FTS_FORMAT_TOKENIZED}:{tokenizer}"
 
     async def _fts_content(self, content: str) -> str:
         """Tokenize text for the FTS index with the query tokenizer."""
@@ -216,10 +243,20 @@ class AtomStore:
         )
         expected_count = int((await cursor.fetchone())[0])
 
-        if stored_format == expected_format:
+        legacy_jieba_compatible = (
+            stored_format == self._FTS_FORMAT_TOKENIZED
+            and expected_format == f"{self._FTS_FORMAT_TOKENIZED}:jieba"
+        )
+        if stored_format == expected_format or legacy_jieba_compatible:
             cursor = await db.execute("SELECT COUNT(*) FROM memory_atoms_fts")
             fts_count = int((await cursor.fetchone())[0])
             if fts_count == expected_count:
+                if legacy_jieba_compatible:
+                    await db.execute(
+                        f"INSERT OR REPLACE INTO {self._FTS_STATE_TABLE}(key, value) "
+                        "VALUES ('fts_format', ?)",
+                        (expected_format,),
+                    )
                 return
             logger.info(
                 f"[AtomStore] 原子 FTS 索引不一致（{fts_count}/{expected_count}），"
@@ -361,6 +398,143 @@ class AtomStore:
             )
             rows = await cursor.fetchall()
         return [self._row_to_atom(row) for row in rows]
+
+    async def list_active_atoms(
+        self, *, include_expired: bool = False
+    ) -> list[MemoryAtom]:
+        """Return all active atoms ordered by id ASC (for batch vector indexing)."""
+        now = time.time()
+        conditions = ["status = 'active'"]
+        params: list[Any] = []
+        if not include_expired:
+            conditions.append("expires_at > ?")
+            params.append(now)
+        where_clause = " AND ".join(conditions)
+        async with self._read_connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"SELECT * FROM memory_atoms WHERE {where_clause} ORDER BY id ASC",
+                params,
+            )
+            rows = await cursor.fetchall()
+        return [self._row_to_atom(row) for row in rows]
+
+    async def get_by_ids_filtered(
+        self,
+        atom_ids: list[int],
+        *,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+        include_expired: bool = False,
+        interaction_type: str | tuple[str, ...] | None = None,
+        source_platform: str | None = None,
+        source_session_id: str | None = None,
+        excluded_session_ids: tuple[str, ...] | None = None,
+    ) -> list[MemoryAtom]:
+        """Fetch active atoms by ID with the same scope/ownership filters as search_fts."""
+        unique_ids = list(dict.fromkeys(int(aid) for aid in atom_ids if int(aid) > 0))
+        if not unique_ids:
+            return []
+
+        if self._has_parent_documents is None:
+            async with self._read_connect() as check_db:
+                cursor = await check_db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
+                )
+                self._has_parent_documents = await cursor.fetchone() is not None
+        has_parent_documents = self._has_parent_documents
+        parent_metadata = (
+            "CASE WHEN json_valid(d.metadata) THEN d.metadata ELSE '{}' END"
+            if has_parent_documents
+            else "CASE WHEN json_valid(ma.metadata) THEN ma.metadata ELSE '{}' END"
+        )
+        parent_join = (
+            "JOIN documents d ON d.id = ma.parent_memory_id"
+            if has_parent_documents
+            else ""
+        )
+
+        allowed_types = normalize_interaction_types(interaction_type)
+        if allowed_types is not None and not allowed_types:
+            return []
+
+        base_filters: list[str] = []
+        base_params: list[Any] = []
+        if not include_expired:
+            base_filters.extend(["ma.status = 'active'", "ma.expires_at > ?"])
+            base_params.append(time.time())
+        if has_parent_documents:
+            base_filters.append(
+                f"COALESCE(json_extract({parent_metadata}, '$.status'), 'active') = 'active'"
+            )
+        if session_id is not None:
+            base_filters.append("ma.session_id = ?")
+            base_params.append(session_id)
+        if persona_id is not None:
+            base_filters.append("ma.persona_id = ?")
+            base_params.append(persona_id)
+        if allowed_types is not None:
+            if len(allowed_types) == 1:
+                base_filters.append(
+                    f"json_extract({parent_metadata}, '$.interaction_type') = ?"
+                )
+                base_params.append(allowed_types[0])
+            else:
+                placeholders = ",".join("?" for _ in allowed_types)
+                base_filters.append(
+                    f"json_extract({parent_metadata}, '$.interaction_type') IN ({placeholders})"
+                )
+                base_params.extend(allowed_types)
+            if set(allowed_types).issubset({"group_chat", "unknown"}):
+                base_filters.append(
+                    f"COALESCE(json_extract({parent_metadata}, '$.memory_visibility'), '') != 'private'"
+                )
+        if source_session_id is not None:
+            base_filters.append(
+                f"json_extract({parent_metadata}, '$.source_session_id') = ?"
+            )
+            base_params.append(source_session_id)
+        if excluded_session_ids:
+            excl = tuple(excluded_session_ids)
+            placeholders = ",".join("?" for _ in excl)
+            base_filters.append(
+                f"COALESCE(json_extract({parent_metadata}, '$.session_id'), '') NOT IN ({placeholders})"
+            )
+            base_filters.append(
+                f"COALESCE(json_extract({parent_metadata}, '$.source_session_id'), '') NOT IN ({placeholders})"
+            )
+            base_params.extend(excl)
+            base_params.extend(excl)
+        if source_platform:
+            prefix = source_platform.casefold() + ":groupmessage:"
+            base_filters.append(
+                f"(lower(json_extract({parent_metadata}, '$.source_platform')) = ? "
+                f"OR substr(lower(json_extract({parent_metadata}, '$.source_session_id')), 1, length(?)) = ? "
+                f"OR substr(lower(json_extract({parent_metadata}, '$.session_id')), 1, length(?)) = ?)"
+            )
+            base_params.extend(
+                [source_platform.casefold(), prefix, prefix, prefix, prefix]
+            )
+        ownership, ownership_params = adapter_sql("ma.metadata")
+        base_filters.append(ownership)
+        base_params.extend(ownership_params)
+
+        atoms: list[MemoryAtom] = []
+        async with self._read_connect() as db:
+            db.row_factory = aiosqlite.Row
+            for start in range(0, len(unique_ids), self._SQLITE_BATCH_SIZE):
+                chunk = unique_ids[start : start + self._SQLITE_BATCH_SIZE]
+                id_placeholders = ",".join("?" for _ in chunk)
+                where_sql = f"ma.id IN ({id_placeholders})"
+                if base_filters:
+                    where_sql += " AND " + " AND ".join(base_filters)
+                cursor = await db.execute(
+                    f"SELECT ma.* FROM memory_atoms ma {parent_join} WHERE {where_sql}",
+                    (*chunk, *base_params),
+                )
+                rows = await cursor.fetchall()
+                atoms.extend(self._row_to_atom(row) for row in rows)
+        return atoms
 
     async def search_fts(
         self,
@@ -663,12 +837,25 @@ class AtomStore:
     async def expire_stale_atoms(self) -> int:
         """Mark atoms whose expires_at has passed as EXPIRED. Returns count."""
         now = time.time()
+        expired_ids: list[int] = []
         async with write_transaction(self) as db:
             cursor = await db.execute(
-                "UPDATE memory_atoms SET status = ? WHERE status = 'active' AND expires_at < ?",
-                (AtomStatus.EXPIRED.value, now),
+                "SELECT id FROM memory_atoms WHERE status = 'active' AND expires_at < ?",
+                (now,),
             )
-            return cursor.rowcount
+            rows = await cursor.fetchall()
+            expired_ids = [int(row[0]) for row in rows]
+            if expired_ids:
+                for start in range(0, len(expired_ids), self._SQLITE_BATCH_SIZE):
+                    batch = expired_ids[start : start + self._SQLITE_BATCH_SIZE]
+                    placeholders = ",".join("?" * len(batch))
+                    await db.execute(
+                        f"UPDATE memory_atoms SET status = ? WHERE id IN ({placeholders})",
+                        (AtomStatus.EXPIRED.value, *batch),
+                    )
+        if expired_ids:
+            await self._notify_vector_deleted(expired_ids)
+        return len(expired_ids)
 
     async def _delete_atom_ids_chunked(
         self, db: aiosqlite.Connection, atom_ids: list[int], *, hard_delete: bool
@@ -698,6 +885,7 @@ class AtomStore:
     async def cleanup_forgotten(self, older_than_days: float = 7.0) -> int:
         """Remove FORGOTTEN atoms older than the threshold from FTS. Returns count."""
         cutoff = time.time() - older_than_days * 86400.0
+        atom_ids: list[int] = []
         async with write_transaction(self) as db:
             cursor = await db.execute(
                 "SELECT id FROM memory_atoms WHERE status = 'forgotten' AND expires_at < ?",
@@ -707,11 +895,14 @@ class AtomStore:
             atom_ids = [int(row[0]) for row in rows]
             if atom_ids:
                 await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
-            return len(atom_ids)
+        if atom_ids:
+            await self._notify_vector_deleted(atom_ids)
+        return len(atom_ids)
 
     async def forget_expired_atoms(self, older_than_days: float = 7.0) -> int:
         """Soft-delete old expired atoms and remove them from the FTS index."""
         cutoff = time.time() - older_than_days * 86400.0
+        atom_ids: list[int] = []
         async with write_transaction(self) as db:
             cursor = await db.execute(
                 "SELECT id FROM memory_atoms WHERE status = 'expired' AND expires_at < ?",
@@ -721,10 +912,13 @@ class AtomStore:
             atom_ids = [int(row[0]) for row in rows]
             if atom_ids:
                 await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=False)
-            return len(atom_ids)
+        if atom_ids:
+            await self._notify_vector_deleted(atom_ids)
+        return len(atom_ids)
 
     async def delete_by_parent(self, parent_memory_id: int) -> int:
         """Delete all atoms belonging to a parent memory. Returns count."""
+        atom_ids: list[int] = []
         async with write_transaction(self) as db:
             cursor = await db.execute(
                 "SELECT id FROM memory_atoms WHERE parent_memory_id = ?",
@@ -734,7 +928,9 @@ class AtomStore:
             atom_ids = [int(row[0]) for row in rows]
             if atom_ids:
                 await self._delete_atom_ids_chunked(db, atom_ids, hard_delete=True)
-            return len(atom_ids)
+        if atom_ids:
+            await self._notify_vector_deleted(atom_ids)
+        return len(atom_ids)
 
     async def batch_delete_by_parent(self, parent_memory_ids: list[int]) -> int:
         """Delete atoms for multiple parent memories in bulk."""
@@ -743,6 +939,7 @@ class AtomStore:
             return 0
 
         deleted_count = 0
+        deleted_atom_ids: list[int] = []
         async with write_transaction(self) as db:
             for index in range(0, len(normalized_ids), self._SQLITE_BATCH_SIZE):
                 batch = normalized_ids[index : index + self._SQLITE_BATCH_SIZE]
@@ -770,7 +967,10 @@ class AtomStore:
                     atom_ids,
                 )
                 deleted_count += cursor.rowcount
+                deleted_atom_ids.extend(atom_ids)
 
+        if deleted_atom_ids:
+            await self._notify_vector_deleted(deleted_atom_ids)
         return deleted_count
 
     async def get_stats(self) -> dict[str, int]:

@@ -28,6 +28,43 @@ def _compact_injection_text(text: Any, markers: tuple[str, ...]) -> str:
     return compact
 
 
+def _format_matched_atoms_section(
+    metadata: dict[str, Any], markers: tuple[str, ...]
+) -> str:
+    """Render top 1-2 matched atoms as highlighted facts with optional date tags."""
+    raw_atoms = metadata.get("matched_atoms")
+    if not isinstance(raw_atoms, list) or not raw_atoms:
+        return ""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for atom in raw_atoms:
+        if isinstance(atom, dict):
+            text = _compact_injection_text(atom.get("content", ""), markers)
+            ts = atom.get("event_time") or atom.get("created_at")
+        elif isinstance(atom, str):
+            text = _compact_injection_text(atom, markers)
+            ts = None
+        else:
+            text = _compact_injection_text(getattr(atom, "content", ""), markers)
+            ts = getattr(atom, "event_time", None) or getattr(atom, "created_at", None)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        date_tag = ""
+        if ts:
+            try:
+                dt = datetime.fromtimestamp(validate_timestamp(ts))
+                date_tag = f"[{dt.strftime('%Y-%m-%d')}] "
+            except Exception:
+                date_tag = ""
+        lines.append(f"- {date_tag}{text}")
+        if len(lines) >= 2:
+            break
+    if not lines:
+        return ""
+    return "【精准命中事实】\n" + "\n".join(lines)
+
+
 def _memory_injection_content(content: Any, metadata: Any) -> str:
     """Prefer resolved live facts, otherwise retain the personality channel."""
     raw_content = str(content or "").strip()
@@ -256,15 +293,32 @@ def format_memories_for_injection(
 
             # Resolved atoms take precedence over parent summaries; other
             # memories retain the personality channel and legacy fallback.
+            # When matched_atoms are present (Small-to-Big atom route), highlight
+            # the top 1-2 matched facts and attach concise parent context.
+            atom_highlight = (
+                _format_matched_atoms_section(metadata, markers)
+                if isinstance(metadata, dict)
+                else ""
+            )
             display_content = _compact_injection_text(
                 _memory_injection_content(content, metadata), markers
             )
-            # 单条记忆也截断：导入的长记忆可能上千字符，避免单条挤占全部预算。
-            if len(display_content) > _MAX_INJECTION_ENTRY_CHARS:
-                display_content = (
-                    display_content[:_MAX_INJECTION_ENTRY_CHARS].rstrip() + "…"
+            if atom_highlight:
+                context_budget = max(
+                    120, _MAX_INJECTION_ENTRY_CHARS - len(atom_highlight) - 16
                 )
-            entry_parts.append(display_content)
+                if len(display_content) > context_budget:
+                    display_content = display_content[:context_budget].rstrip() + "…"
+                entry_parts.append(atom_highlight)
+                if display_content:
+                    entry_parts.append(f"【所属背景摘要】{display_content}")
+            else:
+                # 单条记忆也截断：导入的长记忆可能上千字符，避免单条挤占全部预算。
+                if len(display_content) > _MAX_INJECTION_ENTRY_CHARS:
+                    display_content = (
+                        display_content[:_MAX_INJECTION_ENTRY_CHARS].rstrip() + "…"
+                    )
+                entry_parts.append(display_content)
 
             entry = "\n".join(entry_parts)
             formatted_entries.append(entry)

@@ -247,13 +247,19 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""
         task = asyncio.create_task(coro)
-        self._background_tasks.add(task)
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._background_tasks = tasks
+        tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
         return task
 
     def _on_background_task_done(self, task: asyncio.Task) -> None:
         """取回后台任务异常并记录，避免静默失败。"""
-        self._background_tasks.discard(task)
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is not None:
+            tasks.discard(task)
         if task.cancelled():
             return
         exc = task.exception()
@@ -678,9 +684,22 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
     async def handle_memory_recall(self, event: AstrMessageEvent, req: ProviderRequest):
         """[Event Hook] Query and inject long-term memory before LLM request"""
         if not self.series_runtime_allowed():
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "disabled")
+            except Exception:
+                pass
             return
         if is_managed_event(event):
-            await self._remember_blocking_owner(event)
+            if not getattr(self, "_terminating", False):
+                create_task = getattr(self, "_create_tracked_task", None)
+                if callable(create_task):
+                    create_task(self._remember_blocking_owner(event))
+                else:
+                    await self._remember_blocking_owner(event)
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "skipped_managed")
+            except Exception:
+                pass
             return
         if getattr(event, "_cd_retry_without_memory_v1", False) is True:
             # Chat Dynamics retries a reply after its native memory evidence was
@@ -866,9 +885,17 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         ready, _ = await self._ensure_plugin_ready(wait=False)
         if not ready:
             logger.debug("插件未完成初始化，跳过记忆召回")
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "skipped_not_ready")
+            except Exception:
+                pass
             return
 
         if not self.event_handler:
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "skipped_not_ready")
+            except Exception:
+                pass
             return
 
         await timed_recall_phase(

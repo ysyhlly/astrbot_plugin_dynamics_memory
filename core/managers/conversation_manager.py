@@ -26,6 +26,27 @@ from ..memory_scope import resolve_sender_alias
 from ..models.conversation_models import Message, Session
 from ..utils.history_alignment import compute_revert_cutoff
 
+try:
+    from ... import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+
+def _resolve_default_max_sessions(context: Any = None) -> int:
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if isinstance(limits, dict) and limits.get("memory_max_sessions"):
+                    return max(1, int(limits["memory_max_sessions"]))
+            except Exception:
+                pass
+    return 60
+
 
 class ConversationManager:
     """
@@ -56,22 +77,27 @@ class ConversationManager:
     def __init__(
         self,
         store: ConversationStore,
-        max_cache_size: int = 100,
+        max_cache_size: int | None = None,
         context_window_size: int = 50,
         session_ttl: int = 3600,
         identity_aliases: str = "",
+        context: Any = None,
     ):
         """
         初始化会话管理器
 
         Args:
             store: ConversationStore实例
-            max_cache_size: LRU缓存大小
+            max_cache_size: LRU缓存大小（None 时按系列资源档位 memory_max_sessions 取默认）
             context_window_size: 上下文窗口大小(保留最近N条消息)
             session_ttl: 会话过期时间(秒)
         """
         self.store = store
-        self.max_cache_size = max_cache_size
+        self.max_cache_size = (
+            _resolve_default_max_sessions(context)
+            if max_cache_size is None
+            else max(1, int(max_cache_size))
+        )
         self.context_window_size = context_window_size
         self.session_ttl = session_ttl
         self.identity_aliases = identity_aliases
@@ -92,7 +118,7 @@ class ConversationManager:
 
         logger.info(
             f"[ConversationManager] 初始化完成: "
-            f"缓存大小={max_cache_size}, 上下文窗口={context_window_size}"
+            f"缓存大小={self.max_cache_size}, 上下文窗口={context_window_size}"
         )
 
     async def add_message_from_event(
@@ -318,13 +344,6 @@ class ConversationManager:
             f"[ConversationManager] 添加消息: session={session_id}, "
             f"role={role}, sender={sender_id}"
         )
-
-        # 添加后获取最新的消息统计
-        session_info = await self.store.get_session(session_id)
-        if session_info:
-            logger.debug(
-                f"[DEBUG-AddMessage] [{session_id}] 添加消息后，当前总消息数: {session_info.message_count}"
-            )
 
         return message
 
@@ -1020,15 +1039,19 @@ class ConversationManager:
             session_id: 会话ID
 
         Returns:
-            消息列表,不存在则返回None
+            消息列表,不存在或已过期则返回None
         """
         async with self._cache_lock:
             if session_id in self._cache:
-                messages, _ = self._cache[session_id]
+                messages, last_access = self._cache[session_id]
+                now = time.time()
+                if self.session_ttl > 0 and (now - last_access) > self.session_ttl:
+                    del self._cache[session_id]
+                    return None
                 # 移到末尾(标记为最新访问)
                 self._cache.move_to_end(session_id)
                 # 更新访问时间
-                self._cache[session_id] = (messages, time.time())
+                self._cache[session_id] = (messages, now)
                 return messages
         return None
 

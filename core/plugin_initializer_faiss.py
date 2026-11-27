@@ -21,6 +21,41 @@ from .utils.faiss_path_bridge import (
     safe_temp_file,
 )
 
+try:
+    from .. import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
+
+def _resolve_faiss_omp_threads(context: Any = None) -> int:
+    """Resolve safe FAISS OpenMP thread count from the series resource profile."""
+    if _series_panels is not None:
+        getter = getattr(_series_panels, "get_series_resource_limits", None)
+        if callable(getter):
+            try:
+                limits = getter(context)
+                if isinstance(limits, dict) and limits.get("native_threads"):
+                    return max(1, int(limits["native_threads"]))
+            except Exception:
+                pass
+    return min(2, max(1, os.cpu_count() or 1))
+
+
+def _apply_faiss_omp_threads(faiss_mod: Any, context: Any = None) -> int:
+    """Cap FAISS OpenMP worker threads to avoid 2GB VPS thread/RSS blowup."""
+    threads = _resolve_faiss_omp_threads(context)
+    setter = getattr(faiss_mod, "omp_set_num_threads", None)
+    if callable(setter):
+        try:
+            setter(threads)
+        except Exception:
+            pass
+    return threads
+
+
 # 兼容旧调用点与闭包的私有别名（实现已迁移到 core/utils/faiss_path_bridge.py）
 _needs_bridge = needs_bridge
 _safe_temp_dir = safe_temp_dir
@@ -124,6 +159,8 @@ class InitializerFaissMixin:
         self._check_faiss_runtime()
         try:
             import faiss as _faiss
+
+            _apply_faiss_omp_threads(_faiss, getattr(self, "context", None))
 
             _orig_read = _faiss.read_index
             _orig_write = _faiss.write_index

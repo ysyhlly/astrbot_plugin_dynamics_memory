@@ -11,6 +11,14 @@ from quart import request
 if TYPE_CHECKING:
     from .utils import PageApiUtils
 
+try:
+    from ... import series_panels as _series_panels
+except Exception:  # pragma: no cover - isolated import fallback
+    try:
+        import series_panels as _series_panels  # type: ignore
+    except Exception:
+        _series_panels = None
+
 # networkx 只服务于「打开图谱页」时的社区分组，顶层 import 会在插件加载时
 # 多花约 0.24s / 13MB（仅 WebUI 需要）。改为首次分配社区时再导入并缓存。
 _nx: Any = None
@@ -194,11 +202,34 @@ class GraphHandler:
                 )
 
             if full_graph:
+                max_nodes = FULL_GRAPH_MAX_NODES
+                max_edges = FULL_GRAPH_MAX_EDGES
+                if _series_panels is not None and callable(
+                    getattr(_series_panels, "get_series_resource_limits", None)
+                ):
+                    try:
+                        ctx = getattr(
+                            memory_engine,
+                            "context",
+                            getattr(self.utils, "context", None),
+                        )
+                        limits = _series_panels.get_series_resource_limits(ctx)
+                        if isinstance(limits, dict):
+                            if limits.get("memory_graph_max_nodes"):
+                                max_nodes = min(
+                                    max_nodes, int(limits["memory_graph_max_nodes"])
+                                )
+                            if limits.get("memory_graph_max_edges"):
+                                max_edges = min(
+                                    max_edges, int(limits["memory_graph_max_edges"])
+                                )
+                    except Exception:
+                        pass
                 snapshot = await graph_store.get_full_graph_snapshot(
                     session_id=session_id,
                     persona_id=persona_id,
-                    max_nodes=FULL_GRAPH_MAX_NODES,
-                    max_edges=FULL_GRAPH_MAX_EDGES,
+                    max_nodes=max_nodes,
+                    max_edges=max_edges,
                 )
             else:
                 snapshot = await graph_store.get_graph_snapshot(
