@@ -35,6 +35,10 @@
       "identity_aliases": {
         "description": "用户身份别名",
         "hint": "每行填写 source=统一名称。source 可使用平台:用户 ID、用户 ID 或当前用户名，例如 telegram:12345=小明。"
+      },
+      "disabled_ids": {
+        "description": "按群禁用名单",
+        "hint": "未开启白名单时按行排除指定群组或会话 UMO（与群总控矩阵联动）。"
       }
     },
     "provider_settings": {
@@ -88,6 +92,10 @@
       "cleanup_batch_size": {
         "description": "历史消息批量清理数量",
         "hint": "会话历史超过上限后，每次至少尝试删除的旧已总结消息数量。值过小会导致超限后每轮只删少量消息。（允许范围：1–1000）"
+      },
+      "hard_max_messages_per_session": {
+        "description": "单会话硬上限消息数",
+        "hint": "未总结消息超过该硬上限时触发安全裁剪，留空默认取单会话上限 2 倍（最少 2000）。"
       }
     },
     "recall_engine": {
@@ -435,6 +443,10 @@
       "atom_purge_delay_days": {
         "description": "遗忘原子物理清理延迟（天）",
         "hint": "已从检索索引移除的遗忘原子，在多少天后从数据库物理删除以回收存储空间。（允许范围：1–365）"
+      },
+      "graph_route_timeout_seconds": {
+        "description": "图谱召回超时（秒）",
+        "hint": "双路召回时图谱支路单次允许的最大等待时间，超时自动回退文档/向量结果。（允许范围：0.1–30）"
       }
     },
     "migration_settings": {
@@ -515,6 +527,10 @@
       "cleanup_importance_threshold": {
         "description": "清理重要性阈值",
         "hint": "重要性低于该值的旧记忆才会被清理。默认 0.25 表示重要性低于 25% 的记忆。（允许范围：0–1）"
+      },
+      "archived_retention_days": {
+        "description": "归档保留天数",
+        "hint": "软归档记忆保留天数，到期后由自动清理移除；0 表示永久保留。（允许范围：0–3650）"
       }
     },
     "memory_consolidation": {

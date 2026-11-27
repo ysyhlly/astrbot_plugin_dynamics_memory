@@ -13,6 +13,7 @@ from astrbot.api.platform import MessageType
 from ..memory_scope import (
     is_event_excluded_by_series,
     is_event_memory_allowed,
+    is_event_privacy_muted,
     is_suspicious_session_id,
 )
 
@@ -58,9 +59,11 @@ class GroupCapture:
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             return
 
-        if is_event_excluded_by_series(
-            getattr(self, "context", None), event
-        ) or not is_event_memory_allowed(self.config_manager, event):
+        if (
+            is_event_excluded_by_series(getattr(self, "context", None), event)
+            or not is_event_memory_allowed(self.config_manager, event)
+            or is_event_privacy_muted(getattr(self, "context", None), event, "memory")
+        ):
             return
 
         # 群聊中 Bot 自己的消息由 handle_memory_reflection 负责写入，此处跳过

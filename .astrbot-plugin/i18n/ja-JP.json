@@ -35,6 +35,10 @@
       "identity_aliases": {
         "description": "ユーザー識別の別名",
         "hint": "1 行に 1 つずつ source=統一名 を入力します。source にはプラットフォーム:ユーザー ID、ユーザー ID、または現在のユーザー名を使用できます（例：telegram:12345=小明）。"
+      },
+      "disabled_ids": {
+        "description": "無効化グループ/セッション",
+        "hint": "許可リスト無効時に除外するグループまたはセッション UMO を 1 行ずつ指定します。"
       }
     },
     "provider_settings": {
@@ -88,6 +92,10 @@
       "cleanup_batch_size": {
         "description": "履歴メッセージの一括削除件数",
         "hint": "セッション履歴が上限を超えた後、1 回あたりに削除を試みる要約済み旧メッセージの最小件数。値が小さすぎると、上限超過後に 1 回の処理で少数のメッセージしか削除されません。（許容範囲：1–1000）"
+      },
+      "hard_max_messages_per_session": {
+        "description": "セッション最大メッセージ数（ハード上限）",
+        "hint": "未要約メッセージの安全トリム上限。空欄時は通常上限の 2 倍（最小 2000）。"
       }
     },
     "recall_engine": {
@@ -435,6 +443,10 @@
       "atom_purge_delay_days": {
         "description": "忘却原子の物理削除の遅延（日）",
         "hint": "検索インデックスから削除済みの忘却原子を、何日後にデータベースから物理削除してストレージを回収するか。（許容範囲：1–365）"
+      },
+      "graph_route_timeout_seconds": {
+        "description": "グラフ検索タイムアウト（秒）",
+        "hint": "デュアルルート検索時のグラフ経路の最大待機秒数。超過時は文書・ベクトル結果へフォールバック（0.1–30）。"
       }
     },
     "migration_settings": {
@@ -515,6 +527,10 @@
       "cleanup_importance_threshold": {
         "description": "クリーンアップの重要度しきい値",
         "hint": "重要度がこの値未満の古い記憶のみがクリーンアップされます。デフォルトの 0.25 は重要度 25% 未満の記憶を意味します。（許容範囲：0–1）"
+      },
+      "archived_retention_days": {
+        "description": "アーカイブ保持日数",
+        "hint": "ソフトアーカイブ記憶を自動削除まで保持する日数。0 で無期限保持（0–3650）。"
       }
     },
     "memory_consolidation": {

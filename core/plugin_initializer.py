@@ -25,6 +25,7 @@ from .faiss_async_persist import install_async_persist
 from .managers.consolidation_manager import MemoryConsolidationManager
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .memory_scope import get_effective_series_shared_config
 from .plugin_initializer_faiss import InitializerFaissMixin
 from .processors.memory_processor import MemoryProcessor
 from .schedulers.decay_scheduler import DecayScheduler
@@ -389,8 +390,17 @@ class PluginInitializer(InitializerFaissMixin):
 
     async def _initialize_providers(self, silent: bool = False):
         """初始化 Embedding 和 LLM provider"""
-        # 初始化 Embedding Provider
-        emb_id = self.config_manager.get("provider_settings.embedding_provider_id")
+        # 初始化 Embedding Provider（优先显式配置 -> 系列共享 embedding_provider -> 宿主首个）
+        emb_id = str(
+            self.config_manager.get("provider_settings.embedding_provider_id") or ""
+        ).strip()
+        if not emb_id:
+            emb_id = str(
+                get_effective_series_shared_config(self.context).get(
+                    "embedding_provider", ""
+                )
+                or ""
+            ).strip()
         if emb_id:
             provider = self._get_provider_by_id(emb_id, silent=silent)
             if provider and isinstance(provider, EmbeddingProvider):
@@ -653,16 +663,23 @@ class PluginInitializer(InitializerFaissMixin):
         memory_engine_config = self._build_memory_engine_config(storage)
 
         # Rerank 提供商动态解析：每次调用时重新获取实例，
-        # 适配 AstrBot 的 Provider 实例重建（旧实例 httpx 客户端会关闭）
-        rerank_provider_id = (
-            self.config_manager.get("recall_engine.rerank_provider_id", "") or ""
-        )
-
+        # 适配 AstrBot 的 Provider 实例重建（旧实例 httpx 客户端会关闭），
+        # 留空时优雅回退至主控系列共享 rerank_provider。
         def resolve_rerank_provider():
-            if not rerank_provider_id:
+            effective_rerank_id = str(
+                self.config_manager.get("recall_engine.rerank_provider_id", "") or ""
+            ).strip()
+            if not effective_rerank_id:
+                effective_rerank_id = str(
+                    get_effective_series_shared_config(self.context).get(
+                        "rerank_provider", ""
+                    )
+                    or ""
+                ).strip()
+            if not effective_rerank_id:
                 return None
             try:
-                return self._get_provider_by_id(rerank_provider_id, silent=True)
+                return self._get_provider_by_id(effective_rerank_id, silent=True)
             except Exception as e:
                 logger.warning(f"解析 Rerank 提供商失败: {e}")
                 return None
@@ -758,6 +775,9 @@ class PluginInitializer(InitializerFaissMixin):
             "graph_second_hop_weight": get("graph_memory.second_hop_weight", 0.4),
             "dynamic_route_weighting": get(
                 "graph_memory.dynamic_route_weighting", True
+            ),
+            "graph_route_timeout_seconds": get(
+                "graph_memory.graph_route_timeout_seconds", 3.5
             ),
             "graph_max_topics": get("graph_memory.max_topics_per_memory", 6),
             "graph_max_participants": get(

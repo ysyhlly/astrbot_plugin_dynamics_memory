@@ -102,6 +102,9 @@ class EventHandler:
             consolidation_manager,
             storage_session_tasks=self._storage_session_tasks,
         )
+        self._message_utils.high_watermark_summary_callback = (
+            self._memory_reflection.schedule_high_watermark_summary
+        )
 
     async def handle_all_group_messages(self, event: AstrMessageEvent):
         """Capture all group messages for memory storage"""

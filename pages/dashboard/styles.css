@@ -2013,3 +2013,13 @@ html {
   content-visibility: auto;
   contain-intrinsic-size: auto 76px;
 }
+
+.repair-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.repair-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); min-width: 110px; }
+.repair-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); min-height: 30px; }
+.evidence-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; max-height: 240px; overflow-y: auto; }
+.evidence-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border-normal); border-radius: var(--radius-md); background: var(--bg-secondary); }
+.evidence-item-info { min-width: 0; flex: 1; }
+.evidence-item-id { font-family: var(--font-mono, monospace); font-size: 12px; word-break: break-all; }
+.evidence-item-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
+.evidence-form { border-top: 1px solid var(--border-normal); padding-top: 10px; }

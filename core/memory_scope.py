@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from .. import series_panels
 from ..series_panels import is_series_group_excluded
 
 GLOBAL_MEMORY_SCOPE = "livingmemory:global"
@@ -231,6 +233,117 @@ async def resolve_event_memory_access(
     )
 
 
+def get_effective_series_shared_config(context: Any) -> dict[str, Any]:
+    """Read shared defaults from chat_dynamics via series_panels with extended key fallback."""
+    if context is None:
+        return {}
+    result: dict[str, Any] = {}
+    try:
+        base = series_panels.get_series_shared_config(context)
+        if isinstance(base, dict):
+            result.update(base)
+    except Exception:
+        pass
+
+    # Compat: before series_panels.py is synced, read newly added Wave 1 keys
+    # directly from chat_dynamics owner if present (strictly synchronous/read-only).
+    extended_str_keys = (
+        "light_analysis_provider",
+        "vision_provider",
+        "embedding_provider",
+        "rerank_provider",
+    )
+    need_extended = any(
+        k not in result for k in (*extended_str_keys, "private_shared_group_sources")
+    )
+    if need_extended:
+        try:
+            owner = series_panels.find_plugin_owner(
+                context, "astrbot_plugin_chat_dynamics"
+            )
+            getter = (
+                getattr(owner, "get_series_shared_config", None)
+                if owner is not None
+                else None
+            )
+            if callable(getter) and not inspect.iscoroutinefunction(getter):
+                raw = getter()
+                if inspect.isawaitable(raw):
+                    if inspect.iscoroutine(raw):
+                        raw.close()
+                    raw = None
+                if isinstance(raw, dict) and raw.get("enabled") is not False:
+                    for key in extended_str_keys:
+                        if key not in result:
+                            val = raw.get(key)
+                            result[key] = val.strip() if isinstance(val, str) else ""
+                    if "private_shared_group_sources" not in result:
+                        result["private_shared_group_sources"] = parse_value_list(
+                            raw.get("private_shared_group_sources")
+                        )
+                    if "persona_id" not in result or not result.get("persona_id"):
+                        val = raw.get("persona_id")
+                        if isinstance(val, str) and val.strip():
+                            result["persona_id"] = val.strip()
+        except Exception:
+            pass
+    return result
+
+
+def is_member_privacy_muted(
+    context: Any, umo: str, member_id: str, scope: str = "memory"
+) -> bool:
+    """Zero-coupling dynamic lookup for unified cross-plugin privacy mute."""
+    clean_umo = str(umo or "").strip()
+    clean_member = str(member_id or "").strip()
+    if context is None or not clean_umo or not clean_member:
+        return False
+
+    # Prefer synced series_panels helper when available
+    helper = getattr(series_panels, "is_member_privacy_muted", None)
+    if callable(helper) and not inspect.iscoroutinefunction(helper):
+        try:
+            res = helper(context, clean_umo, clean_member, scope)
+            if inspect.isawaitable(res):
+                if inspect.iscoroutine(res):
+                    res.close()
+            elif isinstance(res, bool):
+                return res
+            elif isinstance(res, dict) and isinstance(res.get("muted"), bool):
+                return res["muted"]
+        except Exception:
+            pass
+
+    try:
+        owner = series_panels.find_plugin_owner(context, "astrbot_plugin_chat_dynamics")
+        if owner is None:
+            return False
+        getter = getattr(owner, "get_series_privacy_muted", None)
+        if not callable(getter) or inspect.iscoroutinefunction(getter):
+            return False
+        raw = getter(clean_umo, clean_member, scope)
+        if inspect.isawaitable(raw):
+            if inspect.iscoroutine(raw):
+                raw.close()
+            return False
+        if isinstance(raw, dict):
+            return raw.get("muted") is True
+        return raw is True
+    except Exception:
+        return False
+
+
+def is_event_privacy_muted(context: Any, event: Any, scope: str = "memory") -> bool:
+    """Return True if the event sender is privacy-muted in this UMO for the given scope."""
+    if context is None or event is None:
+        return False
+    umo = _event_value(event, "unified_msg_origin", "unified_msg_origin")
+    member_id = _event_value(event, "get_sender_id", "sender_id")
+    if not umo or not member_id:
+        return False
+    return is_member_privacy_muted(context, umo, member_id, scope)
+
+
 def is_event_excluded_by_series(context: Any, event: Any) -> bool:
     """Return True if chat_dynamics excludes this event's UMO or group_id."""
     if context is None or event is None:
@@ -241,11 +354,22 @@ def is_event_excluded_by_series(context: Any, event: Any) -> bool:
 
 
 def is_event_memory_allowed(config: Any, event: Any, context: Any = None) -> bool:
-    """Apply the plugin-level allowlist and core exclude_groups guard consistently."""
+    """Apply the plugin-level allowlist/disabled_ids and core exclude_groups guard consistently."""
     if is_event_excluded_by_series(context, event):
         return False
     session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
     group_id = _event_value(event, "get_group_id", "group_id")
+    disabled = {
+        value.casefold()
+        for value in parse_value_list(
+            _config_get(config, "access_control.disabled_ids", "")
+        )
+    }
+    if disabled:
+        if (session_id and session_id.casefold() in disabled) or (
+            group_id and group_id.casefold() in disabled
+        ):
+            return False
     if not _config_get(config, "access_control.whitelist_enabled", False):
         return True
     allowed = {
@@ -330,7 +454,10 @@ __all__ = [
     "MemoryAccessPolicy",
     "MemoryReadScope",
     "classify_umo",
+    "get_effective_series_shared_config",
     "is_event_memory_allowed",
+    "is_event_privacy_muted",
+    "is_member_privacy_muted",
     "is_suspicious_session_id",
     "memory_metadata_matches_policy",
     "normalize_interaction_types",
@@ -455,12 +582,30 @@ def memory_metadata_matches_policy(
     return True
 
 
+def _resolve_private_shared_group_sources(
+    config: Any, context: Any = None
+) -> list[str]:
+    """Resolve private_shared_group_sources from local config or shared chat_dynamics config (str or list)."""
+    local_sources = parse_value_list(
+        _config_get(config, "filtering_settings.private_shared_group_sources", "")
+    )
+    if local_sources:
+        return local_sources
+    if context is not None:
+        shared = get_effective_series_shared_config(context)
+        shared_sources = parse_value_list(shared.get("private_shared_group_sources"))
+        if shared_sources:
+            return shared_sources
+    return []
+
+
 def resolve_memory_access_policy(
     config: Any,
     event: Any,
     *,
     persona_id: str | None = None,
     verified_group_sessions: Any = (),
+    context: Any = None,
 ) -> MemoryAccessPolicy:
     """Resolve one-way group-to-private reads and event-owned write scope.
 
@@ -560,9 +705,7 @@ def resolve_memory_access_policy(
 
     current_platform = _event_platform_identity(event)
     configured_sources = set(
-        parse_value_list(
-            _config_get(config, "filtering_settings.private_shared_group_sources", "")
-        )
+        _resolve_private_shared_group_sources(config, context=context)
     )
     verified_sources = {
         str(source).strip()
@@ -573,6 +716,12 @@ def resolve_memory_access_policy(
         _config_get(config, "filtering_settings.private_shared_group_instance_id", "")
         or ""
     ).strip()
+    if not configured_instance and context is not None:
+        shared_persona = str(
+            get_effective_series_shared_config(context).get("persona_id") or ""
+        ).strip()
+        if shared_persona:
+            configured_instance = shared_persona
     if not persona_id or not configured_instance or persona_id != configured_instance:
         return MemoryAccessPolicy(
             kind, write_scope, interaction_type, visibility, (own_scope,)
@@ -616,6 +765,8 @@ async def resolve_verified_group_sessions(
     config: Any,
     event: Any,
     conversation_manager: Any,
+    *,
+    context: Any = None,
 ) -> tuple[str, ...]:
     """Return configured group UMOs backed by this platform's captured sessions."""
     if not _config_get(
@@ -628,9 +779,7 @@ async def resolve_verified_group_sessions(
     platform_name = _event_value(event, "get_platform_name", "platform").casefold()
     if not platform_id or not platform_name:
         return ()
-    configured = parse_value_list(
-        _config_get(config, "filtering_settings.private_shared_group_sources", "")
-    )
+    configured = _resolve_private_shared_group_sources(config, context=context)
     verified = []
     for source in configured:
         parts = source.split(":")

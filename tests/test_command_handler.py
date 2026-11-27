@@ -29,6 +29,10 @@ def memory_engine():
         }
     )
     engine.search_memories = AsyncMock(return_value=[])
+    engine.get_memory = AsyncMock(
+        return_value={"text": "sample memory text", "metadata": {"status": "active"}}
+    )
+    engine.archive_memories = AsyncMock(return_value=1)
     engine.delete_memory = AsyncMock(return_value=True)
     engine.rebuild_graph_index = AsyncMock(return_value={"rebuilt": 0, "skipped": 0})
     engine.get_diagnostics = AsyncMock(
@@ -229,12 +233,30 @@ async def test_handle_search_renders_results(handler, mock_event, memory_engine)
 
 @pytest.mark.asyncio
 async def test_handle_forget_success_and_not_found(handler, mock_event, memory_engine):
-    success = [msg async for msg in handler.handle_forget(mock_event, 10)]
-    assert "已删除记忆 #10" in success[0]
+    # Default: reversible soft archive with preview & restore hint
+    archived = [msg async for msg in handler.handle_forget(mock_event, 10)]
+    assert "软归档" in archived[0]
+    assert "sample memory text" in archived[0]
+    assert "--purge" in archived[0]
+    memory_engine.archive_memories.assert_awaited_once_with([10])
+    assert memory_engine.delete_memory.await_count == 0
+
+    # Explicit --purge: physical delete
+    purged = [msg async for msg in handler.handle_forget(mock_event, 10, purge=True)]
+    assert "彻底物理删除" in purged[0]
+    memory_engine.delete_memory.assert_awaited_once_with(10)
+
+    # Not found in both soft archive and purge modes
+    memory_engine.get_memory = AsyncMock(return_value=None)
+    memory_engine.archive_memories = AsyncMock(return_value=0)
+    failed = [msg async for msg in handler.handle_forget(mock_event, 11)]
+    assert "不存在" in failed[0]
 
     memory_engine.delete_memory = AsyncMock(return_value=False)
-    failed = [msg async for msg in handler.handle_forget(mock_event, 11)]
-    assert "删除失败" in failed[0]
+    failed_purge = [
+        msg async for msg in handler.handle_forget(mock_event, 11, purge=True)
+    ]
+    assert "不存在" in failed_purge[0]
 
 
 @pytest.mark.asyncio

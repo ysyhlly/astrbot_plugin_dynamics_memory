@@ -27,6 +27,7 @@ from ..memory_scope import (
     classify_umo,
     is_event_excluded_by_series,
     is_event_memory_allowed,
+    is_event_privacy_muted,
     is_suspicious_session_id,
     resolve_memory_write_scope,
 )
@@ -284,10 +285,12 @@ class MemoryReflection(MemoryReflectionStorageMixin):
         工具调用轮次的助手文字由本方法单独写入会话库（不触发后台总结），
         因此这类轮次也返回 None。
         """
-        if is_event_excluded_by_series(
-            getattr(self, "context", None), event
-        ) or not is_event_memory_allowed(self.config_manager, event):
-            logger.debug("当前事件不在记忆白名单中，跳过记忆反思")
+        if (
+            is_event_excluded_by_series(getattr(self, "context", None), event)
+            or not is_event_memory_allowed(self.config_manager, event)
+            or is_event_privacy_muted(getattr(self, "context", None), event, "memory")
+        ):
+            logger.debug("当前事件不在记忆白名单中或已隐私静音，跳过记忆反思")
             return None
 
         # 流式增量只是完整回复的片段，不能作为一轮对话入库；
@@ -774,6 +777,91 @@ class MemoryReflection(MemoryReflectionStorageMixin):
             self._storage_sessions_inflight.discard(session_id)
             self._recorded_scope_wakes.discard(session_id)
             raise
+
+    async def schedule_high_watermark_summary(self, session_id: str) -> bool:
+        """在未总结消息达到硬上限高水位时，主动触发一次异步增量总结，减少硬删丢信息。"""
+        if (
+            self._shutting_down
+            or not session_id
+            or session_id.startswith("narrative:v1:")
+        ):
+            return False
+        if session_id in self._storage_sessions_inflight:
+            return False
+        if not self.conversation_manager or not getattr(
+            self.conversation_manager, "store", None
+        ):
+            return False
+
+        try:
+            total_messages = await self.conversation_manager.store.get_message_count(
+                session_id
+            )
+            last_summarized_index = (
+                await self.conversation_manager.get_session_metadata(
+                    session_id, "last_summarized_index", 0
+                )
+            )
+            try:
+                last_summarized_index = max(0, int(last_summarized_index or 0))
+            except (TypeError, ValueError):
+                last_summarized_index = 0
+            if total_messages - last_summarized_index < 2:
+                return False
+
+            pending_summary = await self.conversation_manager.get_session_metadata(
+                session_id, "pending_summary", None
+            )
+            expected_revision = await self._read_session_revision(session_id)
+
+            persona_id = None
+            try:
+                from types import SimpleNamespace
+
+                persona_id = await get_persona_id(
+                    self.context, SimpleNamespace(unified_msg_origin=session_id)
+                )
+            except Exception:
+                persona_id = None
+
+            from ..memory_scope import GLOBAL_MEMORY_SCOPE, parse_value_list
+
+            isolated = set(
+                parse_value_list(
+                    self.config_manager.get("filtering_settings.isolated_sessions", "")
+                )
+            )
+            scope_mode = str(
+                self.config_manager.get(
+                    "filtering_settings.memory_scope_mode", "legacy"
+                )
+                or "legacy"
+            ).casefold()
+            if session_id in isolated:
+                memory_scope = session_id
+            elif scope_mode == "global":
+                memory_scope = GLOBAL_MEMORY_SCOPE
+            else:
+                memory_scope = session_id
+
+            plan = await self._build_reflection_plan_for_cursor(
+                session_id,
+                total_messages,
+                last_summarized_index,
+                pending_summary,
+                expected_revision,
+                persona_id,
+                memory_scope,
+            )
+            if plan is None:
+                return False
+            await self._schedule_reflection(plan)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug(f"[{session_id}] 高水位异步增量总结调度跳过: {exc}")
+            return False
 
     def _recorded_threshold(self) -> int:
         try:

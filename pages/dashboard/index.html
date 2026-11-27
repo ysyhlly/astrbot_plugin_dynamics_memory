@@ -337,6 +337,71 @@
               <p id="series-status" class="dm-series-status" role="status" aria-live="polite" data-series-text="展开后可检查接入状态。">展开后可检查接入状态。</p>
               <div id="series-conflicts" class="dm-series-conflicts"></div>
             </div>
+            <div class="system-panel mb-6" id="system-repair-panel">
+              <div class="system-panel-header">
+                <div class="system-panel-title" data-i18n="system.repairTitle">Storage Self-Healing Repair</div>
+              </div>
+              <p class="workflow-hint" data-i18n="system.repairHint">Repairs retained source links in batches without LLM or embedding calls.</p>
+              <div class="repair-controls">
+                <label class="repair-field">
+                  <span data-i18n="system.repairLimit">Batch size</span>
+                  <input id="repair-limit" class="input input-sm" type="number" min="1" max="200" value="50" />
+                </label>
+                <label class="repair-field">
+                  <span data-i18n="system.repairAfter">Start cursor</span>
+                  <input id="repair-after" class="input input-sm" type="number" min="0" value="0" />
+                </label>
+                <label class="repair-check">
+                  <input id="repair-requeue-sqlite" type="checkbox" />
+                  <span data-i18n="system.repairRequeue">Requeue failed SQLite ops</span>
+                </label>
+                <button class="btn btn-primary btn-sm" id="repair-run-btn" type="button">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                  <span data-i18n="system.repairRun">Run Repair</span>
+                </button>
+              </div>
+              <p class="text-tertiary" id="repair-result" role="status" aria-live="polite" style="margin-top:8px;font-size:12px"></p>
+            </div>
+            <div class="system-panel mb-6" id="system-evidence-panel">
+              <div class="system-panel-header">
+                <div class="system-panel-title" data-i18n="system.evidenceTitle">Derived Insights &amp; Correction</div>
+                <div class="system-panel-tools">
+                  <button class="btn btn-secondary btn-sm" id="evidence-refresh-btn" type="button" data-i18n="common.refresh">Refresh</button>
+                </div>
+              </div>
+              <p class="workflow-hint" data-i18n="system.evidenceHint">Shows insight IDs and provenance metadata without exposing raw chat text. Select an item to withdraw or supersede it.</p>
+              <p class="text-tertiary" id="evidence-status" role="status" aria-live="polite" style="font-size:12px"></p>
+              <div class="evidence-list" id="evidence-list"></div>
+              <div class="evidence-form" id="evidence-correct-form">
+                <div class="repair-controls">
+                  <label class="repair-field">
+                    <span>ID</span>
+                    <input id="evidence-target-id" class="input input-sm" type="text" placeholder="atom_id" />
+                  </label>
+                  <label class="repair-field">
+                    <span>Rev</span>
+                    <input id="evidence-revision" class="input input-sm" type="number" min="0" value="0" />
+                  </label>
+                  <label class="repair-field">
+                    <span data-i18n="detail.editBtn">Correct</span>
+                    <select id="evidence-action" class="select input input-sm">
+                      <option value="withdraw" data-i18n="system.evidenceWithdraw">Withdraw</option>
+                      <option value="supersede" data-i18n="system.evidenceSupersede">Supersede</option>
+                    </select>
+                  </label>
+                  <label class="repair-field" id="evidence-replacement-wrap" hidden>
+                    <span data-i18n="system.evidenceSupersede">Supersede</span>
+                    <input id="evidence-replacement" class="input input-sm" type="text" />
+                  </label>
+                  <label class="repair-field">
+                    <span>Reason</span>
+                    <input id="evidence-reason" class="input input-sm" type="text" />
+                  </label>
+                  <button class="btn btn-primary btn-sm" id="evidence-submit-btn" type="button" data-i18n="system.evidenceSubmit">Submit</button>
+                </div>
+                <p class="text-tertiary" id="evidence-correct-result" role="status" aria-live="polite" style="margin-top:8px;font-size:12px"></p>
+              </div>
+            </div>
             <div class="system-panel">
               <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
               <div class="backup-list" id="backup-list"></div>

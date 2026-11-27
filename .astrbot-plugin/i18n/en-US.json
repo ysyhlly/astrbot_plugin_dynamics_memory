@@ -35,6 +35,10 @@
       "identity_aliases": {
         "description": "Identity Aliases",
         "hint": "Enter one source=canonical name mapping per line. The source may be platform:user ID, user ID, or current username, for example telegram:12345=Alex."
+      },
+      "disabled_ids": {
+        "description": "Disabled Groups / Sessions",
+        "hint": "Exclude specific groups or session UMOs line by line when allowlist mode is off."
       }
     },
     "provider_settings": {
@@ -88,6 +92,10 @@
       "cleanup_batch_size": {
         "description": "History Cleanup Batch Size",
         "hint": "Minimum number of old summarized messages to delete per batch when the session history exceeds the limit. A value too small will cause only a few messages to be deleted each round after overflow. Allowed range: 1-1000."
+      },
+      "hard_max_messages_per_session": {
+        "description": "Hard Max Messages Per Session",
+        "hint": "Safety trim ceiling for unsummarized messages; leave blank for default 2x max_messages (min 2000)."
       }
     },
     "recall_engine": {
@@ -435,6 +443,10 @@
       "atom_purge_delay_days": {
         "description": "Forgotten Atom Purge Delay (days)",
         "hint": "How many days after removal from retrieval indexes a forgotten atom is physically deleted from the database to reclaim storage. Allowed range: 1-365."
+      },
+      "graph_route_timeout_seconds": {
+        "description": "Graph Recall Timeout (seconds)",
+        "hint": "Maximum wait time for the graph retrieval route before falling back to document/vector results (0.1-30)."
       }
     },
     "migration_settings": {
@@ -515,6 +527,10 @@
       "cleanup_importance_threshold": {
         "description": "Cleanup Importance Threshold",
         "hint": "Only memories with importance below this value are cleaned up. Default 0.25 means memories below 25% importance. Allowed range: 0-1."
+      },
+      "archived_retention_days": {
+        "description": "Archived Retention Days",
+        "hint": "Days to keep soft-archived memories before cleanup removes them; 0 keeps them indefinitely (0-3650)."
       }
     },
     "memory_consolidation": {

@@ -28,7 +28,11 @@ export class SystemPage {
       this.updateFeedback();
       this.render(data);
       /* 子面板与统计互不依赖：失败不影响其余内容，也不必在每次重绘时重复请求 */
-      await Promise.all([this.fetchAndRenderBackups(), this.fetchConsolidation()]);
+      await Promise.all([
+        this.fetchAndRenderBackups(),
+        this.fetchConsolidation(),
+        this.fetchEvidenceInsights(),
+      ]);
       window.lmRefreshSeriesStatus?.();
     } catch (e) {
       this.state._systemError = e.message || window.t("system.fetchFailed");
@@ -333,6 +337,176 @@ export class SystemPage {
   }
 
   /**
+   * 执行存储自愈修复（不调用模型或嵌入）
+   */
+  async runStorageRepair() {
+    const btn = document.getElementById("repair-run-btn");
+    const resultEl = document.getElementById("repair-result");
+    const limitEl = document.getElementById("repair-limit");
+    const afterEl = document.getElementById("repair-after");
+    const requeueEl = document.getElementById("repair-requeue-sqlite");
+
+    const rawLimit = Number.parseInt(limitEl?.value ?? "50", 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 200)) : 50;
+    const rawAfter = Number.parseInt(afterEl?.value ?? "0", 10);
+    const after = Number.isFinite(rawAfter) ? Math.max(0, rawAfter) : 0;
+    const requeueSqlite = Boolean(requeueEl?.checked);
+
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.textContent = window.t("flow.working");
+    try {
+      const res = await this.api.post(
+        "storage/repair",
+        { limit, after, requeue_sqlite: requeueSqlite },
+        { retries: 0 }
+      );
+      const scanned = Number(res.scanned ?? res.checked ?? 0) || 0;
+      const repaired = Number(res.repaired ?? res.updated ?? 0) || 0;
+      const requeued = Number(res.requeued_sqlite_operations ?? 0) || 0;
+      const nextCursor = Number(res.next_cursor ?? res.last_id ?? after) || 0;
+      if (afterEl && res.has_more && nextCursor > after) {
+        afterEl.value = String(nextCursor);
+      }
+      if (resultEl) {
+        resultEl.textContent = window.t(
+          "system.repairResult",
+          scanned,
+          repaired,
+          requeued,
+          nextCursor
+        );
+      }
+    } catch (e) {
+      if (resultEl) resultEl.textContent = e.message || window.t("misc.requestFailed");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  /**
+   * 拉取派生见解列表（仅 ID 与来源元数据，不含群友原文）
+   */
+  async fetchEvidenceInsights() {
+    const statusEl = document.getElementById("evidence-status");
+    const listEl = document.getElementById("evidence-list");
+    if (!listEl && !statusEl) return;
+    try {
+      const data = await this.api.get("evidence/insights");
+      this.renderEvidenceInsights(data);
+    } catch (e) {
+      if (statusEl) statusEl.textContent = e.message || window.t("common.unavailable");
+      if (listEl) {
+        listEl.innerHTML =
+          '<div class="table-empty">' + esc(window.t("common.unavailable")) + "</div>";
+      }
+    }
+  }
+
+  /**
+   * 渲染派生见解列表
+   * @param {Object} data - {available, items}
+   */
+  renderEvidenceInsights(data) {
+    const statusEl = document.getElementById("evidence-status");
+    const listEl = document.getElementById("evidence-list");
+    if (!listEl) return;
+
+    if (!data || data.available === false) {
+      if (statusEl) statusEl.textContent = window.t("common.unavailable");
+      listEl.innerHTML =
+        '<div class="table-empty">' + esc(window.t("common.unavailable")) + "</div>";
+      return;
+    }
+
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (statusEl) statusEl.textContent = window.t("system.evidenceCount", items.length);
+    if (items.length === 0) {
+      listEl.innerHTML =
+        '<div class="table-empty">' + esc(window.t("common.noData")) + "</div>";
+      return;
+    }
+
+    listEl.innerHTML = items.map((item) => {
+      const id = esc(String(item.atom_id || ""));
+      const rev = esc(Number(item.correction_revision ?? 0) || 0);
+      return `<div class="evidence-item"><div class="evidence-item-info"><div class="evidence-item-id">${id}</div><div class="evidence-item-meta"><span>${esc(item.kind || "insight")}</span><span>${esc(item.status || "")}</span><span>rev ${rev}</span><span>sources ${esc(Number(item.source_count ?? 0) || 0)}</span></div></div><button type="button" class="btn btn-secondary btn-sm evidence-select-btn" data-atom-id="${id}" data-revision="${rev}">${esc(window.t("detail.editBtn"))}</button></div>`;
+    }).join("");
+  }
+
+  /**
+   * 选中见解填入下方纠错表单
+   */
+  selectEvidenceItem(atomId, revision) {
+    const targetEl = document.getElementById("evidence-target-id");
+    const revEl = document.getElementById("evidence-revision");
+    if (targetEl) targetEl.value = String(atomId || "");
+    if (revEl) revEl.value = String(Number.isFinite(Number(revision)) ? Number(revision) : 0);
+  }
+
+  /**
+   * 切换撤回/替代操作时显隐替代内容输入框
+   */
+  syncEvidenceActionFields() {
+    const actionEl = document.getElementById("evidence-action");
+    const wrapEl = document.getElementById("evidence-replacement-wrap");
+    if (actionEl && wrapEl) wrapEl.hidden = actionEl.value !== "supersede";
+  }
+
+  /**
+   * 提交见解纠错（withdraw / supersede）
+   */
+  async submitEvidenceCorrection() {
+    const targetEl = document.getElementById("evidence-target-id");
+    const revEl = document.getElementById("evidence-revision");
+    const actionEl = document.getElementById("evidence-action");
+    const replacementEl = document.getElementById("evidence-replacement");
+    const reasonEl = document.getElementById("evidence-reason");
+    const btn = document.getElementById("evidence-submit-btn");
+    const resultEl = document.getElementById("evidence-correct-result");
+
+    const targetId = String(targetEl?.value || "").trim();
+    const action = String(actionEl?.value || "withdraw").trim().toLowerCase();
+    const expectedRevision = Number.parseInt(revEl?.value ?? "0", 10);
+    const replacement = action === "supersede" ? String(replacementEl?.value || "").trim() : "";
+    const reason = String(reasonEl?.value || "").trim();
+
+    if (!targetId || (action === "supersede" && !replacement)) {
+      if (resultEl) resultEl.textContent = window.t("batchEdit.valueRequired");
+      return;
+    }
+
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.textContent = window.t("flow.working");
+    try {
+      const res = await this.api.post(
+        "evidence/correct",
+        {
+          target_id: targetId,
+          expected_revision: Number.isFinite(expectedRevision) ? expectedRevision : 0,
+          action,
+          replacement,
+          reason,
+        },
+        { retries: 0 }
+      );
+      if (resultEl) {
+        resultEl.textContent = window.t(
+          "system.evidenceSuccess",
+          res.action || action,
+          res.correction_revision ?? expectedRevision
+        );
+      }
+      if (replacementEl) replacementEl.value = "";
+      if (reasonEl) reasonEl.value = "";
+      await this.fetchEvidenceInsights();
+    } catch (e) {
+      if (resultEl) resultEl.textContent = e.message || window.t("misc.requestFailed");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  /**
    * 初始化事件监听
    */
   initEventListeners() {
@@ -340,6 +514,29 @@ export class SystemPage {
     if (runBtn) runBtn.addEventListener("click", () => this.runConsolidation());
     const retry = document.getElementById("system-retry");
     if (retry) retry.addEventListener("click", () => this.fetch());
+    const repairBtn = document.getElementById("repair-run-btn");
+    if (repairBtn) repairBtn.addEventListener("click", () => this.runStorageRepair());
+    const evidenceRefreshBtn = document.getElementById("evidence-refresh-btn");
+    if (evidenceRefreshBtn) {
+      evidenceRefreshBtn.addEventListener("click", () => this.fetchEvidenceInsights());
+    }
+    const evidenceAction = document.getElementById("evidence-action");
+    if (evidenceAction) {
+      evidenceAction.addEventListener("change", () => this.syncEvidenceActionFields());
+      this.syncEvidenceActionFields();
+    }
+    const evidenceSubmitBtn = document.getElementById("evidence-submit-btn");
+    if (evidenceSubmitBtn) {
+      evidenceSubmitBtn.addEventListener("click", () => this.submitEvidenceCorrection());
+    }
+    const evidenceList = document.getElementById("evidence-list");
+    if (evidenceList) {
+      evidenceList.addEventListener("click", (evt) => {
+        const btn = evt.target?.closest?.(".evidence-select-btn");
+        if (!btn) return;
+        this.selectEvidenceItem(btn.dataset.atomId || "", btn.dataset.revision || "0");
+      });
+    }
   }
 
 }

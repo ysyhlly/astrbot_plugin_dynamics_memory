@@ -35,6 +35,12 @@
         "type": "text",
         "default": ""
       },
+      "disabled_ids": {
+        "description": "按群禁用名单",
+        "hint": "在未开启白名单时，按行排除指定群组或完整会话 UMO（与群总控矩阵开关联动）。",
+        "type": "text",
+        "default": ""
+      },
       "identity_aliases": {
         "description": "用户身份别名",
         "hint": "每行填写 source=统一名称。source 可使用平台:用户 ID、用户 ID 或当前用户名，例如 telegram:12345=小明。",
@@ -814,7 +820,7 @@
         "description": "图谱召回超时（秒）",
         "hint": "双路召回时图谱支路单次允许的最大等待时间，超时将自动降级为仅文档路结果。（允许范围：0.1–30）",
         "type": "float",
-        "default": 1.5,
+        "default": 3.5,
         "slider": {
           "min": 0.1,
           "max": 30.0,

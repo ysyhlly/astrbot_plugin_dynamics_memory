@@ -105,10 +105,14 @@
     "access_denied": "現在のユーザーまたはセッションは長期記憶の許可リストに含まれていません。"
   },
   "forget": {
-    "action_name": "記憶削除",
-    "id_invalid": "記憶 ID は非負の整数である必要があります。例: /lmem forget 123",
+    "action_name": "記憶アーカイブ/削除",
+    "id_invalid": "記憶 ID は非負の整数である必要があります。例: /lmem forget 123（完全削除は --purge）",
     "success": "記憶 #{id} を削除しました。",
-    "not_found": "削除に失敗しました：記憶 #{id} は存在しません。\nまず /lmem search または WebUI で記憶 ID を確認してください。"
+    "archived_success": "記憶 #{id} をソフトアーカイブしました（復元可能）：\nプレビュー: {preview}\n\n復元方法: WebUI「記憶管理」で「アーカイブ済み」を絞り込んで復元できます。\n完全に物理削除するには次を実行してください: /lmem forget {id} --purge",
+    "already_archived": "記憶 #{id} はすでにアーカイブ済みです。\nプレビュー: {preview}\n完全に物理削除するには次を実行してください: /lmem forget {id} --purge",
+    "purge_success": "記憶 #{id} を完全に物理削除しました（復元不可）。",
+    "preview_unavailable": "（プレビューなし）",
+    "not_found": "操作に失敗しました：記憶 #{id} は存在しません。\nまず /lmem search または WebUI で記憶 ID を確認してください。"
   },
   "rebuild_index": {
     "action_name": "インデックス再構築",
@@ -169,7 +173,7 @@
     "notice_exec": "AstrBot の会話履歴を更新し、記憶注入フラグメントを整理しました。"
   },
   "help": {
-    "text": "Dynamics Memory 使用ガイド\n\n主なコマンド:\n/lmem status              システム状態を表示\n/lmem diag                 データ診断（DB/グラフ/バックアップ/サイズ）、diag compact で VACUUM\n/lmem search <キーワード> [件数]  記憶を検索（既定 5 件）\n/lmem forget <ID>          指定した記憶を削除\n/lmem rebuild-index       インデックス再構築（不整合の修復）\n/lmem rebuild-graph       グラフ記憶インデックス再構築（旧記憶のバックフィル）\n/lmem migrate-scope <target> [apply] [source] 旧記憶を指定スコープへ移行（既定はプレビューのみ）\n/lmem webui                WebUI 管理画面の入口を表示\n/lmem summarize [message_count]  今すぐ要約、または直近の指定件数を再要約\n/lmem reset               現在のセッションの記憶コンテキストをリセット\n/lmem cleanup [preview|exec] 履歴メッセージ内の記憶フラグメントを整理（既定は preview）\n/lmem help                このヘルプを表示\n\nヒント:\n• 日常的な検索には search コマンドを使用\n• ディスク容量が厳しい場合は /lmem diag compact を実行\n• 詳細な管理は AstrBot ダッシュボードの プラグイン -> Dynamics Memory -> Pages -> dashboard から\n• 会話内容は自動的に記憶として保存されます\n• 機密情報の削除には forget を使用\n• インデックス不整合時は rebuild-index を実行\n• グラフ記憶を有効にした後は rebuild-graph で旧データを補完することを推奨\n• プラグイン更新後は cleanup で旧データを整理することを推奨\n\ncleanup コマンド例:\n  /lmem cleanup          # プレビューモード（統計表示のみ）\n  /lmem cleanup preview  # 同上\n  /lmem cleanup exec     # 実際に整理を実行\n\n詳細: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_dynamics_memory"
+    "text": "Dynamics Memory 使用ガイド\n\n主なコマンド:\n/lmem status              システム状態を表示\n/lmem diag                 データ診断（DB/グラフ/バックアップ/サイズ）、diag compact で VACUUM\n/lmem search <キーワード> [件数]  記憶を検索（既定 5 件）\n/lmem forget <ID> [--purge] 既定で可逆ソフトアーカイブ；--purge 指定時のみ物理削除\n/lmem evidence list|<ID>|<rev>|withdraw|supersede  派生インサイトの一覧表示・訂正（WebUI でも操作可）\n/lmem summarize [message_count]  今すぐ要約、または直近の指定件数を再要約\n/lmem summarize_retry     現在のセッションで最も古い拒否済み要約ウィンドウを再試行\n/lmem rebuild-index       インデックス再構築（不整合の修復）\n/lmem rebuild-graph       グラフ記憶インデックス再構築（旧記憶のバックフィル）\n/lmem migrate-scope <target> [apply] [source] 旧記憶を指定スコープへ移行（既定はプレビューのみ）\n/lmem webui                WebUI 管理画面の入口を表示\n/lmem reset               現在のセッションの記憶コンテキストをリセット\n/lmem cleanup [preview|exec] 履歴メッセージ内の記憶フラグメントを整理（既定は preview）\n/lmem help                このヘルプを表示\n\nヒント:\n• 日常的な検索には search コマンドを使用\n• ディスク容量が厳しい場合は /lmem diag compact を実行\n• 詳細な管理は AstrBot ダッシュボードの プラグイン -> Dynamics Memory -> Pages -> dashboard から\n• 会話内容は自動的に記憶として保存されます\n• 機密情報は forget でソフトアーカイブ（完全削除は --purge）\n• インデックス不整合時は rebuild-index を実行\n• グラフ記憶を有効にした後は rebuild-graph で旧データを補完することを推奨\n• プラグイン更新後は cleanup で旧データを整理することを推奨\n\ncleanup コマンド例:\n  /lmem cleanup          # プレビューモード（統計表示のみ）\n  /lmem cleanup preview  # 同上\n  /lmem cleanup exec     # 実際に整理を実行\n\n詳細: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_dynamics_memory"
   },
   "init": {
     "ready": "プラグインの準備ができました。使用可能なコマンドは /lmem help で確認できます。",

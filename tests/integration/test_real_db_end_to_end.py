@@ -10,6 +10,17 @@ from unittest.mock import AsyncMock, Mock
 import aiosqlite
 import pytest
 import pytest_asyncio
+from astrbot.api.platform import (
+    AstrBotMessage,
+    AstrMessageEvent,
+    MessageMember,
+    MessageType,
+    PlatformMetadata,
+)
+from astrbot.api.provider import LLMResponse, ProviderRequest
+from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
+from astrbot.core.message.components import Plain
+from astrbot.core.provider.provider import EmbeddingProvider
 from astrbot_plugin_dynamics_memory.core.base.config_manager import ConfigManager
 from astrbot_plugin_dynamics_memory.core.command_handler import CommandHandler
 from astrbot_plugin_dynamics_memory.core.event_handler import EventHandler
@@ -37,18 +48,6 @@ from astrbot_plugin_dynamics_memory.core.tools.memory_forget_tool import (
 from astrbot_plugin_dynamics_memory.storage.conversation_store import ConversationStore
 from astrbot_plugin_dynamics_memory.storage.evidence_sidecar import EvidenceSidecar
 from astrbot_plugin_dynamics_memory.storage.graph_store import GraphStore
-
-from astrbot.api.platform import (
-    AstrBotMessage,
-    AstrMessageEvent,
-    MessageMember,
-    MessageType,
-    PlatformMetadata,
-)
-from astrbot.api.provider import LLMResponse, ProviderRequest
-from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
-from astrbot.core.message.components import Plain
-from astrbot.core.provider.provider import EmbeddingProvider
 
 
 class _DeterministicEmbeddingProvider(EmbeddingProvider):
@@ -725,7 +724,21 @@ async def test_command_handlers_with_real_database(real_db_stack):
     forget_output = [
         msg async for msg in command_handler.handle_forget(event, memory_id)
     ]
-    assert "已删除记忆" in forget_output[0]
+    assert "软归档" in forget_output[0]
+
+    async with aiosqlite.connect(memory_db_path) as db:
+        cursor = await db.execute(
+            "SELECT json_extract(metadata, '$.status') FROM documents WHERE id = ?",
+            (memory_id,),
+        )
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == "archived"
+
+    purge_output = [
+        msg async for msg in command_handler.handle_forget(event, memory_id, purge=True)
+    ]
+    assert "彻底物理删除" in purge_output[0]
 
     async with aiosqlite.connect(memory_db_path) as db:
         cursor = await db.execute(

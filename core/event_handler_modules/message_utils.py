@@ -319,6 +319,7 @@ class MessageUtils:
         self,
         config_manager: "ConfigManager",
         conversation_manager: "ConversationManager | None",
+        high_watermark_summary_callback=None,
     ):
         """
         初始化消息处理工具
@@ -326,14 +327,20 @@ class MessageUtils:
         Args:
             config_manager: 配置管理器
             conversation_manager: 会话管理器
+            high_watermark_summary_callback: 未总结消息达到硬上限高水位（80%）时提前触发增量总结的可选回调
         """
         self.config_manager = config_manager
         self.conversation_manager = conversation_manager
+        self.high_watermark_summary_callback = high_watermark_summary_callback
 
         # 消息去重缓存
         self._message_dedup_cache: dict[str, float] = {}
         self._dedup_cache_max_size = 1000
         self._dedup_cache_ttl = 300
+        # 高水位增量总结节流（同一会话短时间内避免重复触发）
+        self._high_watermark_trigger_times: dict[str, float] = {}
+        self._high_watermark_cooldown_seconds = 30.0
+        self._high_watermark_ratio = 0.8
 
     async def build_dedup_key(
         self, event: AstrMessageEvent, session_id: str, content: str
@@ -478,8 +485,55 @@ class MessageUtils:
 
         return raw_message.strip()
 
+    async def _maybe_trigger_high_watermark_summary(
+        self,
+        session_id: str,
+        actual_count: int,
+        last_summarized_index: int,
+        hard_max_messages: int,
+    ) -> bool:
+        """未总结消息达到硬上限高水位（默认 80%）时提前触发异步增量总结，减少硬裁剪丢信息。"""
+        callback = getattr(self, "high_watermark_summary_callback", None)
+        if not callable(callback):
+            return False
+        unsummarized = max(0, actual_count - last_summarized_index)
+        high_watermark = max(2, int(hard_max_messages * self._high_watermark_ratio))
+        if unsummarized < high_watermark:
+            return False
+        now = time.monotonic()
+        last_triggered = self._high_watermark_trigger_times.get(session_id, 0.0)
+        if (
+            last_triggered
+            and (now - last_triggered) < self._high_watermark_cooldown_seconds
+        ):
+            return False
+        self._high_watermark_trigger_times[session_id] = now
+        if len(self._high_watermark_trigger_times) > 512:
+            cutoff = now - self._high_watermark_cooldown_seconds
+            self._high_watermark_trigger_times = {
+                k: v
+                for k, v in self._high_watermark_trigger_times.items()
+                if v >= cutoff
+            }
+        try:
+            logger.info(
+                f"[{session_id}] 未总结消息达到高水位({unsummarized}/{hard_max_messages}，"
+                f"阈值 {high_watermark})，提前触发异步增量总结"
+            )
+            result = callback(session_id)
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                f"[{session_id}] 高水位异步增量总结触发失败（不阻断消息清理）: {exc}"
+            )
+            return False
+
     async def enforce_message_limit(self, session_id: str):
-        """执行消息数量上限控制，优先只删除已被总结的消息；反思长期卡死超过硬上限时触发安全裁剪。"""
+        """执行消息数量上限控制，优先只删除已被总结的消息；高水位提前增量总结，超硬上限时安全裁剪。"""
         if not self.conversation_manager:
             return
 
@@ -523,8 +577,9 @@ class MessageUtils:
             actual_count = await self.conversation_manager.store.get_message_count(
                 session_id
             )
+            high_watermark = max(2, int(hard_max_messages * self._high_watermark_ratio))
 
-            if actual_count <= max_messages:
+            if actual_count <= max_messages and actual_count < high_watermark:
                 return
 
             # 获取已总结的消息位置
@@ -537,6 +592,17 @@ class MessageUtils:
                 last_summarized_index = max(0, int(last_summarized_index or 0))
             except (TypeError, ValueError):
                 last_summarized_index = 0
+
+            # 未总结消息达到硬上限 80% 高水位时，提前异步增量总结以释放安全裁剪空间
+            await self._maybe_trigger_high_watermark_summary(
+                session_id,
+                actual_count,
+                last_summarized_index,
+                hard_max_messages,
+            )
+
+            if actual_count <= max_messages:
+                return
 
             # 计算需要删除的数量；超过上限时按批量清理，减少每轮只删 1 条的抖动。
             overflow_count = actual_count - max_messages

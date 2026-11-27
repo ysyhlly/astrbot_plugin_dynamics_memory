@@ -3,6 +3,7 @@
 负责处理插件命令
 """
 
+import inspect
 import os
 from collections.abc import AsyncGenerator
 from datetime import datetime
@@ -341,22 +342,76 @@ class CommandHandler:
             )
 
     async def handle_forget(
-        self, event: AstrMessageEvent, doc_id: int
+        self, event: AstrMessageEvent, doc_id: int, *, purge: bool = False
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """处理 /lmem forget 命令"""
+        """处理 /lmem forget 命令：默认可逆软归档，显式携带 --purge 才物理硬删除。"""
         # 输入验证
         if doc_id < 0:
             yield event.plain_result(t("forget.id_invalid"))
             return
 
         try:
+            if purge:
+                success = await self.memory_engine.delete_memory(doc_id)
+                if success:
+                    yield event.plain_result(t("forget.purge_success", id=doc_id))
+                else:
+                    yield event.plain_result(t("forget.not_found", id=doc_id))
+                return
+
+            preview = ""
+            existing_status = ""
+            get_memory = getattr(self.memory_engine, "get_memory", None)
+            if callable(get_memory):
+                try:
+                    memory = get_memory(doc_id)
+                    if inspect.isawaitable(memory):
+                        memory = await memory
+                except Exception:
+                    memory = None
+                if isinstance(memory, dict):
+                    raw_text = str(
+                        memory.get("text") or memory.get("content") or ""
+                    ).strip()
+                    if raw_text:
+                        compact = " ".join(raw_text.split())
+                        preview = compact[:80] + "..." if len(compact) > 80 else compact
+                    meta = memory.get("metadata")
+                    if isinstance(meta, dict):
+                        existing_status = str(meta.get("status") or "active")
+
+            if existing_status == "archived":
+                yield event.plain_result(
+                    t(
+                        "forget.already_archived",
+                        id=doc_id,
+                        preview=preview or t("forget.preview_unavailable"),
+                    )
+                )
+                return
+
+            archive_fn = getattr(self.memory_engine, "archive_memories", None)
+            if callable(archive_fn) and inspect.iscoroutinefunction(archive_fn):
+                archived_count = await archive_fn([doc_id])
+                if archived_count and int(archived_count) > 0:
+                    yield event.plain_result(
+                        t(
+                            "forget.archived_success",
+                            id=doc_id,
+                            preview=preview or t("forget.preview_unavailable"),
+                        )
+                    )
+                else:
+                    yield event.plain_result(t("forget.not_found", id=doc_id))
+                return
+
             success = await self.memory_engine.delete_memory(doc_id)
             if success:
                 yield event.plain_result(t("forget.success", id=doc_id))
             else:
                 yield event.plain_result(t("forget.not_found", id=doc_id))
         except Exception as e:
-            logger.error(f"删除失败: {e}", exc_info=True)
+            logger.error(f"遗忘/归档记忆失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
                     t("forget.action_name"),

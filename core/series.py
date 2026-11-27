@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import math
@@ -11,8 +12,13 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
-from ..series_panels import is_series_group_excluded, resolve_series_timezone
+from ..series_panels import (
+    invalidate_presence_cache,
+    is_series_group_excluded,
+    resolve_series_timezone,
+)
 from .memory_scope import parse_value_list
 from .memory_source import serialize_source_messages
 
@@ -546,8 +552,38 @@ class SeriesMixin:
         except Exception:
             return []
 
+    def _scope_config_version(self, scope: str, enabled: bool | None) -> str:
+        """Compute deterministic config-backed version string for optimistic locking."""
+        cfg = getattr(self, "config_manager", None)
+        whitelist_on = (
+            bool(cfg.get("access_control.whitelist_enabled", False))
+            if cfg is not None and callable(getattr(cfg, "get", None))
+            else False
+        )
+        allowed_raw = (
+            cfg.get("access_control.allowed_ids", "")
+            if cfg is not None and callable(getattr(cfg, "get", None))
+            else ""
+        )
+        disabled_raw = (
+            cfg.get("access_control.disabled_ids", "")
+            if cfg is not None and callable(getattr(cfg, "get", None))
+            else ""
+        )
+        digest_src = "|".join(
+            [
+                str(scope or ""),
+                str(int(bool(getattr(self, "_series_enabled", False)))),
+                str(int(whitelist_on)),
+                ",".join(sorted(parse_value_list(allowed_raw))),
+                ",".join(sorted(parse_value_list(disabled_raw))),
+            ]
+        )
+        digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:10]
+        return f"v1:{int(bool(enabled))}:{digest}"
+
     def get_series_scope_status(self, umo: str) -> dict:
-        """Return read-only status for a group/session UMO in the cross-plugin matrix."""
+        """Return scope status for a group/session UMO in the cross-plugin matrix."""
         try:
             scope = str(umo or "").strip()
             conflicts = self.series_conflicts()
@@ -556,17 +592,34 @@ class SeriesMixin:
             excluded_by_core = bool(scope and is_series_group_excluded(ctx, umo=scope))
             enabled: bool | None = runtime_allowed and not excluded_by_core
             cfg = getattr(self, "config_manager", None)
-            if enabled and cfg is not None and scope:
+            writable = bool(
+                cfg is not None and callable(getattr(cfg, "apply_updates", None))
+            )
+            whitelist_on = False
+            disabled_locally = False
+            parts = scope.split(":") if scope else []
+            group_id = parts[-1] if len(parts) >= 3 else ""
+            if cfg is not None and callable(getattr(cfg, "get", None)) and scope:
                 whitelist_on = bool(cfg.get("access_control.whitelist_enabled", False))
-                if whitelist_on:
+                disabled_set = {
+                    item.casefold()
+                    for item in parse_value_list(
+                        cfg.get("access_control.disabled_ids", "")
+                    )
+                }
+                disabled_locally = bool(
+                    scope.casefold() in disabled_set
+                    or (group_id and group_id.casefold() in disabled_set)
+                )
+                if enabled and disabled_locally:
+                    enabled = False
+                elif enabled and whitelist_on:
                     allowed = {
                         item.casefold()
                         for item in parse_value_list(
                             cfg.get("access_control.allowed_ids", "")
                         )
                     }
-                    parts = scope.split(":")
-                    group_id = parts[-1] if len(parts) >= 3 else ""
                     enabled = bool(
                         scope.casefold() in allowed
                         or (group_id and group_id.casefold() in allowed)
@@ -611,33 +664,243 @@ class SeriesMixin:
 
             if conflicts:
                 summary = f"存在旧插件冲突（{conflicts[0]}）"
+                mode = "conflict"
             elif excluded_by_core:
                 summary = f"主控排除 · 现有 {total_count} 条记忆"
+                mode = "excluded_by_core"
             elif not getattr(self, "_series_enabled", False):
                 summary = f"未开启接入 · 现有 {total_count} 条记忆"
+                mode = "runtime_disabled"
+            elif disabled_locally:
+                summary = f"已按群关闭 · 现有 {total_count} 条记忆"
+                mode = "disabled"
             elif enabled is False:
                 summary = f"未在白名单 · 现有 {total_count} 条记忆"
+                mode = "whitelist"
             else:
                 summary = f"共 {total_count} 条记忆 · 今日 +{activity_today}"
+                mode = "whitelist" if whitelist_on else "open"
 
             return {
+                "umo": scope,
                 "enabled": enabled,
-                "supported": False,
+                "writable": writable,
+                "supported": writable,
+                "mode": mode,
                 "excluded_by_core": excluded_by_core,
                 "persona_id": persona_id,
                 "activity_today": activity_today,
                 "summary": summary,
-                "version": f"ro:{int(bool(enabled))}:{total_count}:{activity_today}",
+                "detail": summary,
+                "version": self._scope_config_version(scope, enabled),
             }
         except Exception:
             return {
+                "umo": str(umo or "").strip(),
                 "enabled": None,
+                "writable": False,
                 "supported": False,
+                "mode": "error",
                 "persona_id": "",
                 "activity_today": None,
                 "summary": "群间记忆状态暂不可用",
+                "detail": "群间记忆状态暂不可用",
                 "version": "0",
             }
+
+    async def set_series_scope_enabled(
+        self,
+        umo: str,
+        enabled: bool,
+        expected_version: str | int | None = None,
+    ) -> dict[str, Any]:
+        """Optimistically toggle whether a UMO is enabled in Dynamics Memory."""
+        scope = str(umo or "").strip()
+        if not scope:
+            return {
+                "ok": False,
+                "umo": "",
+                "enabled": False,
+                "version": "0",
+                "reason": "invalid_umo",
+            }
+        current = self.get_series_scope_status(scope)
+        current_version = str(current.get("version") or "0")
+        if (
+            expected_version is not None
+            and str(expected_version).strip() != ""
+            and str(expected_version) != current_version
+        ):
+            return {
+                "ok": False,
+                "umo": scope,
+                "enabled": bool(current.get("enabled")),
+                "version": current_version,
+                "reason": "version_conflict",
+            }
+        if self.series_conflicts():
+            return {
+                "ok": False,
+                "umo": scope,
+                "enabled": False,
+                "version": current_version,
+                "reason": "plugin_conflict",
+            }
+
+        cfg = getattr(self, "config_manager", None)
+        apply_updates = getattr(cfg, "apply_updates", None) if cfg is not None else None
+        if not callable(apply_updates):
+            return {
+                "ok": False,
+                "umo": scope,
+                "enabled": bool(current.get("enabled")),
+                "version": current_version,
+                "reason": "config_not_writable",
+            }
+
+        whitelist_on = bool(cfg.get("access_control.whitelist_enabled", False))
+        allowed_list = parse_value_list(cfg.get("access_control.allowed_ids", ""))
+        disabled_list = parse_value_list(cfg.get("access_control.disabled_ids", ""))
+        parts = scope.split(":")
+        group_id = parts[-1] if len(parts) >= 3 else ""
+        match_keys = {scope.casefold()}
+        if group_id:
+            match_keys.add(group_id.casefold())
+
+        updates: dict[str, Any] = {}
+        if enabled:
+            new_disabled = [
+                item for item in disabled_list if item.casefold() not in match_keys
+            ]
+            if new_disabled != disabled_list:
+                updates["access_control.disabled_ids"] = "\n".join(new_disabled)
+            if whitelist_on:
+                if not any(item.casefold() in match_keys for item in allowed_list):
+                    allowed_list.append(scope)
+                updates["access_control.allowed_ids"] = "\n".join(allowed_list)
+            elif not updates:
+                updates["access_control.disabled_ids"] = "\n".join(new_disabled)
+        else:
+            if whitelist_on:
+                new_allowed = [
+                    item for item in allowed_list if item.casefold() not in match_keys
+                ]
+                updates["access_control.allowed_ids"] = "\n".join(new_allowed)
+            else:
+                if not any(item.casefold() in match_keys for item in disabled_list):
+                    disabled_list.append(scope)
+                updates["access_control.disabled_ids"] = "\n".join(disabled_list)
+
+        try:
+            apply_updates(updates)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "umo": scope,
+                "enabled": bool(current.get("enabled")),
+                "version": current_version,
+                "reason": f"save_failed:{type(exc).__name__}",
+            }
+
+        try:
+            invalidate_presence_cache(PLUGIN, context=getattr(self, "context", None))
+        except Exception:
+            pass
+
+        updated = self.get_series_scope_status(scope)
+        reason = (
+            "excluded_by_core"
+            if enabled and updated.get("excluded_by_core")
+            else "runtime_disabled"
+            if enabled and not getattr(self, "_series_enabled", False)
+            else "updated"
+        )
+        return {
+            "ok": True,
+            "umo": scope,
+            "enabled": bool(updated.get("enabled")),
+            "version": str(updated.get("version") or "0"),
+            "reason": reason,
+        }
+
+    async def activate_series_runtime(self) -> dict[str, Any]:
+        """Activate Dynamics Memory series runtime (used by Setup Wizard step 4)."""
+        conflicts = self.series_conflicts()
+        if conflicts:
+            return {
+                "ok": False,
+                "plugin_id": PLUGIN,
+                "enabled": bool(getattr(self, "_series_enabled", False)),
+                "ready": False,
+                "reason": "plugin_conflict",
+                "conflicts": conflicts,
+            }
+        if getattr(self, "_terminating", False):
+            return {
+                "ok": False,
+                "plugin_id": PLUGIN,
+                "enabled": False,
+                "ready": False,
+                "reason": "terminating",
+            }
+
+        self._series_enabled = True
+        cfg = getattr(self, "config_manager", None)
+        persisted = False
+        if cfg is not None:
+            apply_updates = getattr(cfg, "apply_updates", None)
+            if callable(apply_updates):
+                try:
+                    apply_updates({"series_runtime_enabled": True})
+                    persisted = True
+                except Exception:
+                    persisted = False
+            if not persisted:
+                raw_cfg = getattr(cfg, "_raw_config", None)
+                if isinstance(raw_cfg, dict):
+                    raw_cfg["series_runtime_enabled"] = True
+                    save_fn = getattr(raw_cfg, "save_config", None)
+                    if callable(save_fn):
+                        try:
+                            save_fn()
+                            persisted = True
+                        except Exception:
+                            pass
+
+        initializer = getattr(self, "initializer", None)
+        is_initialized = bool(getattr(initializer, "is_initialized", False))
+        if not is_initialized:
+            init_coro_fn = getattr(self, "_initialize_plugin", None)
+            create_task = getattr(self, "_create_tracked_task", None)
+            if callable(init_coro_fn) and callable(create_task):
+                try:
+                    create_task(init_coro_fn())
+                except RuntimeError:
+                    pass
+            else:
+                wake = getattr(initializer, "wake_retry", None)
+                if callable(wake):
+                    wake(reset_attempts=True)
+        else:
+            ensure_rt = getattr(self, "_ensure_runtime_components", None)
+            if callable(ensure_rt):
+                res = ensure_rt()
+                if inspect.isawaitable(res):
+                    await res
+
+        try:
+            invalidate_presence_cache(PLUGIN, context=getattr(self, "context", None))
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "plugin_id": PLUGIN,
+            "enabled": True,
+            "ready": bool(getattr(initializer, "is_initialized", False)),
+            "persisted": persisted,
+            "reason": "activated",
+        }
 
     def get_journal_events(
         self,

@@ -154,11 +154,29 @@ async def _get_native_persona_id(
         # 优先级 3：全局默认人格
         default_persona = await context.persona_manager.get_default_persona_v3(umo=umo)
         persona_id = default_persona["name"] if default_persona else None
+        if not persona_id:
+            from ..memory_scope import get_effective_series_shared_config
+
+            shared_persona = str(
+                get_effective_series_shared_config(context).get("persona_id") or ""
+            ).strip()
+            if shared_persona:
+                persona_id = shared_persona
         logger.debug(f"[get_persona_id] [{umo}] 使用默认人格: {persona_id or '未设置'}")
         logger.info(f"[get_persona_id] [{umo}] 最终使用人格: {persona_id or '无'}")
         return persona_id
     except Exception as e:
         logger.debug(f"获取人格ID失败: {e}")
+        try:
+            from ..memory_scope import get_effective_series_shared_config
+
+            shared_persona = str(
+                get_effective_series_shared_config(context).get("persona_id") or ""
+            ).strip()
+            if shared_persona:
+                return shared_persona
+        except Exception:
+            pass
         return None
 
 

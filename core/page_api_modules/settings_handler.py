@@ -11,9 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from quart import request
-
 from astrbot.api import logger
+from quart import request
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = PLUGIN_ROOT / "_conf_schema.json"
@@ -358,7 +357,7 @@ class SettingsHandler:
                     "graph_memory.dynamic_route_weighting", True
                 ),
                 "graph_route_timeout_seconds": get(
-                    "graph_memory.graph_route_timeout_seconds", 1.5
+                    "graph_memory.graph_route_timeout_seconds", 3.5
                 ),
                 "cleanup_days_threshold": get(
                     "forgetting_agent.cleanup_days_threshold", 120

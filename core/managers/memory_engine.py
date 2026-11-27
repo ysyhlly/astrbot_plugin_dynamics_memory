@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
@@ -291,9 +290,13 @@ class MemoryEngine(
             dr.dynamic_route_weighting = bool(
                 self.config.get("dynamic_route_weighting", dr.dynamic_route_weighting)
             )
-            dr.graph_route_timeout_seconds = float(
+            dr.graph_route_timeout = float(
                 self.config.get(
-                    "graph_route_timeout_seconds", dr.graph_route_timeout_seconds
+                    "graph_route_timeout_seconds",
+                    self.config.get(
+                        "graph_route_timeout",
+                        getattr(dr, "graph_route_timeout", 3.5),
+                    ),
                 )
             )
         if self.graph_retriever is not None and hasattr(self.graph_retriever, "config"):

@@ -42,7 +42,7 @@ class DualRouteRetriever:
             self.config.get("dynamic_route_weighting", True)
         )
         self.graph_route_timeout = float(
-            self.config.get("graph_route_timeout_seconds", 1.5)
+            self.config.get("graph_route_timeout_seconds", 3.5)
         )
 
     async def search(

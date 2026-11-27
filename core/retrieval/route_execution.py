@@ -68,11 +68,19 @@ def _enter_vector_cooldown() -> None:
 
 
 def _log_route_failure(name, exc, safe_errors=False) -> None:
-    """同类失败在窗口期内只记录一条 WARN，其余降为 DEBUG 并累计抑制次数。"""
+    """同类失败在窗口期内只记录一条日志，其余降为 DEBUG 并累计抑制次数。"""
+    is_graph_timeout = str(name) == "graph" and isinstance(
+        exc, (asyncio.TimeoutError, TimeoutError)
+    )
+    window = (
+        _FAILURE_LOG_WINDOW_SECONDS * 2
+        if is_graph_timeout
+        else _FAILURE_LOG_WINDOW_SECONDS
+    )
     key = f"{name}:{type(exc).__name__}"
     now = time.monotonic()
     last_ts, suppressed = _failure_log_state.get(key, (0.0, 0))
-    if last_ts and now - last_ts < _FAILURE_LOG_WINDOW_SECONDS:
+    if last_ts and now - last_ts < window:
         _failure_log_state[key] = (last_ts, suppressed + 1)
         logger.debug(
             "Retrieval route %s failed (suppressed %d): %s", name, suppressed + 1, exc
@@ -80,6 +88,12 @@ def _log_route_failure(name, exc, safe_errors=False) -> None:
         return
     _failure_log_state[key] = (now, 0)
     suffix = f"（已抑制 {suppressed} 次同类告警）" if suppressed else ""
+    if is_graph_timeout:
+        logger.info(
+            "[LMRecall] route=graph outcome=timeout_fallback (已快速回退至文档/向量结果)%s",
+            suffix,
+        )
+        return
     if safe_errors:
         logger.warning(
             "[LMRecall] route=%s outcome=error exception_type=%s%s",

@@ -164,6 +164,15 @@ class FilteringConfig(BaseModel):
         default="", description="私聊可读取的群聊来源，每行一个 GroupMessage 会话 UMO"
     )
 
+    @field_validator("private_shared_group_sources", mode="before")
+    @classmethod
+    def _normalize_private_shared_group_sources(cls, value: Any) -> Any:
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            return "\n".join(str(item).strip() for item in value if str(item).strip())
+        return value
+
     private_shared_group_instance_id: str = Field(
         default="", description="授权群记忆的机器人实例与人格 ID"
     )
@@ -178,6 +187,7 @@ class AccessControlConfig(BaseModel):
 
     whitelist_enabled: bool = False
     allowed_ids: str = ""
+    disabled_ids: str = ""
     identity_aliases: str = ""
 
 
@@ -241,7 +251,7 @@ class GraphMemoryConfig(BaseModel):
     expansion_hops: int = Field(default=1, ge=1, le=2)
     second_hop_weight: float = Field(default=0.4, ge=0.0, le=1.0)
     dynamic_route_weighting: bool = True
-    graph_route_timeout_seconds: float = Field(default=1.5, ge=0.1, le=30.0)
+    graph_route_timeout_seconds: float = Field(default=3.5, ge=0.1, le=30.0)
     max_topics_per_memory: int = Field(default=6, ge=1, le=20)
     max_participants_per_memory: int = Field(default=8, ge=1, le=30)
     max_facts_per_memory: int = Field(default=8, ge=1, le=30)

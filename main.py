@@ -49,8 +49,11 @@ from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
 from .core.memory_scope import (
     adapter_access,
+    get_effective_series_shared_config,
     is_event_excluded_by_series,
     is_event_memory_allowed,
+    is_event_privacy_muted,
+    is_member_privacy_muted,
 )
 from .core.narrative_api import is_managed_event, scope_key
 from .core.page_api import PluginPageApi
@@ -690,6 +693,12 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             except Exception:
                 pass
             return
+        if is_event_privacy_muted(getattr(self, "context", None), event, "memory"):
+            try:
+                setattr(req, "_lm_private_hook_outcome_v1", "privacy_muted")
+            except Exception:
+                pass
+            return
         get_extra = getattr(event, "get_extra", None)
         blocking_context = (
             get_extra("_autonomous_blocking_context_v1", None)
@@ -924,11 +933,18 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
     @permission_type(PermissionType.ADMIN)
     @lmem.command("forget")
     async def forget(
-        self, event: AstrMessageEvent, doc_id: int
+        self, event: AstrMessageEvent, doc_id: int, option: str = ""
     ) -> AsyncGenerator[MessageEventResult, None]:
-        """[Admin] Delete specified memory"""
-        async for message in self._run_command(event, "handle_forget", doc_id):
-            yield message
+        """[Admin] Soft-archive specified memory (pass --purge for physical delete)"""
+        normalized = str(option or "").strip().casefold()
+        if normalized in {"--purge", "purge", "--hard"}:
+            async for message in self._run_command(
+                event, "handle_forget", doc_id, purge=True
+            ):
+                yield message
+        else:
+            async for message in self._run_command(event, "handle_forget", doc_id):
+                yield message
 
     @permission_type(PermissionType.ADMIN)
     @lmem.command("rebuild-index")
@@ -2148,6 +2164,13 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             if event.get("type") not in {"message.received", "delivery.success"}:
                 continue
             scope = event.get("scope", {})
+            if event.get("type") == "message.received" and is_member_privacy_muted(
+                getattr(self, "context", None),
+                str(scope.get("umo", "")),
+                str(event.get("actor_id", "")),
+                "memory",
+            ):
+                continue
             if not await self._narrative_scope_allowed(
                 scope, str(event.get("actor_id", ""))
             ):
@@ -2268,17 +2291,22 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         providers: list[dict[str, Any]] = []
         issues: list[str] = []
 
+        shared_cfg = get_effective_series_shared_config(getattr(self, "context", None))
+
         # Embedding Provider
         configured_emb_id = (
             str(cfg.get("provider_settings.embedding_provider_id") or "").strip()
             if cfg is not None
             else ""
         )
+        shared_emb_id = str(shared_cfg.get("embedding_provider") or "").strip()
         bound_emb = getattr(init, "embedding_provider", None)
-        emb_id = _provider_id(bound_emb) or configured_emb_id
+        emb_id = _provider_id(bound_emb) or configured_emb_id or shared_emb_id
         if bound_emb is not None:
             emb_detail = (
-                "configured" if configured_emb_id else "fallback_first_embedding"
+                "configured"
+                if configured_emb_id
+                else ("shared_series" if shared_emb_id else "fallback_first_embedding")
             )
             providers.append(
                 {
@@ -2361,10 +2389,14 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             cfg.get("recall_engine.rerank_enabled", False) if cfg is not None else False
         )
         if rerank_enabled:
-            rerank_id = (
+            explicit_rerank_id = (
                 str(cfg.get("recall_engine.rerank_provider_id") or "").strip()
                 if cfg is not None
                 else ""
+            )
+            rerank_id = (
+                explicit_rerank_id
+                or str(shared_cfg.get("rerank_provider") or "").strip()
             )
             rerank_provider = _silent_lookup(rerank_id) if rerank_id else None
             providers.append(
@@ -2372,7 +2404,13 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                     "role": "rerank",
                     "provider_id": rerank_id,
                     "status": "ready" if rerank_provider is not None else "degraded",
-                    "detail": "bound" if rerank_provider is not None else "not_found",
+                    "detail": (
+                        "bound"
+                        if explicit_rerank_id and rerank_provider is not None
+                        else "shared_series"
+                        if rerank_provider is not None
+                        else "not_found"
+                    ),
                 }
             )
             if rerank_provider is None:

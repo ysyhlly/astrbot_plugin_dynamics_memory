@@ -21,6 +21,8 @@ from ..memory_scope import (
     current_adapter_access,
     is_event_excluded_by_series,
     is_event_memory_allowed,
+    is_event_privacy_muted,
+    is_member_privacy_muted,
     is_suspicious_session_id,
     resolve_memory_access_policy,
     resolve_verified_group_sessions,
@@ -208,6 +210,10 @@ class MemoryRecall:
             ) or not is_event_memory_allowed(self.config_manager, event):
                 logger.debug("[LMRecall] route=policy outcome=denied")
                 return
+            if is_event_privacy_muted(getattr(self, "context", None), event, "memory"):
+                logger.debug("[LMRecall] route=privacy_mute outcome=skipped")
+                self._set_recall_outcome(req, "privacy_muted")
+                return
             session_id = str(getattr(event, "unified_msg_origin", "") or "").strip()
             deadline = (
                 budget if isinstance(budget, RecallDeadline) else RecallDeadline.start()
@@ -367,6 +373,7 @@ class MemoryRecall:
                     event,
                     persona_id=persona_id,
                     verified_group_sessions=verified_groups,
+                    context=getattr(self, "context", None),
                 )
                 recall_persona_id = (
                     persona_id
@@ -465,6 +472,30 @@ class MemoryRecall:
                     key=lambda result: result.final_score,
                     reverse=True,
                 )[:recall_k]
+                if recalled_memories and getattr(self, "context", None) is not None:
+                    filtered_recalled = []
+                    for mem in recalled_memories:
+                        meta = getattr(mem, "metadata", None)
+                        mem_sender = (
+                            str(meta.get("sender_id") or "").strip()
+                            if isinstance(meta, dict)
+                            else ""
+                        )
+                        mem_umo = (
+                            str(
+                                meta.get("source_session_id")
+                                or meta.get("session_id")
+                                or session_id
+                            ).strip()
+                            if isinstance(meta, dict)
+                            else session_id
+                        )
+                        if mem_sender and is_member_privacy_muted(
+                            self.context, mem_umo, mem_sender, "memory"
+                        ):
+                            continue
+                        filtered_recalled.append(mem)
+                    recalled_memories = filtered_recalled
                 for scope in access_policy.read_scopes:
                     if (
                         not scope.read_only
@@ -1015,7 +1046,10 @@ class MemoryRecall:
 
     async def _verified_shared_group_sessions(self, event) -> tuple[str, ...]:
         return await resolve_verified_group_sessions(
-            self.config_manager, event, self.conversation_manager
+            self.config_manager,
+            event,
+            self.conversation_manager,
+            context=getattr(self, "context", None),
         )
 
     @staticmethod
@@ -1032,6 +1066,7 @@ class MemoryRecall:
             "error",
             "original_input_unavailable",
             "disabled",
+            "privacy_muted",
             "policy_denied",
         }:
             return True

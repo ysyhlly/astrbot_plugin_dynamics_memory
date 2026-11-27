@@ -364,9 +364,17 @@ class MemoryProcessor:
             except Exception:
                 pass
 
-        # 回退到主控共享 reply_provider
-        shared_provider_id = resolve_series_provider(self.context, "", role="reply")
-        if shared_provider_id:
+        # 回退到主控共享 light_analysis_provider / reply_provider
+        from ..memory_scope import get_effective_series_shared_config
+
+        shared_cfg = get_effective_series_shared_config(self.context)
+        shared_candidates = (
+            str(shared_cfg.get("light_analysis_provider") or "").strip(),
+            resolve_series_provider(self.context, "", role="reply"),
+        )
+        for shared_provider_id in shared_candidates:
+            if not shared_provider_id:
+                continue
             try:
                 provider = _lookup_provider(shared_provider_id)
                 if (
