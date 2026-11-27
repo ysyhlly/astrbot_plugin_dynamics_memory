@@ -245,3 +245,35 @@ async def test_adapter_choices_keep_offline_instances_of_the_same_type():
     )
     assert field["options"] == ["qq-a", "qq-b"]
     assert field["value"] is None
+
+
+@pytest.mark.asyncio
+async def test_nullable_hard_max_messages_per_session_accepts_none_and_blank():
+    raw = _WritableConfig({})
+    manager = ConfigManager(raw)
+    handler = _handler(manager)
+
+    async with Quart(__name__).test_request_context("/"):
+        response = await handler.get_config()
+    field = next(
+        field
+        for section in response["data"]["sections"]
+        for field in section["fields"]
+        if field["path"] == "session_manager.hard_max_messages_per_session"
+    )
+    assert field["nullable"] is True
+    assert field["value"] is None
+
+    updated = manager.apply_updates(
+        {"session_manager.hard_max_messages_per_session": None, "recall_engine.top_k": 6}
+    )
+    assert updated["session_manager"]["hard_max_messages_per_session"] is None
+    assert updated["recall_engine"]["top_k"] == 6
+
+    updated2 = manager.apply_updates(
+        {"session_manager.hard_max_messages_per_session": ""}
+    )
+    assert updated2["session_manager"]["hard_max_messages_per_session"] is None
+
+    with pytest.raises(ValueError):
+        manager.apply_updates({"session_manager.hard_max_messages_per_session": 50})

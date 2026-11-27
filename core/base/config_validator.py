@@ -7,7 +7,7 @@ Pydantic 模型是配置的唯一校验源：字段类型、范围与枚举约�
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SessionManagerConfig(BaseModel):
@@ -20,6 +20,13 @@ class SessionManagerConfig(BaseModel):
     max_messages_per_session: int = Field(default=1000, ge=100, le=10000)
     hard_max_messages_per_session: int | None = Field(default=None, ge=100, le=50000)
     cleanup_batch_size: int = Field(default=50, ge=1, le=1000)
+
+    @field_validator("hard_max_messages_per_session", mode="before")
+    @classmethod
+    def _blank_hard_max_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class RecallEngineConfig(BaseModel):

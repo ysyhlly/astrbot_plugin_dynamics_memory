@@ -160,6 +160,7 @@ class SettingsHandler:
                 "hint": hint,
                 "type": str(meta.get("type") or "string"),
                 "default": meta.get("default"),
+                "nullable": meta.get("default") is None,
                 "value": config_manager.get(f"{group}.{path}", meta.get("default")),
             }
             if isinstance(options, list):

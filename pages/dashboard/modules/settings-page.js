@@ -125,10 +125,11 @@ export class SettingsPage {
       for (const section of this.sections) {
         for (const field of section.fields || []) {
           const value = field.value;
+          const isNullable = Boolean(field.nullable || field.default === null);
           baseline[field.path] = field.type === "adapter-list" ? value ?? null
             : field.type === "bool" ? Boolean(value)
             : field.type === "list" ? value ?? field.default ?? []
-            : field.type === "int" || field.type === "float" ? value ?? "" : String(value ?? "");
+            : field.type === "int" || field.type === "float" ? value ?? (isNullable ? null : "") : String(value ?? "");
         }
       }
       this._baseline = JSON.stringify(baseline);
@@ -319,8 +320,14 @@ export class SettingsPage {
 
   renderField(field) {
     const path = esc(field.path);
+    const isNullable = Boolean(field.nullable || field.default === null);
     const common =
-      'data-setting-path="' + path + '" data-type="' + esc(field.type) + '"';
+      'data-setting-path="' +
+      path +
+      '" data-type="' +
+      esc(field.type) +
+      '"' +
+      (isNullable ? ' data-nullable="1"' : "");
     const value = this._fieldValue(field);
     let control = "";
     if (field.type === "adapter-list") {
@@ -444,6 +451,14 @@ export class SettingsPage {
       } catch (_error) {
         this._formValues[path] = control.value;
       }
+      return;
+    }
+    if (
+      (type === "int" || type === "float") &&
+      control.dataset.nullable === "1" &&
+      String(control.value ?? "").trim() === ""
+    ) {
+      this._formValues[path] = null;
       return;
     }
     const parseNumber = type === "int" ? Number.parseInt : type === "float" ? Number.parseFloat : null;
@@ -578,13 +593,23 @@ export class SettingsPage {
       } else if (type === "bool") {
         values[path] = Boolean(element.checked);
       } else if (type === "int") {
-        const parsed = Number.parseInt(element.value, 10);
-        if (Number.isNaN(parsed)) throw new Error(path);
-        values[path] = parsed;
+        const raw = String(element.value ?? "").trim();
+        if (raw === "" && element.dataset.nullable === "1") {
+          values[path] = null;
+        } else {
+          const parsed = Number.parseInt(raw, 10);
+          if (Number.isNaN(parsed)) throw new Error(path);
+          values[path] = parsed;
+        }
       } else if (type === "float") {
-        const parsed = Number.parseFloat(element.value);
-        if (Number.isNaN(parsed)) throw new Error(path);
-        values[path] = parsed;
+        const raw = String(element.value ?? "").trim();
+        if (raw === "" && element.dataset.nullable === "1") {
+          values[path] = null;
+        } else {
+          const parsed = Number.parseFloat(raw);
+          if (Number.isNaN(parsed)) throw new Error(path);
+          values[path] = parsed;
+        }
       } else if (type === "list") {
         let parsed;
         try {

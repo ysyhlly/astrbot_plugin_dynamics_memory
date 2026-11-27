@@ -363,3 +363,68 @@ test("dangerous-change detection only fires for risky transitions", async () => 
     delete globalThis.window;
   }
 });
+
+test("nullable int fields allow empty input as null while non-nullable ints still fail", () => {
+  globalThis.window = { t: (key) => key };
+  const page = new SettingsPage({}, {});
+  const html = page.renderField({
+    path: "session_manager.hard_max_messages_per_session",
+    label: "单会话硬性消息上限",
+    type: "int",
+    default: null,
+    nullable: true,
+    value: null,
+    min: 100,
+    max: 50000,
+    step: 100,
+  });
+  assert.match(html, /data-nullable="1"/);
+
+  globalThis.document = {
+    querySelectorAll: () => [
+      {
+        dataset: {
+          settingPath: "session_manager.hard_max_messages_per_session",
+          type: "int",
+          nullable: "1",
+        },
+        value: "",
+      },
+      {
+        dataset: {
+          settingPath: "session_manager.max_messages_per_session",
+          type: "int",
+        },
+        value: "1200",
+      },
+    ],
+  };
+  try {
+    assert.deepEqual(page.collectValues(), {
+      "session_manager.hard_max_messages_per_session": null,
+      "session_manager.max_messages_per_session": 1200,
+    });
+    page._baseline = JSON.stringify({
+      "session_manager.hard_max_messages_per_session": null,
+      "session_manager.max_messages_per_session": 1200,
+    });
+    assert.equal(page.hasUnsavedChanges(), false);
+
+    // Non-nullable int left blank must still throw
+    globalThis.document = {
+      querySelectorAll: () => [
+        {
+          dataset: {
+            settingPath: "session_manager.max_messages_per_session",
+            type: "int",
+          },
+          value: "",
+        },
+      ],
+    };
+    assert.throws(() => page.collectValues(), /session_manager\.max_messages_per_session/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
