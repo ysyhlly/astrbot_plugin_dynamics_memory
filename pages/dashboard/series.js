@@ -71,3 +71,13 @@ async function refresh() {
 }
 if (button) button.addEventListener('click', refresh);
 window.lmRefreshSeriesStatus = refresh;
+
+const initWave2 = () => {
+  const modPath = './assets/wave2-governance.min.js';
+  import(modPath).then((mod) => mod?.initWave2Governance?.(api)).catch(() => {});
+};
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initWave2, { once: true });
+} else {
+  initWave2();
+}

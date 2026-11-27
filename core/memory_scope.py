@@ -296,23 +296,9 @@ def is_member_privacy_muted(
     """Zero-coupling dynamic lookup for unified cross-plugin privacy mute."""
     clean_umo = str(umo or "").strip()
     clean_member = str(member_id or "").strip()
+    clean_scope = str(scope or "").strip()
     if context is None or not clean_umo or not clean_member:
         return False
-
-    # Prefer synced series_panels helper when available
-    helper = getattr(series_panels, "is_member_privacy_muted", None)
-    if callable(helper) and not inspect.iscoroutinefunction(helper):
-        try:
-            res = helper(context, clean_umo, clean_member, scope)
-            if inspect.isawaitable(res):
-                if inspect.iscoroutine(res):
-                    res.close()
-            elif isinstance(res, bool):
-                return res
-            elif isinstance(res, dict) and isinstance(res.get("muted"), bool):
-                return res["muted"]
-        except Exception:
-            pass
 
     try:
         owner = series_panels.find_plugin_owner(context, "astrbot_plugin_chat_dynamics")
@@ -321,7 +307,13 @@ def is_member_privacy_muted(
         getter = getattr(owner, "get_series_privacy_muted", None)
         if not callable(getter) or inspect.iscoroutinefunction(getter):
             return False
-        raw = getter(clean_umo, clean_member, scope)
+        try:
+            raw = getter(clean_umo, clean_member, clean_scope)
+        except TypeError:
+            try:
+                raw = getter(umo=clean_umo, member_id=clean_member, scope=clean_scope)
+            except TypeError:
+                raw = getter(clean_umo, clean_member)
         if inspect.isawaitable(raw):
             if inspect.iscoroutine(raw):
                 raw.close()
@@ -796,3 +788,99 @@ async def resolve_verified_group_sessions(
         ):
             verified.append(source)
     return tuple(sorted(set(verified)))
+
+
+async def fetch_group_culture_context(
+    context: Any,
+    umo: str,
+    *,
+    query: str = "",
+    limit: int = 4,
+    timeout: float = 0.4,
+) -> list[dict[str, str]]:
+    """Query approved group slang/memes from group_chronicle with zero hard coupling.
+
+    Always returns a bounded list of ``{"term": str, "meaning": str}`` dicts and
+    never raises on missing plugin, mock objects, timeout, or malformed returns.
+    """
+    if context is None or not isinstance(umo, str) or not umo.strip():
+        return []
+    limit = max(1, min(int(limit), 8))
+    try:
+        owner = series_panels.find_plugin_owner(
+            context, "astrbot_plugin_group_chronicle"
+        )
+    except Exception:
+        return []
+    if owner is None:
+        return []
+    getter = getattr(owner, "get_culture_context", None)
+    if not callable(getter):
+        return []
+
+    raw: Any = None
+    try:
+        try:
+            res = getter(umo.strip(), query=str(query or ""), limit=limit)
+        except TypeError:
+            try:
+                res = getter(umo.strip(), limit=limit)
+            except TypeError:
+                res = getter(umo.strip())
+        if inspect.isawaitable(res):
+            import asyncio
+
+            raw = await asyncio.wait_for(res, timeout=max(0.05, float(timeout)))
+        else:
+            raw = res
+    except Exception:
+        return []
+
+    candidates: Any = None
+    if isinstance(raw, list):
+        candidates = raw
+    elif isinstance(raw, dict):
+        for key in ("items", "entries", "slang", "memes", "culture"):
+            val = raw.get(key)
+            if isinstance(val, list):
+                candidates = val
+                break
+    if not isinstance(candidates, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    seen_terms: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if isinstance(status, str) and status.strip():
+            if status.strip().lower() not in {
+                "approved",
+                "active",
+                "verified",
+                "published",
+            }:
+                continue
+        term = ""
+        for k in ("term", "name", "phrase", "title", "keyword"):
+            val = item.get(k)
+            if isinstance(val, str) and val.strip():
+                term = re.sub(r"\s+", " ", val).strip()[:40]
+                break
+        meaning = ""
+        for k in ("meaning", "explanation", "description", "summary", "content"):
+            val = item.get(k)
+            if isinstance(val, str) and val.strip():
+                meaning = re.sub(r"\s+", " ", val).strip()[:120]
+                break
+        if not term or not meaning:
+            continue
+        dedup_key = term.casefold()
+        if dedup_key in seen_terms:
+            continue
+        seen_terms.add(dedup_key)
+        normalized.append({"term": term, "meaning": meaning})
+        if len(normalized) >= limit:
+            break
+    return normalized

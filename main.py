@@ -75,6 +75,7 @@ from .core.recall_runtime import (
     trace_recall_hook,
 )
 from .core.retrieval.narrative_history import persona_names, source_origin
+from .core.self_service import CorrectionQueueStore, MemberMemoryCardService
 from .core.series import active_entries, find_role, manifest
 from .core.tools import (
     AgenticMemorySearchTool,
@@ -219,6 +220,10 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         self._llm_tools_registered = False
         self._terminating = False
         self.evidence_service: EvidenceViewService | None = None
+        self.correction_store = CorrectionQueueStore(
+            Path(data_dir) / "member_corrections.sqlite3"
+        )
+        self.member_card_service = MemberMemoryCardService(Path(data_dir) / "tmp_cards")
 
         self.page_api = PluginPageApi(self)
         self.page_api.register_routes()
@@ -2235,6 +2240,89 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         yield event.plain_result(
             f"纠正已追加：{result['action']} {result['target_id']}；"
             f"revision={result['correction_revision']}；依赖项已失效。"
+        )
+
+    @filter.command("我的记忆", alias={"记忆卡片"})
+    async def member_my_memory_card(self, event: AstrMessageEvent):
+        """群友自助查询本人在本群的脱敏记忆卡片（支持图文卡片渲染与纯文本降级）。"""
+        ready, message = await self._ensure_plugin_ready()
+        if not ready:
+            yield event.plain_result(message or "记忆引擎尚未就绪，请稍后再试。")
+            return
+        engine = getattr(self.initializer, "memory_engine", None)
+        if engine is None:
+            yield event.plain_result("记忆引擎暂不可用。")
+            return
+        card_data = await self.member_card_service.collect_member_card_data(
+            engine, event, self.config_manager, self.context
+        )
+        if not card_data.get("allowed"):
+            reason = card_data.get("reason")
+            if reason == "privacy_muted":
+                yield event.plain_result(
+                    "你已开启记忆隐私静音，当前不会展示个人记忆卡片。"
+                )
+            else:
+                yield event.plain_result("当前会话未开启记忆功能或暂无可用记忆。")
+            return
+
+        card_path = await asyncio.to_thread(
+            self.member_card_service.render_card_image, card_data
+        )
+        if card_path is not None and card_path.is_file():
+            image_result = getattr(event, "image_result", None)
+            if callable(image_result):
+                try:
+                    yield image_result(str(card_path))
+                    return
+                except Exception as exc:
+                    logger.debug(
+                        "[MemberCard] image_result 发送失败，降级为纯文本: %s", exc
+                    )
+        yield event.plain_result(self.member_card_service.render_card_text(card_data))
+
+    @filter.command("纠错", alias={"记忆纠错"})
+    async def member_memory_correction(
+        self, event: AstrMessageEvent, memory_id: str = "", description: str = ""
+    ):
+        """群友对本人的记忆提交纠错申请，进入管理员待审队列。"""
+        raw_id = str(memory_id or "").strip().lstrip("#")
+        desc = str(description or "").strip()
+        if not desc and " " in raw_id:
+            raw_id, _, desc = raw_id.partition(" ")
+            raw_id = raw_id.strip().lstrip("#")
+            desc = desc.strip()
+        if not raw_id.isdigit() or not desc:
+            yield event.plain_result(
+                "用法：/纠错 <记忆编号> <正确说明>\n示例：/纠错 42 我其实不喝咖啡，更喜欢喝乌龙茶"
+            )
+            return
+
+        ready, message = await self._ensure_plugin_ready()
+        if not ready:
+            yield event.plain_result(message or "记忆引擎尚未就绪，请稍后再试。")
+            return
+        engine = getattr(self.initializer, "memory_engine", None)
+        if engine is None:
+            yield event.plain_result("记忆引擎暂不可用。")
+            return
+
+        res = await self.member_card_service.submit_member_correction(
+            memory_engine=engine,
+            correction_store=self.correction_store,
+            event=event,
+            config_manager=self.config_manager,
+            context=self.context,
+            memory_id=int(raw_id),
+            description=desc,
+        )
+        if not res.get("ok"):
+            yield event.plain_result(str(res.get("error") or "提交纠错失败。"))
+            return
+        proposal = res["proposal"]
+        yield event.plain_result(
+            f"已提交记忆 #{proposal['memory_id']} 的纠错申请（申请单 #{proposal['id']}），"
+            f"等待管理员在控制台审核通过后生效。"
         )
 
     def get_series_health(self) -> dict[str, Any]:

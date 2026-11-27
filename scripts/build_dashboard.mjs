@@ -143,6 +143,11 @@ const app = await build({
   format: "esm", target: "es2022", write: false, legalComments: "inline",
 });
 artifacts.set("app.min.js", app.outputFiles[0].text);
+const wave2 = await build({
+  entryPoints: [join(DASHBOARD, "modules", "wave2-governance.js")], bundle: true, minify: true,
+  format: "esm", target: "es2022", write: false, legalComments: "inline",
+});
+artifacts.set("wave2-governance.min.js", wave2.outputFiles[0].text);
 const scene = await build({
   entryPoints: [join(DASHBOARD, "graph-3d.js")], bundle: true, minify: true,
   format: "esm", target: "es2022", write: false, legalComments: "inline",

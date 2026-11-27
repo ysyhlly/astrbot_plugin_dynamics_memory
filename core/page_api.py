@@ -18,6 +18,7 @@ from .memory_scope import adapter_access
 from .page_api_modules import (
     BackupHandler,
     ConsolidationHandler,
+    GovernanceHandler,
     GraphHandler,
     MemoryHandler,
     PageApiUtils,
@@ -45,6 +46,7 @@ class PluginPageApi:
         self.memory_handler = MemoryHandler(self.utils)
         self.recall_handler = RecallHandler(self.utils)
         self.graph_handler = GraphHandler(self.utils)
+        self.governance_handler = GovernanceHandler(self.utils, plugin)
         self.prompt_handler = PromptHandler(self.utils, plugin)
         self.consolidation_handler = ConsolidationHandler(self.utils)
         self.settings_handler = SettingsHandler(self.utils, plugin)
@@ -193,6 +195,13 @@ class PluginPageApi:
             ("evidence/insights", self.list_evidence_insights, ["GET"]),
             ("evidence/correct", self.correct_evidence_insight, ["POST"]),
             ("storage/repair", self.repair_storage, ["POST"]),
+            ("governance/health", self.get_governance_health, ["GET"]),
+            ("governance/merge", self.merge_governance_duplicates, ["POST"]),
+            ("governance/bulk_action", self.run_governance_bulk_action, ["POST"]),
+            ("corrections", self.list_corrections, ["GET"]),
+            ("corrections/review", self.review_correction, ["POST"]),
+            ("graph/merge-nodes", self.merge_graph_nodes, ["POST"]),
+            ("graph/cleanup-orphans", self.cleanup_graph_orphans, ["POST"]),
         ):
             register_panel_api(
                 self.plugin,
@@ -556,3 +565,44 @@ class PluginPageApi:
         except ValueError:
             return {"ok": False, "error": "invalid_or_missing_target"}
         return {"ok": True, **result}
+
+    # ---- Wave 2 治理、纠错队列与图谱运维路由 ----
+
+    async def get_governance_health(self):
+        ready, error = await self._ensure_plugin_ready(wait=False)
+        if error:
+            return error
+        return await self.governance_handler.get_health_report(ready["memory_engine"])
+
+    async def merge_governance_duplicates(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.governance_handler.merge_duplicates(ready["memory_engine"])
+
+    async def run_governance_bulk_action(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.governance_handler.bulk_action(ready["memory_engine"])
+
+    async def list_corrections(self):
+        return await self.governance_handler.list_corrections()
+
+    async def review_correction(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.governance_handler.review_correction(ready["memory_engine"])
+
+    async def merge_graph_nodes(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.graph_handler.merge_nodes(ready["memory_engine"])
+
+    async def cleanup_graph_orphans(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.graph_handler.cleanup_orphans(ready["memory_engine"])

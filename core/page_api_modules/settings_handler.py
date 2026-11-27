@@ -24,6 +24,63 @@ HOST_CONFIG_GROUPS = {"provider_settings", "bot_language"}
 
 _SLIDER_KEYS = ("min", "max", "step")
 
+# 配置路径白名单：保存后通过 _refresh_runtime_components 或动态 config_manager.get 立即热生效；
+# 其余修改将明确归类为 reload_required 提示管理员重载插件。
+HOT_RELOAD_PATHS: frozenset[str] = frozenset(
+    {
+        "fusion_strategy.rrf_k",
+        "importance_decay.decay_rate",
+        "importance_decay.access_decay_window_days",
+        "importance_decay.access_decay_max_count",
+        "importance_decay.access_count_decay_multiplier",
+        "importance_decay.protected_importance_threshold",
+        "recall_engine.top_k",
+        "recall_engine.min_importance_for_retrieval",
+        "recall_engine.min_similarity_for_retrieval",
+        "recall_engine.recent_memory_count",
+        "recall_engine.recent_memory_max_age_hours",
+        "recall_engine.memory_type_filter",
+        "recall_engine.search_cache_enabled",
+        "recall_engine.search_cache_ttl_seconds",
+        "recall_engine.search_cache_max_size",
+        "recall_engine.fallback_to_vector",
+        "recall_engine.rerank_enabled",
+        "recall_engine.rerank_candidates",
+        "recall_engine.fusion_mode",
+        "recall_engine.fusion_bm25_weight",
+        "recall_engine.recall_candidate_multiplier",
+        "recall_engine.fusion_agreement_bonus",
+        "recall_engine.auto_remove_injected",
+        "recall_engine.injection_method",
+        "graph_memory.document_route_weight",
+        "graph_memory.graph_route_weight",
+        "graph_memory.cross_route_bonus",
+        "graph_memory.expansion_limit",
+        "graph_memory.expansion_hops",
+        "graph_memory.second_hop_weight",
+        "graph_memory.dynamic_route_weighting",
+        "graph_memory.graph_route_timeout_seconds",
+        "graph_memory.atom_enabled",
+        "reflection_engine.summary_trigger_rounds",
+        "reflection_engine.max_unsummarized_messages",
+        "reflection_engine.include_source_time_tags",
+        "forgetting_agent.cleanup_days_threshold",
+        "forgetting_agent.cleanup_importance_threshold",
+        "forgetting_agent.auto_archived_enabled",
+        "forgetting_agent.archived_retention_days",
+        "forgetting_agent.auto_cleanup_enabled",
+        "memory_dedup.enabled",
+        "memory_dedup.similarity_threshold",
+        "memory_dedup.max_candidates",
+        "memory_dedup.merge_strategy",
+        "filtering_settings.memory_scope_mode",
+        "filtering_settings.use_persona_filtering",
+        "filtering_settings.enable_group_to_private_recall",
+        "access_control.whitelist_sessions",
+        "access_control.blacklist_sessions",
+    }
+)
+
 
 def _get_path(source: Any, path: str) -> Any:
     current = source
@@ -161,6 +218,7 @@ class SettingsHandler:
                 "default": meta.get("default"),
                 "nullable": meta.get("default") is None,
                 "value": config_manager.get(f"{group}.{path}", meta.get("default")),
+                "hot_reload": f"{group}.{path}" in HOT_RELOAD_PATHS,
             }
             if isinstance(options, list):
                 field["options"] = options
@@ -280,18 +338,29 @@ class SettingsHandler:
         config_manager = getattr(self.plugin, "config_manager", None)
         if config_manager is None:
             return self.utils.error("配置管理器未初始化")
+        changed_paths = sorted(values)
+        actually_changed = [
+            path for path in changed_paths if config_manager.get(path) != values[path]
+        ]
         try:
             updated = config_manager.apply_updates(values)
         except Exception as exc:
             logger.warning("保存插件配置失败: %s", exc, exc_info=True)
             return self.utils.error(f"保存失败: {exc}")
 
+        effective_paths = actually_changed or changed_paths
+        hot_applied = [p for p in effective_paths if p in HOT_RELOAD_PATHS]
+        reload_required = [p for p in effective_paths if p not in HOT_RELOAD_PATHS]
+
         self._refresh_runtime_components(config_manager)
 
         return self.utils.ok(
             {
                 "message": "saved",
-                "values": {path: _get_path(updated, path) for path in sorted(values)},
+                "values": {path: _get_path(updated, path) for path in changed_paths},
+                "hot_applied": hot_applied,
+                "reload_required": reload_required,
+                "changed_count": len(actually_changed),
             }
         )
 

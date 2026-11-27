@@ -1127,6 +1127,12 @@ class SeriesMixin:
                 ["POST"],
                 "标记来源冲突已审查",
             ),
+            (
+                "series/resolve_batch",
+                self.series_resolve_conflicts_batch,
+                ["POST"],
+                "批量标记来源冲突已审查",
+            ),
         ):
             register_panel_api(
                 self,
@@ -1195,7 +1201,16 @@ class SeriesMixin:
         if not ready:
             return {"status": "error", "message": error}
         store = self.initializer.conversation_manager.store
-        return {"status": "ok", "data": await store.list_series_conflicts()}
+        data = await store.list_series_conflicts()
+        if isinstance(data, dict):
+            items = data.get("items") or []
+            pending_count = sum(
+                1
+                for item in items
+                if isinstance(item, dict) and item.get("status") == "pending"
+            )
+            data = {**data, "pending_count": pending_count}
+        return {"status": "ok", "data": data}
 
     async def series_resolve_conflict(self):
         actor = await self._series_admin(check_csrf=True)
@@ -1213,6 +1228,47 @@ class SeriesMixin:
             )
         )
         return {"status": "ok", "data": result}
+
+    async def series_resolve_conflicts_batch(self):
+        actor = await self._series_admin(check_csrf=True)
+        from astrbot.api.web import request
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("invalid batch conflict review")
+        items = body.get("items")
+        reason = str(body.get("reason") or "").strip()
+        if not isinstance(items, list) or not items or not reason:
+            raise ValueError("invalid batch conflict review")
+        ready, error = await self._ensure_plugin_ready(wait=False)
+        if not ready:
+            return {"status": "error", "message": error}
+        store = self.initializer.conversation_manager.store
+        resolved = []
+        failed = []
+        for entry in items[:50]:
+            if (
+                not isinstance(entry, dict)
+                or "id" not in entry
+                or "revision" not in entry
+            ):
+                failed.append({"item": entry, "error": "invalid_item"})
+                continue
+            try:
+                res = await store.resolve_series_conflict(
+                    entry["id"], entry["revision"], reason, actor
+                )
+                resolved.append(res)
+            except Exception as exc:
+                failed.append({"id": entry.get("id"), "error": str(exc)})
+        return {
+            "status": "ok",
+            "data": {
+                "resolved": resolved,
+                "failed": failed,
+                "resolved_count": len(resolved),
+            },
+        }
 
     async def series_conflict_detail(self):
         await self._series_admin()

@@ -620,3 +620,222 @@ class GraphStoreWriteMixin:
         normalized_ids = sorted({int(item) for item in source_memory_ids})
         async with write_transaction(self, foreign_keys=True) as db:
             return await self._delete_memories_in_tx(db, normalized_ids)
+
+    async def list_orphan_nodes(self, *, limit: int = 50) -> list[dict[str, object]]:
+        """List graph nodes that have no edges and no entry links."""
+        limit = max(1, min(int(limit), 500))
+        async with self._read_connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, node_key, node_type, node_value, canonical_value, updated_at
+                FROM graph_nodes
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM graph_edges e WHERE e.source_node_id = graph_nodes.id
+                )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM graph_edges e WHERE e.target_node_id = graph_nodes.id
+                )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM graph_entry_nodes gen WHERE gen.node_id = graph_nodes.id
+                )
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "id": int(row["id"]),
+                    "key": str(row["node_key"]),
+                    "type": str(row["node_type"]),
+                    "label": str(row["node_value"]),
+                    "canonical_value": str(row["canonical_value"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in rows
+            ]
+
+    async def cleanup_orphan_nodes(
+        self, node_ids: list[int] | None = None
+    ) -> dict[str, object]:
+        """Delete orphan nodes (zero edges and zero entry links)."""
+        async with write_transaction(self, foreign_keys=True) as db:
+            db.row_factory = aiosqlite.Row
+            orphan_cond = """
+                NOT EXISTS (
+                    SELECT 1 FROM graph_edges e WHERE e.source_node_id = graph_nodes.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM graph_edges e WHERE e.target_node_id = graph_nodes.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM graph_entry_nodes gen WHERE gen.node_id = graph_nodes.id
+                )
+            """
+            if node_ids:
+                clean_ids = sorted({int(x) for x in node_ids})
+                placeholders = ",".join("?" * len(clean_ids))
+                cur = await db.execute(
+                    f"SELECT id FROM graph_nodes WHERE id IN ({placeholders}) AND {orphan_cond}",
+                    clean_ids,
+                )
+            else:
+                cur = await db.execute(
+                    f"SELECT id FROM graph_nodes WHERE {orphan_cond}"
+                )
+            to_delete = [int(row["id"]) for row in await cur.fetchall()]
+            if to_delete:
+                for batch in self._chunked(to_delete, self._SQLITE_BATCH_SIZE):
+                    ph = ",".join("?" * len(batch))
+                    await db.execute(
+                        f"DELETE FROM graph_nodes WHERE id IN ({ph})", batch
+                    )
+            return {
+                "deleted_count": len(to_delete),
+                "deleted_ids": to_delete,
+            }
+
+    async def merge_nodes(
+        self, target_node_id: int, source_node_ids: list[int]
+    ) -> dict[str, object]:
+        """Merge synonym/duplicate source nodes into target_node_id in one transaction."""
+        import json
+
+        target_id = int(target_node_id)
+        sources = sorted({int(x) for x in source_node_ids if int(x) != target_id})
+        if not sources:
+            raise ValueError("至少需要一个不同的待合并节点")
+
+        now = self._now_iso()
+        relinked_edges = 0
+        relinked_entries = 0
+
+        async with write_transaction(self, foreign_keys=True) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id, node_value, metadata FROM graph_nodes WHERE id = ?",
+                (target_id,),
+            )
+            target_row = await cur.fetchone()
+            if target_row is None:
+                raise LookupError(f"目标节点 #{target_id} 不存在")
+
+            ph = ",".join("?" * len(sources))
+            cur_src = await db.execute(
+                f"SELECT id, node_value, metadata FROM graph_nodes WHERE id IN ({ph})",
+                sources,
+            )
+            src_rows = await cur_src.fetchall()
+            if not src_rows:
+                raise LookupError("待合并的源节点不存在")
+            existing_sources = [int(r["id"]) for r in src_rows]
+            src_set = set(existing_sources)
+            src_ph = ",".join("?" * len(existing_sources))
+
+            # 1. Reassign graph_entry_nodes to target_id
+            cur_en = await db.execute(
+                f"SELECT DISTINCT entry_id FROM graph_entry_nodes WHERE node_id IN ({src_ph})",
+                existing_sources,
+            )
+            entry_ids = [int(r["entry_id"]) for r in await cur_en.fetchall()]
+            for eid in entry_ids:
+                await db.execute(
+                    "INSERT OR IGNORE INTO graph_entry_nodes(entry_id, node_id) VALUES (?, ?)",
+                    (eid, target_id),
+                )
+            relinked_entries = len(entry_ids)
+
+            # 2. Relink edges referencing any source node
+            cur_edges = await db.execute(
+                f"""
+                SELECT id, source_node_id, target_node_id, relation_type, weight, confidence
+                FROM graph_edges
+                WHERE source_node_id IN ({src_ph}) OR target_node_id IN ({src_ph})
+                ORDER BY id ASC
+                """,
+                (*existing_sources, *existing_sources),
+            )
+            edges = await cur_edges.fetchall()
+            for edge in edges:
+                eid = int(edge["id"])
+                old_src = int(edge["source_node_id"])
+                old_dst = int(edge["target_node_id"])
+                new_src = target_id if old_src in src_set else old_src
+                new_dst = target_id if old_dst in src_set else old_dst
+
+                if new_src == new_dst:
+                    await db.execute(
+                        "UPDATE graph_entries SET edge_id = NULL WHERE edge_id = ?",
+                        (eid,),
+                    )
+                    await db.execute("DELETE FROM graph_edges WHERE id = ?", (eid,))
+                    continue
+
+                cur_dup = await db.execute(
+                    """
+                    SELECT id, weight, confidence FROM graph_edges
+                    WHERE source_node_id = ? AND target_node_id = ?
+                      AND relation_type = ? AND id != ?
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (new_src, new_dst, edge["relation_type"], eid),
+                )
+                dup = await cur_dup.fetchone()
+                if dup is not None:
+                    dup_id = int(dup["id"])
+                    merged_weight = float(dup["weight"]) + float(edge["weight"])
+                    merged_conf = max(
+                        float(dup["confidence"]), float(edge["confidence"])
+                    )
+                    await db.execute(
+                        "UPDATE graph_edges SET weight = ?, confidence = ?, updated_at = ? WHERE id = ?",
+                        (merged_weight, merged_conf, now, dup_id),
+                    )
+                    await db.execute(
+                        "UPDATE graph_entries SET edge_id = ? WHERE edge_id = ?",
+                        (dup_id, eid),
+                    )
+                    await db.execute("DELETE FROM graph_edges WHERE id = ?", (eid,))
+                else:
+                    await db.execute(
+                        """
+                        UPDATE graph_edges
+                        SET source_node_id = ?, target_node_id = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (new_src, new_dst, now, eid),
+                    )
+                relinked_edges += 1
+
+            # 3. Record merged aliases on target node metadata
+            try:
+                target_meta = json.loads(target_row["metadata"] or "{}")
+                if not isinstance(target_meta, dict):
+                    target_meta = {}
+            except Exception:
+                target_meta = {}
+            aliases = list(target_meta.get("aliases") or [])
+            for r in src_rows:
+                val = str(r["node_value"] or "").strip()
+                if val and val != str(target_row["node_value"]) and val not in aliases:
+                    aliases.append(val)
+            target_meta["aliases"] = aliases[:20]
+            await db.execute(
+                "UPDATE graph_nodes SET metadata = ?, updated_at = ? WHERE id = ?",
+                (self._to_json(target_meta), now, target_id),
+            )
+
+            # 4. Delete merged source nodes (CASCADE cleans graph_entry_nodes)
+            await db.execute(
+                f"DELETE FROM graph_nodes WHERE id IN ({src_ph})",
+                existing_sources,
+            )
+
+        return {
+            "target_node_id": target_id,
+            "merged_node_ids": existing_sources,
+            "relinked_edges": relinked_edges,
+            "relinked_entries": relinked_entries,
+        }

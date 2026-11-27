@@ -5,9 +5,8 @@
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from quart import request
-
 from astrbot.api import logger
+from quart import request
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -100,6 +99,41 @@ class GraphHandler:
             memory_ids.append(memory_id)
         return memory_id
 
+    @staticmethod
+    def _parse_node_types(raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str):
+            items = raw.split(",")
+        else:
+            return []
+        valid = {"person", "topic", "fact", "summary"}
+        return [
+            t
+            for t in dict.fromkeys(str(item or "").strip().lower() for item in items)
+            if t in valid
+        ]
+
+    @staticmethod
+    def _filter_snapshot_by_node_types(
+        snapshot: dict[str, Any], node_types: list[str]
+    ) -> dict[str, Any]:
+        if not node_types:
+            return snapshot
+        allowed = set(node_types)
+        nodes = [
+            node
+            for node in (snapshot.get("nodes") or [])
+            if str(node.get("type") or "").strip().lower() in allowed
+        ]
+        kept_ids = {node["id"] for node in nodes}
+        edges = [
+            edge
+            for edge in (snapshot.get("edges") or [])
+            if edge.get("source") in kept_ids and edge.get("target") in kept_ids
+        ]
+        return {**snapshot, "nodes": nodes, "edges": edges}
+
     async def get_graph_overview(self, memory_engine) -> dict[str, Any]:
         """
         获取图谱概览
@@ -119,6 +153,7 @@ class GraphHandler:
         args = request.args
         session_id = self.utils.optional_text(args.get("session_id"))
         persona_id = self.utils.optional_text(args.get("persona_id"))
+        node_types = self._parse_node_types(args.get("node_types"))
         full_graph = str(args.get("full_graph", "false")).strip().lower() in {
             "1",
             "true",
@@ -174,6 +209,7 @@ class GraphHandler:
                     limit_nodes=limit_nodes,
                     limit_edges=limit_edges,
                 )
+            snapshot = self._filter_snapshot_by_node_types(snapshot, node_types)
             await asyncio.to_thread(self._assign_communities, snapshot)
             return self.utils.ok(
                 self.utils.build_graph_view_payload(
@@ -184,6 +220,7 @@ class GraphHandler:
                     filters={
                         "session_id": session_id,
                         "persona_id": persona_id,
+                        "node_types": node_types,
                     },
                 )
             )
@@ -217,6 +254,7 @@ class GraphHandler:
         query_text = str(payload.get("query", "")).strip()
         session_id = self.utils.optional_text(payload.get("session_id"))
         persona_id = self.utils.optional_text(payload.get("persona_id"))
+        node_types = self._parse_node_types(payload.get("node_types"))
         memory_id_raw = payload.get("memory_id")
 
         try:
@@ -265,6 +303,7 @@ class GraphHandler:
                     limit_nodes=limit_nodes,
                     limit_edges=limit_edges,
                 )
+                snapshot = self._filter_snapshot_by_node_types(snapshot, node_types)
                 await asyncio.to_thread(self._assign_communities, snapshot)
                 return self.utils.ok(
                     self.utils.build_graph_view_payload(
@@ -276,6 +315,7 @@ class GraphHandler:
                         filters={
                             "session_id": session_id,
                             "persona_id": persona_id,
+                            "node_types": node_types,
                         },
                     )
                 )
@@ -290,6 +330,7 @@ class GraphHandler:
                     limit_nodes=limit_nodes,
                     limit_edges=limit_edges,
                 )
+                snapshot = self._filter_snapshot_by_node_types(snapshot, node_types)
                 await asyncio.to_thread(self._assign_communities, snapshot)
                 return self.utils.ok(
                     self.utils.build_graph_view_payload(
@@ -300,6 +341,7 @@ class GraphHandler:
                         filters={
                             "session_id": session_id,
                             "persona_id": persona_id,
+                            "node_types": node_types,
                         },
                     )
                 )
@@ -407,6 +449,7 @@ class GraphHandler:
                 limit_nodes=limit_nodes,
                 limit_edges=limit_edges,
             )
+            snapshot = self._filter_snapshot_by_node_types(snapshot, node_types)
             await asyncio.to_thread(self._assign_communities, snapshot)
             return self.utils.ok(
                 self.utils.build_graph_view_payload(
@@ -421,9 +464,60 @@ class GraphHandler:
                     filters={
                         "session_id": session_id,
                         "persona_id": persona_id,
+                        "node_types": node_types,
                     },
                 )
             )
         except Exception as exc:
             logger.error(f"[PageAPI] 图谱查询失败: {exc}", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def merge_nodes(self, memory_engine) -> dict[str, Any]:
+        """Merge synonym graph nodes into a target node."""
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self.utils.error("请求体必须是 JSON 对象")
+        try:
+            target_node_id = int(payload.get("target_node_id"))
+            raw_sources = payload.get("source_node_ids") or []
+            if not isinstance(raw_sources, list) or not raw_sources:
+                return self.utils.error("source_node_ids 不能为空")
+            source_node_ids = [int(x) for x in raw_sources]
+        except (TypeError, ValueError):
+            return self.utils.error("节点 ID 必须是整数")
+
+        graph_store = self.utils.get_graph_store(memory_engine)
+        if graph_store is None:
+            return self.utils.error("图谱存储未启用")
+        try:
+            result = await graph_store.merge_nodes(target_node_id, source_node_ids)
+            invalidate = getattr(memory_engine, "_invalidate_search_cache", None)
+            if callable(invalidate):
+                invalidate()
+            return self.utils.ok(result)
+        except (ValueError, LookupError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error(f"[PageAPI] 合并图谱节点失败: {exc}", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def cleanup_orphans(self, memory_engine) -> dict[str, Any]:
+        """Delete orphan graph nodes with no edges or entry links."""
+        payload = await request.get_json(silent=True) or {}
+        raw_ids = payload.get("node_ids") if isinstance(payload, dict) else None
+        node_ids: list[int] | None = None
+        if isinstance(raw_ids, list) and raw_ids:
+            try:
+                node_ids = [int(x) for x in raw_ids]
+            except (TypeError, ValueError):
+                return self.utils.error("node_ids 必须是整数列表")
+
+        graph_store = self.utils.get_graph_store(memory_engine)
+        if graph_store is None:
+            return self.utils.error("图谱存储未启用")
+        try:
+            result = await graph_store.cleanup_orphan_nodes(node_ids=node_ids)
+            return self.utils.ok(result)
+        except Exception as exc:
+            logger.error(f"[PageAPI] 清理孤立节点失败: {exc}", exc_info=True)
             return self.utils.error(str(exc))

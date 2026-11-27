@@ -100,6 +100,9 @@ def _install_astrbot_stubs() -> None:
         def custom_filter(self, *args, **kwargs):
             return lambda func: func
 
+        def command(self, *args, **kwargs):
+            return lambda func: func
+
         def command_group(self, *args, **kwargs):
             class _CommandGroup:
                 def __call__(self, func):

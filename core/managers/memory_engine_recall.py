@@ -9,7 +9,6 @@ from dataclasses import replace
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
@@ -523,6 +522,12 @@ class MemoryEngineRecallMixin:
         sort_key: str = "created_desc",
         page: int = 1,
         page_size: int = 20,
+        importance_min: float | None = None,
+        importance_max: float | None = None,
+        zero_access: bool = False,
+        stale_days: int | None = None,
+        memory_origin: str | None = None,
+        has_source: bool | None = None,
     ) -> dict[str, Any]:
         """
         分页列出记忆（供管理页面使用），支持会话/状态/类型/关键词过滤与排序。
@@ -568,8 +573,63 @@ class MemoryEngineRecallMixin:
             params.append(status)
 
         if memory_type:
-            where_clauses.append(f"{type_expr} = ?")
-            params.append(memory_type.upper())
+            canonical_groups = {
+                "GROUP:FACT": ("FACT", "FACTUAL"),
+                "GROUP:EVENT": ("EVENT", "EPISODIC"),
+                "GROUP:PREFERENCE": ("PREFERENCE", "OPINION"),
+                "GROUP:RELATIONAL": ("RELATIONAL",),
+                "GROUP:PLANNED": ("PLANNED",),
+                "GROUP:GENERAL": ("GENERAL",),
+            }
+            upper_type = memory_type.upper()
+            grouped = canonical_groups.get(upper_type)
+            if grouped:
+                placeholders = ",".join("?" for _ in grouped)
+                where_clauses.append(f"{type_expr} IN ({placeholders})")
+                params.extend(grouped)
+            else:
+                where_clauses.append(f"{type_expr} = ?")
+                params.append(upper_type)
+
+        norm_importance_expr = (
+            "CASE WHEN COALESCE(CAST(json_extract(metadata, '$.importance') AS REAL), 0.5) > 1.0 "
+            "THEN COALESCE(CAST(json_extract(metadata, '$.importance') AS REAL), 0.5) / 10.0 "
+            "ELSE COALESCE(CAST(json_extract(metadata, '$.importance') AS REAL), 0.5) END"
+        )
+        if importance_min is not None:
+            where_clauses.append(f"{norm_importance_expr} >= ?")
+            params.append(float(importance_min))
+        if importance_max is not None:
+            where_clauses.append(f"{norm_importance_expr} <= ?")
+            params.append(float(importance_max))
+        if zero_access:
+            where_clauses.append(
+                "COALESCE(CAST(json_extract(metadata, '$.access_count') AS INTEGER), 0) = 0"
+            )
+        if stale_days is not None and stale_days > 0:
+            cutoff = time.time() - float(stale_days) * 86400.0
+            where_clauses.append(
+                "COALESCE("
+                "CAST(json_extract(metadata, '$.last_access_time') AS REAL), "
+                "CAST(json_extract(metadata, '$.create_time') AS REAL), 0"
+                ") <= ?"
+            )
+            params.append(cutoff)
+        if memory_origin:
+            where_clauses.append(
+                "LOWER(COALESCE(json_extract(metadata, '$.memory_origin'), '')) = ?"
+            )
+            params.append(str(memory_origin).strip().lower())
+        if has_source is True:
+            where_clauses.append(
+                "(COALESCE(json_extract(metadata, '$.has_source'), 0) = 1 "
+                "OR COALESCE(CAST(json_extract(metadata, '$.source_message_count') AS INTEGER), 0) > 0)"
+            )
+        elif has_source is False:
+            where_clauses.append(
+                "(COALESCE(json_extract(metadata, '$.has_source'), 0) = 0 "
+                "AND COALESCE(CAST(json_extract(metadata, '$.source_message_count') AS INTEGER), 0) = 0)"
+            )
 
         if keyword:
             keyword_like = f"%{keyword}%"

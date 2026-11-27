@@ -19,6 +19,7 @@ from astrbot.core.agent.message import TextPart
 from ..memory_scope import (
     classify_umo,
     current_adapter_access,
+    fetch_group_culture_context,
     is_event_excluded_by_series,
     is_event_memory_allowed,
     is_event_privacy_muted,
@@ -570,7 +571,22 @@ class MemoryRecall:
                             f"{injection_method}: {fallback_reason}"
                         )
 
-                    memory_str = format_memories_for_injection(memory_list)
+                    culture_items: list[dict[str, str]] | None = None
+                    if is_group and deadline.remaining() > 0.12:
+                        try:
+                            culture_items = await fetch_group_culture_context(
+                                getattr(self, "context", None),
+                                session_id,
+                                query=actual_query,
+                                limit=4,
+                                timeout=min(0.4, deadline.remaining() * 0.25),
+                            )
+                        except Exception:
+                            culture_items = None
+
+                    memory_str = format_memories_for_injection(
+                        memory_list, culture_items=culture_items or None
+                    )
 
                     source_records = []
                     if len(recalled_memories) > 20:

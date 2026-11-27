@@ -4,9 +4,8 @@
 
 from typing import TYPE_CHECKING, Any
 
-from quart import request
-
 from astrbot.api import logger
+from quart import request
 
 from ..memory_revision import MemoryRevisionConflict, memory_revision
 from ..memory_source import restore_source_messages
@@ -28,7 +27,11 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         "status",
         "create_time",
         "updated_at",
+        "last_access_time",
+        "access_count",
         "memory_origin",
+        "has_source",
+        "source_message_count",
         "summary_quality",
         "session_id",
         "persona_id",
@@ -121,6 +124,36 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         except (TypeError, ValueError):
             return self.utils.error("分页参数无效")
 
+        extra_filters: dict[str, Any] = {}
+        try:
+            imp_min_raw = self.utils.optional_text(query.get("importance_min"))
+            imp_max_raw = self.utils.optional_text(query.get("importance_max"))
+            if imp_min_raw is not None:
+                val = float(imp_min_raw)
+                extra_filters["importance_min"] = val / 10.0 if val > 1.0 else val
+            if imp_max_raw is not None:
+                val = float(imp_max_raw)
+                extra_filters["importance_max"] = val / 10.0 if val > 1.0 else val
+            stale_raw = self.utils.optional_text(query.get("stale_days"))
+            if stale_raw is not None:
+                extra_filters["stale_days"] = max(1, int(stale_raw))
+        except (TypeError, ValueError):
+            return self.utils.error("筛选参数无效")
+
+        zero_access_raw = str(query.get("zero_access", "")).strip().lower()
+        if zero_access_raw in {"1", "true", "yes", "on"}:
+            extra_filters["zero_access"] = True
+
+        origin_filter = self.utils.optional_text(query.get("memory_origin"))
+        if origin_filter and origin_filter.lower() != "all":
+            extra_filters["memory_origin"] = origin_filter
+
+        has_source_raw = str(query.get("has_source", "")).strip().lower()
+        if has_source_raw in {"1", "true", "yes"}:
+            extra_filters["has_source"] = True
+        elif has_source_raw in {"0", "false", "no"}:
+            extra_filters["has_source"] = False
+
         try:
             page_data = await memory_engine.list_memories_page(
                 session_id=session_id,
@@ -130,6 +163,7 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 sort_key=sort_key,
                 page=page,
                 page_size=page_size,
+                **extra_filters,
             )
         except Exception as exc:
             logger.error(f"[PageAPI] 获取记忆列表失败: {exc}", exc_info=True)
