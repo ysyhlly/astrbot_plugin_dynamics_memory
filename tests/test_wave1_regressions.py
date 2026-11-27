@@ -402,9 +402,19 @@ async def test_shared_config_inheritance_models_persona_and_private_group_source
         def __init__(self, pid):
             self.provider_config = {"id": pid}
             self.is_systemone_provider = False
+            self._api_key = "fake-key"
 
         async def text_chat(self, *args, **kwargs):
             return SimpleNamespace(completion_text="{}")
+
+        def get_current_key(self) -> str:
+            return self._api_key
+
+        def get_models(self) -> list[str]:
+            return ["fake-model"]
+
+        def set_key(self, key: str) -> None:
+            self._api_key = key
 
     emb_shared = _FakeEmb("shared-emb")
     emb_other = _FakeEmb("other-emb")

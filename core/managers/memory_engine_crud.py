@@ -9,7 +9,6 @@ from collections import OrderedDict
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
@@ -418,6 +417,12 @@ class MemoryEngineCrudMixin:
         if superseded_ids:
             await self.mark_memories_superseded(superseded_ids, doc_id)
         self._invalidate_search_cache()
+        on_added = getattr(self, "_on_memory_added_hook", None)
+        if callable(on_added):
+            try:
+                on_added(doc_id, content, full_metadata, importance)
+            except Exception as exc:
+                logger.debug("[MemoryEngine] on_memory_added_hook ignored: %s", exc)
         return doc_id
 
     async def _publish_verified_summary(self, db, doc_id, op_id, needs_repair) -> bool:

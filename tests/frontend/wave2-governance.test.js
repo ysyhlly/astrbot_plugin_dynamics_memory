@@ -161,3 +161,53 @@ test("Wave2GovernanceController escapes XSS in correction queue and updates syst
   assert.ok(!corrList.innerHTML.includes("<img src=x"));
   assert.ok(batchBar.innerHTML.includes("ev&lt;1&gt;"));
 });
+
+test("Wave2GovernanceController renders Wave 3 event bus status & milestone keepsakes safely", async () => {
+  const elements = new Map();
+  const statusEl = makeElement("div");
+  statusEl.id = "w3-ms-bus-status";
+  const listEl = makeElement("div");
+  listEl.id = "w3-ms-list";
+  elements.set("w3-ms-bus-status", statusEl);
+  elements.set("w3-ms-list", listEl);
+
+  const doc = {
+    head: makeElement("head"),
+    getElementById: (id) => elements.get(id) || null,
+    querySelector: () => null,
+    createElement: (tag) => makeElement(tag),
+  };
+
+  const api = {
+    async get(path) {
+      if (path === "milestones") {
+        return {
+          event_bus: { subscribed: true, topic_archived_total: 5 },
+          total: 1,
+          items: [
+            {
+              id: 1,
+              memory_id: 42,
+              day_key: "2026-11-27",
+              title: "一周年<script>x</script>",
+              summary: "共同回忆摘要",
+              image_path: "/data/p.png",
+              keepsake_id: "ks_99",
+              world_deep_link: "astrbot_plugin_dynamics_world?page=cabin&keepsake=ks_99",
+              event_emitted: true,
+            },
+          ],
+        };
+      }
+      return {};
+    },
+  };
+
+  const ctrl = new Wave2GovernanceController(api, doc);
+  await ctrl.loadMilestones();
+  assert.match(statusEl.textContent, /已订阅 topic_archived/);
+  assert.match(statusEl.textContent, /累计归档话题 5 条/);
+  assert.ok(!listEl.innerHTML.includes("<script>"));
+  assert.ok(listEl.innerHTML.includes("一周年&lt;script&gt;x&lt;/script&gt;"));
+  assert.ok(listEl.innerHTML.includes("小屋纪念品 #ks_99"));
+});

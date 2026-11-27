@@ -92,9 +92,11 @@ export class Wave2GovernanceController {
     this._mountConflictBatchBar();
     this._mountCorrectionQueuePanel();
     this._mountHealthCheckupPanel();
+    this._mountMilestonesPanel();
     this._mountMemoryQuickFilters();
     this._mountGraphGovernanceControls();
     this.refreshBadges().catch(() => {});
+    this.loadMilestones().catch(() => {});
   }
 
   _installGlobalHooks() {
@@ -859,6 +861,111 @@ export class Wave2GovernanceController {
       } finally {
         e.currentTarget.disabled = false;
       }
+    });
+  }
+
+  /* ================================================================
+     7. Wave 3: Event Bus & Cross-Plugin Milestone Keepsake Panel
+     ================================================================ */
+  _mountMilestonesPanel() {
+    const sysBody = this.doc.querySelector("#page-system .page-body");
+    if (!sysBody || this.doc.getElementById("w3-milestones-panel")) return;
+    const panel = this.doc.createElement("div");
+    panel.id = "w3-milestones-panel";
+    panel.className = "system-panel mb-6 w2-panel";
+    panel.innerHTML = `
+      <div class="system-panel-header">
+        <div class="system-panel-title">事件总线沉淀 &amp; 3D 小屋里程碑纪念品</div>
+        <div class="system-panel-tools">
+          <button type="button" class="btn btn-secondary btn-sm" id="w3-ms-refresh">刷新状态</button>
+        </div>
+      </div>
+      <p class="workflow-hint">订阅核心 topic_archived 事件高信噪比沉淀；高重要度共同回忆/纪念日自动生成拍立得并上架 3D 小屋（每群每日上限 1 次）。</p>
+      <div id="w3-ms-bus-status" class="w2-item-meta" style="margin-bottom:8px"></div>
+      <div class="w2-row" style="margin-bottom:8px">
+        <input id="w3-ms-mem-id" class="input input-sm" type="number" min="1" placeholder="输入记忆 ID 生成拍立得纪念品" style="width:220px" />
+        <label class="w2-row" style="font-size:12px"><input id="w3-ms-force" type="checkbox" /> <span>忽略每日频控</span></label>
+        <button type="button" class="btn btn-primary btn-sm" id="w3-ms-trigger-btn">生成纪念品</button>
+      </div>
+      <p id="w3-ms-feedback" class="text-tertiary" style="font-size:12px;margin-bottom:6px"></p>
+      <div id="w3-ms-list"></div>
+    `;
+    const healthPanel = this.doc.getElementById("w2-health-panel");
+    sysBody.insertBefore(panel, healthPanel || null);
+    panel.querySelector("#w3-ms-refresh")?.addEventListener("click", () => this.loadMilestones());
+    panel.querySelector("#w3-ms-trigger-btn")?.addEventListener("click", async (e) => {
+      const memId = Number(panel.querySelector("#w3-ms-mem-id")?.value);
+      const force = Boolean(panel.querySelector("#w3-ms-force")?.checked);
+      const fb = panel.querySelector("#w3-ms-feedback");
+      if (!Number.isInteger(memId) || memId <= 0) {
+        if (fb) fb.textContent = "请输入有效的记忆编号。";
+        return;
+      }
+      e.currentTarget.disabled = true;
+      try {
+        await this.api.post("milestones/trigger", { memory_id: memId, force });
+        if (fb) fb.textContent = `已为记忆 #${memId} 生成里程碑纪念品。`;
+        showToast(`已生成记忆 #${memId} 的里程碑纪念品`);
+        await this.loadMilestones();
+      } catch (err) {
+        if (fb) fb.textContent = `生成失败：${err.message || err}`;
+      } finally {
+        e.currentTarget.disabled = false;
+      }
+    });
+  }
+
+  async loadMilestones() {
+    const statusEl = this.doc?.getElementById("w3-ms-bus-status");
+    const listEl = this.doc?.getElementById("w3-ms-list");
+    if (!statusEl && !listEl) return null;
+    try {
+      const data = await this.api.get("milestones", { limit: 20 });
+      this._renderMilestones(data);
+      return data;
+    } catch (err) {
+      if (listEl) listEl.innerHTML = `<p class="text-tertiary" style="font-size:12px">加载失败：${esc(err.message || err)}</p>`;
+      return null;
+    }
+  }
+
+  _renderMilestones(data) {
+    const statusEl = this.doc?.getElementById("w3-ms-bus-status");
+    const listEl = this.doc?.getElementById("w3-ms-list");
+    const bus = data?.event_bus || {};
+    if (statusEl) {
+      const subText = bus.subscribed ? "已订阅 topic_archived" : "未连接核心总线（独立降级运行）";
+      statusEl.textContent = `Dynamics Event Bus：${subText} · 累计归档话题 ${Number(bus.topic_archived_total || 0)} 条 · 里程碑记录 ${Number(data?.total || 0)} 条`;
+    }
+    if (!listEl) return;
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (!items.length) {
+      listEl.innerHTML = `<p class="text-tertiary" style="font-size:12px">暂无已生成的里程碑纪念品记录。</p>`;
+      return;
+    }
+    listEl.innerHTML = items
+      .map((item) => {
+        const badges = [
+          item.image_path ? "已配拍立得" : "纯文本摘要",
+          item.keepsake_id ? `小屋纪念品 #${esc(item.keepsake_id)}` : "待同步小屋",
+          item.event_emitted ? "已广播总线" : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return `<div class="w2-item">
+          <div class="w2-item-meta">记忆 #${esc(item.memory_id)} · ${esc(item.day_key || "")} · ${badges}</div>
+          <div class="w2-item-text"><strong>${esc(item.title)}</strong> — ${esc(item.summary)}</div>
+          <div class="w2-row" style="margin-top:6px">
+            <button type="button" class="btn btn-secondary btn-sm" data-w3-ms-peek="${esc(item.memory_id)}">查看原记忆</button>
+            ${item.world_deep_link ? `<span class="w2-item-meta">深链：${esc(item.world_deep_link)}</span>` : ""}
+          </div>
+        </div>`;
+      })
+      .join("");
+    listEl.querySelectorAll("[data-w3-ms-peek]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        window.lmOpenPeekMemory?.({ memory_id: Number(btn.dataset.w3MsPeek) });
+      });
     });
   }
 }

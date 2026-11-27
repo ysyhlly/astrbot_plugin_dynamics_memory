@@ -626,3 +626,74 @@ class GovernanceHandler:
             return self.utils.error(str(exc))
 
         return self.utils.ok({"proposal": updated})
+
+    async def list_milestones(self) -> dict[str, Any]:
+        """List Event Bus subscription state and recorded milestone keepsakes."""
+        svc = getattr(self.plugin, "event_bus_service", None)
+        if svc is None:
+            return self.utils.ok(
+                {
+                    "event_bus": {
+                        "subscribed": False,
+                        "topic_archived_total": 0,
+                        "session_archived_count": 0,
+                        "last_archived_at": None,
+                    },
+                    "daily_limit_per_group": 1,
+                    "items": [],
+                    "total": 0,
+                }
+            )
+        umo = self.utils.optional_text(request.args.get("umo"))
+        try:
+            limit = max(1, min(int(request.args.get("limit", 30)), 100))
+        except (TypeError, ValueError):
+            limit = 30
+        try:
+            data = await svc.get_status_and_milestones(umo=umo, limit=limit)
+            return self.utils.ok(data)
+        except Exception as exc:
+            logger.error("[Governance] 读取里程碑状态失败: %s", exc, exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def trigger_milestone(self, memory_engine: Any) -> dict[str, Any]:
+        """Manually generate a polaroid keepsake milestone from a memory ID."""
+        svc = getattr(self.plugin, "event_bus_service", None)
+        if svc is None:
+            return self.utils.error("里程碑服务未初始化")
+        payload = await request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return self.utils.error("请求体必须是 JSON 对象")
+        try:
+            memory_id = int(payload.get("memory_id"))
+        except (TypeError, ValueError):
+            return self.utils.error("memory_id 必须是整数")
+        force = bool(payload.get("force", False))
+
+        mem = await memory_engine.get_memory_by_id(memory_id)
+        if not mem:
+            return self.utils.error(f"记忆 #{memory_id} 不存在")
+        meta = _parse_meta(mem.get("metadata"))
+        umo = str(meta.get("session_id") or meta.get("source_session_id") or "").strip()
+        if not umo:
+            return self.utils.error("该记忆缺少所属会话 UMO，无法生成里程碑")
+        res = await svc.trigger_milestone_keepsake(
+            memory_id=memory_id,
+            umo=umo,
+            content=str(mem.get("text") or ""),
+            metadata=meta,
+            force=force,
+        )
+        if not res.get("ok"):
+            reason = res.get("reason")
+            msg = (
+                "该群今日已达里程碑纪念品生成上限（每日 1 次），勾选强制可覆盖"
+                if reason == "daily_limit_reached"
+                else (
+                    "该记忆已生成过里程碑纪念品"
+                    if reason == "already_recorded"
+                    else f"生成失败: {reason}"
+                )
+            )
+            return self.utils.error(msg)
+        return self.utils.ok(res)

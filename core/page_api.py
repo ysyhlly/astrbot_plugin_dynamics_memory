@@ -202,6 +202,8 @@ class PluginPageApi:
             ("corrections/review", self.review_correction, ["POST"]),
             ("graph/merge-nodes", self.merge_graph_nodes, ["POST"]),
             ("graph/cleanup-orphans", self.cleanup_graph_orphans, ["POST"]),
+            ("milestones", self.list_milestones, ["GET"]),
+            ("milestones/trigger", self.trigger_milestone, ["POST"]),
         ):
             register_panel_api(
                 self.plugin,
@@ -606,3 +608,12 @@ class PluginPageApi:
         if error:
             return error
         return await self.graph_handler.cleanup_orphans(ready["memory_engine"])
+
+    async def list_milestones(self):
+        return await self.governance_handler.list_milestones()
+
+    async def trigger_milestone(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.governance_handler.trigger_milestone(ready["memory_engine"])

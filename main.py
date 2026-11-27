@@ -40,6 +40,7 @@ from astrbot.api.star import Context, Star, StarTools
 from .core.base.config_manager import ConfigManager
 from .core.blocking_policy import BlockingPolicyGate
 from .core.command_handler import CommandHandler
+from .core.event_bus_milestones import EventBusAndMilestoneService
 from .core.event_handler import EventHandler
 from .core.event_handler_modules.memory_recall import should_skip_group_recall_query
 from .core.evidence_projection import MAX_MATERIALS, PURPOSES
@@ -224,6 +225,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
             Path(data_dir) / "member_corrections.sqlite3"
         )
         self.member_card_service = MemberMemoryCardService(Path(data_dir) / "tmp_cards")
+        self.event_bus_service = EventBusAndMilestoneService(
+            self, Path(data_dir) / "memory_milestones.sqlite3"
+        )
 
         self.page_api = PluginPageApi(self)
         self.page_api.register_routes()
@@ -273,6 +277,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         """[Event Hook] AstrBot 加载完成后立即唤醒等待中的初始化/重试任务。"""
         if self._terminating or not self.series_runtime_allowed():
             return
+        bus_svc = getattr(self, "event_bus_service", None)
+        if bus_svc is not None:
+            bus_svc.ensure_subscribed()
         initializer = getattr(self, "initializer", None)
         if initializer is None:
             return
@@ -369,6 +376,15 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
                 )
 
             self._register_agent_tools_if_needed()
+
+            bus_svc = getattr(self, "event_bus_service", None)
+            if bus_svc is not None:
+                bus_svc.ensure_subscribed()
+                engine = getattr(self.initializer, "memory_engine", None)
+                if engine is not None:
+                    setattr(
+                        engine, "_on_memory_added_hook", bus_svc.schedule_if_milestone
+                    )
 
             data_dir = getattr(self, "_data_dir", None)
             if getattr(self, "evidence_service", None) is None and data_dir:
@@ -1123,6 +1139,9 @@ class LivingMemoryPlugin(PluginHelpersMixin, SeriesMixin, Star):
         """Cleanup logic when plugin stops"""
         logger.info("LivingMemory 插件正在停止...")
         self._terminating = True
+        bus_svc = getattr(self, "event_bus_service", None)
+        if bus_svc is not None:
+            bus_svc.unsubscribe()
         recall_runtime = getattr(self, "_recall_runtime", None)
         if recall_runtime:
             # Drain recall work before closing the stores and engine it may use.
