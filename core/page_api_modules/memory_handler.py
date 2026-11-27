@@ -4,8 +4,9 @@
 
 from typing import TYPE_CHECKING, Any
 
-from astrbot.api import logger
 from quart import request
+
+from astrbot.api import logger
 
 from ..memory_revision import MemoryRevisionConflict, memory_revision
 from ..memory_source import restore_source_messages

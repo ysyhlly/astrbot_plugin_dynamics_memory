@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import aiosqlite
+
 from astrbot.api import logger
 
 from ...storage.sqlite_connection import open_connection

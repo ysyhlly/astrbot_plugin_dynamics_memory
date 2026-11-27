@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
+
 from astrbot.api import logger
 
 from .graph_store_read import GraphStoreReadMixin

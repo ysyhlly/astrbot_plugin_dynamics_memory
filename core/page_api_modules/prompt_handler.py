@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from astrbot.api import logger
 from quart import request
+
+from astrbot.api import logger
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils

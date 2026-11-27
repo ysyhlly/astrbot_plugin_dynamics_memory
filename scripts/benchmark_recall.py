@@ -24,11 +24,12 @@ async def benchmark(args):
     sys.path[:0] = [str(root.parent), str(root.parents[2])]
     import faiss
     import numpy as np
-    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
     from astrbot_plugin_dynamics_memory.core.faiss_async_persist import (
         install_async_persist,
     )
     from astrbot_plugin_dynamics_memory.core.managers.memory_engine import MemoryEngine
+
+    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
     faiss.omp_set_num_threads(1)
 

@@ -510,6 +510,7 @@ class VectorRetriever:
             [(a, b, similarity), ...]，其中 a < b 且 similarity >= threshold，去重。
         """
         import numpy as np
+
         from astrbot.api import logger as _logger
 
         unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))

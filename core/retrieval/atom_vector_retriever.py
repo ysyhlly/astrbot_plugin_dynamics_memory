@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
 from astrbot.api import logger
 
 from ..faiss_async_persist import (

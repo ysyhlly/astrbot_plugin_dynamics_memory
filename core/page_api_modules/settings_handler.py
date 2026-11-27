@@ -11,8 +11,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
 from quart import request
+
+from astrbot.api import logger
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = PLUGIN_ROOT / "_conf_schema.json"

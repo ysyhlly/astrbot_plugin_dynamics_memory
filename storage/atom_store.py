@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
+
 from astrbot.api import logger
 
 from ..core.memory_scope import adapter_sql, normalize_interaction_types

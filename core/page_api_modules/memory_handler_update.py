@@ -6,8 +6,9 @@ MemoryHandler 的 MemoryHandlerUpdateMixin 拆分模块
 import time
 from typing import Any
 
-from astrbot.api import logger
 from quart import request
+
+from astrbot.api import logger
 
 from ..memory_revision import MemoryRevisionConflict, memory_revision
 

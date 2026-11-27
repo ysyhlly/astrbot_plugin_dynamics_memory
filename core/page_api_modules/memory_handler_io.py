@@ -9,8 +9,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from astrbot.api import logger
 from quart import request
+
+from astrbot.api import logger
 
 from ..memory_source import restore_source_messages
 from ..memory_transfer import (

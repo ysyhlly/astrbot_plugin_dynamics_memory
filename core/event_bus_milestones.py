@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
 from astrbot.api import logger
 
 from .. import series_panels
