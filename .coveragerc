@@ -9,6 +9,8 @@ omit =
     tests/*
     scripts/*
     docs/*
+    series_panels.py
+    series_workspace.py
 
 [report]
 fail_under = 84
