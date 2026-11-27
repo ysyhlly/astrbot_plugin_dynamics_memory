@@ -1515,6 +1515,15 @@ class TestRouteRegistration:
         "evidence/insights": "GET",
         "evidence/correct": "POST",
         "storage/repair": "POST",
+        "governance/health": "GET",
+        "governance/merge": "POST",
+        "governance/bulk_action": "POST",
+        "corrections": "GET",
+        "corrections/review": "POST",
+        "graph/merge-nodes": "POST",
+        "graph/cleanup-orphans": "POST",
+        "milestones": "GET",
+        "milestones/trigger": "POST",
     }
 
     def test_registers_all_routes(self):
@@ -1531,6 +1540,9 @@ class TestRouteRegistration:
         for route, handler, _, description in plugin._api_routes:
             assert description, f"{route} 缺少描述"
             assert callable(handler)
+            assert handler.__code__.co_name == "scoped_handler", (
+                f"{route} 必须经 _scoped (require_series_admin) 包装"
+            )
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX
