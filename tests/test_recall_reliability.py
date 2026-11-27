@@ -145,7 +145,9 @@ async def test_graph_failure_preserves_document_results(failure):
     dual = DualRouteRetriever(
         SimpleNamespace(search=AsyncMock(return_value=[good])), graph, AsyncMock()
     )
-    assert await dual.search("coffee") == [good]
+    results = await dual.search("coffee")
+    assert [r.doc_id for r in results] == [good.doc_id]
+    assert results[0].content == good.content
 
 
 @pytest.mark.asyncio
@@ -581,7 +583,14 @@ async def test_atom_route_recovers_a_live_fact_when_document_routes_miss(
     atom = MemoryAtom(0, content="coffee preference")
     memory_id = await engine.add_memory("summary", atoms=[atom])
     monkeypatch.setattr(
-        engine.dual_route_retriever, "search", AsyncMock(return_value=[])
+        engine.dual_route_retriever.document_retriever,
+        "search",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        engine.dual_route_retriever.graph_retriever,
+        "search",
+        AsyncMock(return_value=[]),
     )
     results = await engine.search_memories("coffee")
     assert [result.doc_id for result in results] == [memory_id]

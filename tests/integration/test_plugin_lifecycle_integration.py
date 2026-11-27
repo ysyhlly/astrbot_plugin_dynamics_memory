@@ -66,11 +66,10 @@ async def test_page_routes_are_registered_while_providers_are_pending(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from astrbot_plugin_dynamics_memory import series_panels as sp_mod
     from astrbot_plugin_dynamics_memory.core import page_api as page_api_mod
 
-    monkeypatch.setattr(
-        page_api_mod, "require_series_admin", AsyncMock(return_value="admin")
-    )
+    monkeypatch.setattr(sp_mod, "require_series_admin", AsyncMock(return_value="admin"))
     monkeypatch.setattr(page_api_mod, "request", SimpleNamespace(args={}))
     plugin = await _build_plugin(monkeypatch, tmp_path)
     try:

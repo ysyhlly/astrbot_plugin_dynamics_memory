@@ -273,7 +273,7 @@ async def test_custom_system_template_keeps_date_variable_support(processor):
     manager = prompt_manager.get_prompt_manager()
     manager.update_prompt("memory_system_prompt_base", "自定义 {current_date}")
     system_prompt = await processor._build_system_prompt_with_persona(None)
-    assert datetime.now().strftime("%Y-%m-%d") in system_prompt
+    assert processor._current_date_str()[:10] in system_prompt
     assert "{current_date}" not in system_prompt
 
 

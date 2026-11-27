@@ -102,6 +102,7 @@ async def test_handle_all_group_messages_and_limit_cleanup(
     handler, conversation_manager
 ):
     event = _make_event(group=True)
+    handler._group_capture._LIMIT_CHECK_INTERVAL = 1
     handler.config_manager._config["session_manager"]["max_messages_per_session"] = 10
     conversation_manager.store.get_message_count = AsyncMock(return_value=12)
     conversation_manager.get_session_metadata = AsyncMock(return_value=5)

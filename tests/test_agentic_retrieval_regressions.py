@@ -159,8 +159,9 @@ async def test_stale_graph_candidate_cannot_cross_parent_memory_scope(engine, bo
     )
     engine.atom_retriever = None
     # 图索引可能落后于父文档；最终取到的父文档元数据才是这条结果的权限依据。
+    # Recall-v2 在双路水合阶段即按父文档权限过滤，越权图候选不会泄露到返回结果。
     raw = await dual.search("parent facts", **allowed)
-    assert len(raw) == 1 and raw[0].metadata[boundary] == "other"
+    assert raw == []
     outcome = await engine.search_memories_agentic(query="parent facts", **allowed)
     assert outcome.results == []
     assert outcome.status == "no_candidates"
@@ -187,7 +188,7 @@ async def test_all_real_nested_routes_failing_is_error(engine):
         "document.vector",
         "graph.keyword",
         "graph.vector",
-        "atoms",
+        "atom",
     ):
         assert route in out["message"]
     assert "private backend error" not in raw
@@ -317,6 +318,7 @@ async def test_successful_rerank_order_survives_beta(engine):
 
     provider = SimpleNamespace(rerank=AsyncMock(side_effect=score_documents))
     retriever.rerank_enabled = True
+    retriever.rerank_min_score = 0.0
     retriever.rerank_provider_resolver = lambda: provider
     engine.dual_route_retriever = None
     engine.atom_retriever = None
